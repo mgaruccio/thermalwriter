@@ -74,8 +74,9 @@
 
   <!-- RAM card with area chart -->
   <rect x="16" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
+  {% set ram_total_safe = ram_total | default(value=64.0) %}
   {% set ram_fill = theme_accent ~ "44" %}
-  {{ btop_ram(data=ram_used_history, total=64.0, x=16, y=410, w=140, h=54, fill=ram_fill) }}
+  {{ btop_ram(data=ram_used_history, total=ram_total_safe, x=16, y=410, w=140, h=54, fill=ram_fill) }}
   <text x="86" y="420" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_accent }}" text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
   <text x="86" y="452" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="{{ theme_text_dim }}" text-anchor="middle">RAM</text>
 
