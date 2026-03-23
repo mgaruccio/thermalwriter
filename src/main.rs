@@ -11,6 +11,7 @@ use thermalrighter::sensor::SensorHub;
 use thermalrighter::sensor::hwmon::HwmonProvider;
 use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalrighter::sensor::amdgpu::AmdGpuProvider;
+use thermalrighter::sensor::nvidia::NvidiaProvider;
 use thermalrighter::sensor::mangohud::MangoHudProvider;
 use thermalrighter::render::TemplateRenderer;
 use thermalrighter::service::dbus::{self, ServiceState};
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(HwmonProvider::new()));
     sensor_hub.add_provider(Box::new(SysinfoProvider::new()));
     sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
+    sensor_hub.add_provider(Box::new(NvidiaProvider::new()));
     sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
 
     // Setup template renderer
@@ -110,12 +112,14 @@ async fn main() -> Result<()> {
     // Run tick loop — blocks until shutdown signal
     let tick_rate = state.lock().await.tick_rate;
     let jpeg_quality = state.lock().await.jpeg_quality;
+    let rotation = config.display.rotation;
     tick::run_tick_loop(
         &mut transport,
         &mut frame_source,
         &mut sensor_hub,
         tick_rate,
         jpeg_quality,
+        rotation,
         template_rx,
         shutdown_rx,
     ).await?;

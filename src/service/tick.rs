@@ -10,18 +10,66 @@ use crate::render::FrameSource;
 use crate::sensor::SensorHub;
 use crate::transport::Transport;
 
-/// Encode a tiny-skia Pixmap to JPEG bytes.
+/// Rotate raw RGBA pixel data by the given degrees (0, 90, 180, 270).
+/// Returns (new_data, new_width, new_height).
+pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec<u8>, u32, u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let pixel_count = w * h;
+
+    match degrees {
+        0 => (data.to_vec(), width, height),
+        180 => {
+            let mut out = vec![0u8; data.len()];
+            for i in 0..pixel_count {
+                let src = i * 4;
+                let dst = (pixel_count - 1 - i) * 4;
+                out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+            }
+            (out, width, height)
+        }
+        90 => {
+            let mut out = vec![0u8; data.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let src = (y * w + x) * 4;
+                    let dst = (x * h + (h - 1 - y)) * 4;
+                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                }
+            }
+            (out, height, width)
+        }
+        270 => {
+            let mut out = vec![0u8; data.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let src = (y * w + x) * 4;
+                    let dst = ((w - 1 - x) * h + y) * 4;
+                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                }
+            }
+            (out, height, width)
+        }
+        _ => {
+            log::warn!("Unsupported rotation {}, using 0", degrees);
+            (data.to_vec(), width, height)
+        }
+    }
+}
+
+/// Encode a tiny-skia Pixmap to JPEG bytes, with optional rotation.
 ///
 /// tiny-skia uses premultiplied RGBA; we de-multiply before JPEG encoding
 /// since JPEG doesn't support alpha and the image crate expects straight RGB(A).
-pub fn encode_jpeg(pixmap: &Pixmap, quality: u8) -> Result<Vec<u8>> {
-    let width = pixmap.width();
-    let height = pixmap.height();
+pub fn encode_jpeg(pixmap: &Pixmap, quality: u8, rotation: u16) -> Result<Vec<u8>> {
     let data = pixmap.data(); // premultiplied RGBA
 
+    // Rotate if needed
+    let (rotated, out_w, out_h) = rotate_pixels(data, pixmap.width(), pixmap.height(), rotation);
+
     // Convert premultiplied RGBA → straight RGBA
-    let mut rgba = Vec::with_capacity(data.len());
-    for chunk in data.chunks(4) {
+    let mut rgba = Vec::with_capacity(rotated.len());
+    for chunk in rotated.chunks(4) {
         let a = chunk[3] as u16;
         if a == 0 {
             rgba.extend_from_slice(&[0, 0, 0, 0]);
@@ -33,7 +81,7 @@ pub fn encode_jpeg(pixmap: &Pixmap, quality: u8) -> Result<Vec<u8>> {
         }
     }
 
-    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, rgba)
+    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rgba)
         .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
 
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -53,11 +101,12 @@ pub async fn run_tick_loop(
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
     jpeg_quality: u8,
+    rotation: u16,
     mut template_rx: tokio::sync::watch::Receiver<String>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
-    info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}", tick_rate_fps, tick_duration, jpeg_quality);
+    info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}, rotation={}°", tick_rate_fps, tick_duration, jpeg_quality, rotation);
 
     loop {
         let tick_start = Instant::now();
@@ -84,7 +133,7 @@ pub async fn run_tick_loop(
         match frame_source.render(&sensors) {
             Ok(pixmap) => {
                 // Encode to JPEG
-                match encode_jpeg(&pixmap, jpeg_quality) {
+                match encode_jpeg(&pixmap, jpeg_quality, rotation) {
                     Ok(jpeg) => {
                         debug!("Frame rendered: {} bytes JPEG", jpeg.len());
                         if let Err(e) = transport.send_frame(&jpeg) {

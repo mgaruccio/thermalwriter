@@ -15,6 +15,10 @@ pub struct DisplayConfig {
     pub default_layout: String,
     /// JPEG encoding quality (1–100).
     pub jpeg_quality: u8,
+    /// Rotate frames before sending to device (0, 90, 180, 270 degrees).
+    /// Depends on how the cooler is physically mounted. Default 180 for
+    /// Peerless Vision with LCD at bottom.
+    pub rotation: u16,
 }
 
 impl Default for DisplayConfig {
@@ -23,6 +27,7 @@ impl Default for DisplayConfig {
             tick_rate: 2,
             default_layout: "system-stats.html".to_string(),
             jpeg_quality: 85,
+            rotation: 180,
         }
     }
 }

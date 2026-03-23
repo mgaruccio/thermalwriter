@@ -35,7 +35,7 @@ impl FrameSource for MockFrameSource {
 fn jpeg_encode_produces_valid_output() {
     use thermalrighter::service::tick::encode_jpeg;
     let pixmap = Pixmap::new(480, 480).unwrap();
-    let jpeg = encode_jpeg(&pixmap, 85).unwrap();
+    let jpeg = encode_jpeg(&pixmap, 85, 0).unwrap();
     // JPEG files start with FF D8
     assert_eq!(&jpeg[0..2], &[0xFF, 0xD8]);
     assert!(jpeg.len() > 100, "JPEG should be more than 100 bytes");
@@ -45,8 +45,8 @@ fn jpeg_encode_produces_valid_output() {
 fn jpeg_encode_quality_affects_size() {
     use thermalrighter::service::tick::encode_jpeg;
     let pixmap = Pixmap::new(480, 480).unwrap();
-    let jpeg_high = encode_jpeg(&pixmap, 95).unwrap();
-    let jpeg_low = encode_jpeg(&pixmap, 10).unwrap();
+    let jpeg_high = encode_jpeg(&pixmap, 95, 0).unwrap();
+    let jpeg_low = encode_jpeg(&pixmap, 10, 0).unwrap();
     // Higher quality should be >= lower quality in size
     // (for a solid-color image they may be equal, but both must be valid JPEG)
     assert_eq!(&jpeg_high[0..2], &[0xFF, 0xD8]);
@@ -76,7 +76,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
             let mut fs = MockFrameSource { last_template: None };
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, template_rx, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })
@@ -126,7 +126,7 @@ async fn tick_loop_applies_template_update() {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
             let mut fs = TrackingFrameSource { applied: applied_clone };
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, template_rx, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx).await.unwrap();
         })
     });
 

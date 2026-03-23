@@ -3,6 +3,7 @@
 
 pub mod hwmon;
 pub mod amdgpu;
+pub mod nvidia;
 pub mod sysinfo_provider;
 pub mod mangohud;
 

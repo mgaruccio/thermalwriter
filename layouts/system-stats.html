@@ -1,10 +1,10 @@
-<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #1a1a2e; color: #ffffff; font-size: 28px; padding: 16px; gap: 12px;">
-  <div style="font-size: 20px; color: #888888;">thermalrighter</div>
-  <div style="display: flex; flex-direction: column; gap: 8px;">
-    <span style="color: #e94560;">CPU  {{ cpu_temp | default(value="--") }}°C  {{ cpu_util | default(value="--") }}%</span>
-    <span style="color: #0f3460;">GPU  {{ gpu_temp | default(value="--") }}°C  {{ gpu_util | default(value="--") }}%</span>
-    <span style="color: #16213e;">PWR  {{ gpu_power | default(value="--") }}W</span>
-    <span style="color: #533483;">RAM  {{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</span>
-    <span style="color: #e94560;">FPS  {{ fps | default(value="--") }}</span>
-  </div>
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #1a1a2e; padding: 20px; gap: 8px;">
+  <div style="height: 40px; font-size: 32px; color: #888888;">thermalrighter</div>
+  <div style="height: 70px; font-size: 56px; color: #e94560;">{{ cpu_temp | default(value="--") }}°C</div>
+  <div style="height: 40px; font-size: 28px; color: #aaaaaa;">CPU {{ cpu_util | default(value="--") }}%</div>
+  <div style="height: 70px; font-size: 56px; color: #53d8fb;">{{ gpu_temp | default(value="--") }}°C</div>
+  <div style="height: 40px; font-size: 28px; color: #aaaaaa;">GPU {{ gpu_util | default(value="--") }}%  {{ gpu_power | default(value="--") }}W</div>
+  <div style="height: 40px; font-size: 28px; color: #bb86fc;">RAM {{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</div>
+  <div style="height: 40px; font-size: 28px; color: #bb86fc;">VRAM {{ vram_used | default(value="--") }} / {{ vram_total | default(value="--") }} GB</div>
+  <div style="height: 40px; font-size: 28px; color: #03dac6;">{{ fps | default(value="--") }} FPS  {{ frametime | default(value="--") }}ms</div>
 </div>
