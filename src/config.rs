@@ -26,7 +26,7 @@ impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             tick_rate: 2,
-            default_layout: "svg/neon-dash.svg".to_string(),
+            default_layout: "svg/neon-dash-v2.svg".to_string(),
             jpeg_quality: 85,
             rotation: 180,
         }
@@ -101,6 +101,7 @@ pub mod builtin_layouts {
     pub const SVG_NEON_DASH: &str = include_str!("../layouts/svg/neon-dash.svg");
     pub const SVG_ARC_GAUGE: &str = include_str!("../layouts/svg/arc-gauge.svg");
     pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
+    pub const SVG_NEON_DASH_V2: &str = include_str!("../layouts/svg/neon-dash-v2.svg");
 
     /// Copy built-in layouts to the layouts directory if they don't already exist.
     /// This lets users edit the layouts without losing the originals on first run.
@@ -113,6 +114,7 @@ pub mod builtin_layouts {
             ("svg/neon-dash.svg", SVG_NEON_DASH),
             ("svg/arc-gauge.svg", SVG_ARC_GAUGE),
             ("svg/cyber-grid.svg", SVG_CYBER_GRID),
+            ("svg/neon-dash-v2.svg", SVG_NEON_DASH_V2),
         ];
         for (name, content) in &layouts {
             let dest = layout_dir.join(name);
