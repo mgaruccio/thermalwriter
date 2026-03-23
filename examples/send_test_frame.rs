@@ -5,6 +5,8 @@
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use std::io::Cursor;
+use std::thread;
+use std::time::Duration;
 use thermalrighter::transport::{Transport, bulk_usb::BulkUsb};
 
 fn main() -> Result<()> {
@@ -28,11 +30,17 @@ fn main() -> Result<()> {
     let jpeg_data = jpeg_buf.into_inner();
     println!("JPEG encoded: {} bytes", jpeg_data.len());
 
-    // Send frame
-    println!("Sending frame...");
-    transport.send_frame(&jpeg_data)?;
-    println!("Done! The display should now show solid red.");
+    // Send several frames — the device may need more than one to latch
+    for i in 1..=5 {
+        println!("Sending frame {}/5...", i);
+        transport.send_frame(&jpeg_data)?;
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    println!("Display should show solid red. Holding for 3 seconds...");
+    thread::sleep(Duration::from_secs(3));
 
     transport.close();
+    println!("Done.");
     Ok(())
 }
