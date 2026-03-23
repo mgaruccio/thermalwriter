@@ -10,7 +10,8 @@ tiny-skia = "0.12"
 taffy = "0.7"
 tera = "1"
 fontdue = "0.9"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "gif", "png"] }
+base64 = "0.22"
 sysinfo = "0.33"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

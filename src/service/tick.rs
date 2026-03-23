@@ -1,5 +1,7 @@
 // Tick loop: polls sensors, renders a frame, encodes to JPEG, sends via transport.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
@@ -7,6 +9,7 @@ use log::{debug, info, warn};
 use tiny_skia::Pixmap;
 
 use crate::render::FrameSource;
+use crate::sensor::history::SensorHistory;
 use crate::sensor::SensorHub;
 use crate::transport::Transport;
 
@@ -96,6 +99,8 @@ pub fn encode_jpeg(pixmap: &Pixmap, quality: u8, rotation: u16) -> Result<Vec<u8
 ///
 /// `template_rx`: watch channel carrying updated HTML template strings.
 /// When a new value arrives, `frame_source.set_template()` is called before the next render.
+///
+/// `sensor_history`: optional shared history buffer — updated each time sensors are polled.
 pub async fn run_tick_loop(
     transport: &mut dyn Transport,
     frame_source: &mut dyn FrameSource,
@@ -105,9 +110,14 @@ pub async fn run_tick_loop(
     rotation: u16,
     mut template_rx: tokio::sync::watch::Receiver<String>,
     shutdown: tokio::sync::watch::Receiver<bool>,
+    sensor_history: Option<Arc<Mutex<SensorHistory>>>,
+    sensor_poll_interval: Duration,
 ) -> Result<()> {
     let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
     info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}, rotation={}°", tick_rate_fps, tick_duration, jpeg_quality, rotation);
+
+    let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
+    let mut cached_sensors: HashMap<String, String> = HashMap::new();
 
     loop {
         let tick_start = Instant::now();
@@ -127,11 +137,24 @@ pub async fn run_tick_loop(
             }
         }
 
-        // Poll sensors
-        let sensors = sensor_hub.poll();
+        // Poll sensors if interval has elapsed (decoupled from render rate)
+        let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
+            let data = sensor_hub.poll();
+            // Record into history buffer if configured
+            if let Some(ref hist) = sensor_history {
+                if let Ok(mut h) = hist.lock() {
+                    h.record(&data);
+                }
+            }
+            cached_sensors = data;
+            last_poll = tick_start;
+            &cached_sensors
+        } else {
+            &cached_sensors
+        };
 
         // Render frame
-        match frame_source.render(&sensors) {
+        match frame_source.render(sensors) {
             Ok(pixmap) => {
                 // Encode to JPEG
                 match encode_jpeg(&pixmap, jpeg_quality, rotation) {

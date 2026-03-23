@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
@@ -8,6 +9,7 @@ use tokio::sync::{Mutex, watch, mpsc};
 use thermalwriter::cli::{Cli, Command};
 use thermalwriter::config::{Config, builtin_layouts};
 use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
@@ -15,8 +17,10 @@ use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::render::TemplateRenderer;
+use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::service::dbus::{self, ServiceState};
 use thermalwriter::service::tick;
+use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::Transport;
 use thermalwriter::transport::bulk_usb::BulkUsb;
 
@@ -70,10 +74,36 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
     sensor_hub.add_provider(Box::new(RaplProvider::new()));
 
+    // Parse layout frontmatter for history/animation config
+    let frontmatter = LayoutFrontmatter::parse(&template);
+
+    // Create sensor history and configure metrics from frontmatter
+    let sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> = if !frontmatter.history_configs.is_empty() {
+        let mut history = SensorHistory::new();
+        for (metric, cfg) in &frontmatter.history_configs {
+            history.configure_metric(metric, cfg.duration);
+        }
+        Some(Arc::new(std::sync::Mutex::new(history)))
+    } else {
+        None
+    };
+
+    // Create theme palette from config
+    let theme_palette = if let Some(manual) = config.theme.manual.clone() {
+        manual
+    } else {
+        ThemePalette::default()
+    };
+
     // Setup renderer — SVG or HTML based on file extension
     let is_svg = config.display.default_layout.ends_with(".svg");
     let mut frame_source: Box<dyn thermalwriter::render::FrameSource> = if is_svg {
-        Box::new(thermalwriter::render::svg::SvgRenderer::new(&template, device_info.width, device_info.height)?)
+        let mut renderer = thermalwriter::render::svg::SvgRenderer::new(&template, device_info.width, device_info.height)?;
+        if let Some(ref hist) = sensor_history {
+            renderer.set_history(hist.clone());
+        }
+        renderer.set_theme(theme_palette);
+        Box::new(renderer)
     } else {
         Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
     };
@@ -120,6 +150,7 @@ async fn main() -> Result<()> {
     let tick_rate = state.lock().await.tick_rate;
     let jpeg_quality = state.lock().await.jpeg_quality;
     let rotation = config.display.rotation;
+    let sensor_poll_interval = Duration::from_millis(config.sensors.poll_interval_ms);
     tick::run_tick_loop(
         &mut transport,
         frame_source.as_mut(),
@@ -129,6 +160,8 @@ async fn main() -> Result<()> {
         rotation,
         template_rx,
         shutdown_rx,
+        sensor_history,
+        sensor_poll_interval,
     ).await?;
 
     transport.close();

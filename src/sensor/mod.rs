@@ -7,6 +7,7 @@ pub mod nvidia;
 pub mod sysinfo_provider;
 pub mod mangohud;
 pub mod rapl;
+pub mod history;
 
 use std::collections::HashMap;
 use anyhow::Result;

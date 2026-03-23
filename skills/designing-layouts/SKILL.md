@@ -48,9 +48,60 @@ Rule of thumb: `height ≈ font-size × 1.2`
 
 This is the single most common layout bug. If text overlaps, check for missing heights.
 
-## Quick Start: Creating a Layout
+## SVG Layouts (Primary Format)
 
-A layout is an HTML file using a CSS subset with Tera template variables for sensor data.
+SVG is the primary layout format. Use the `SvgRenderer` pipeline: SVG template → Tera substitution → resvg → Pixmap.
+
+```xml
+{# history: cpu_util=60s, gpu_temp=120s #}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480">
+  <!-- Background pattern -->
+  {{ background(pattern="grid", color="#ffffff08", spacing=24) }}
+
+  <!-- Area graph: CPU utilization history -->
+  {{ graph(data=cpu_util_history, x=0, y=380, w=480, h=100,
+           style="area", fill="#e9456033", stroke="#e94560") }}
+
+  <!-- Current CPU temp (hero value) -->
+  <text x="240" y="200" text-anchor="middle" font-size="96"
+        fill="{{ theme_primary }}" font-family="monospace">
+    {{ cpu_temp | default(value="--") }}°C
+  </text>
+</svg>
+```
+
+Key SVG layout rules:
+1. `viewBox="0 0 480 480"` — always 480x480 canvas
+2. `{# history: ... #}` frontmatter declares metrics to buffer (see [components.md](./references/components.md))
+3. Text uses absolute `x,y` coordinates — no flexbox in SVG
+4. Components are Tera function calls that emit SVG fragments
+5. Document order = z-order: background first, text last
+
+### Component Composability Rules
+
+These are binding contracts for how components interact:
+
+1. **Position-independent.** Every component takes `x, y, w, h` and renders within that bounding box. No assumptions about position on canvas.
+
+2. **Theme-aware defaults.** Components default to `theme_*` variables for colors, overridable with explicit hex. A layout using all defaults inherits the active theme automatically.
+
+3. **Opt-in history.** Only metrics declared in `{# history: ... #}` frontmatter get buffered. Components needing history for an undeclared metric render empty — graceful degradation.
+
+4. **Purely additive.** Components emit SVG elements only. They don't modify the canvas or other components. Compositing (opacity, layering) is your responsibility via standard SVG attributes.
+
+5. **Single background rule.** At most one background per layout (last `{{ background() }}` call wins). Global config `background_image` overrides per-layout background when set.
+
+6. **Document-order stacking.** Layering follows SVG document order: background → graphs/visualizations → panels → text. Control z-order by element placement in the template.
+
+7. **Graceful degradation.** Missing sensor data → `default(value="--")`. Missing history → empty graph. Missing theme → default palette. Missing background asset → transparent. No component causes a render failure.
+
+8. **Sensor polling independence.** Render tick rate and sensor poll rate are independent. Animation-driven tick rate increases do not increase sensor reads.
+
+---
+
+## Quick Start: Creating a Layout (HTML)
+
+For HTML layouts using the legacy TemplateRenderer. A layout is an HTML file using a CSS subset with Tera template variables for sensor data.
 
 ```html
 <div style="display: flex; flex-direction: column; width: 480px; height: 480px;
@@ -163,10 +214,13 @@ For layout pattern examples with complete HTML, see [layout-patterns.md](./refer
 
 ## Available Sensor Keys
 
+### Aggregate (always available)
+
 | Key | Format | Source |
 |-----|--------|--------|
-| `cpu_temp` | Integer °C | hwmon |
-| `cpu_util` | Float % | sysinfo |
+| `cpu_temp` | Integer °C | hwmon (k10temp / coretemp alias) |
+| `cpu_util` | Float % | sysinfo (average across all cores) |
+| `cpu_power` | Integer W | RAPL powercap |
 | `gpu_temp` | Integer °C | nvidia-smi / amdgpu sysfs |
 | `gpu_util` | Integer % | nvidia-smi / amdgpu sysfs |
 | `gpu_power` | Integer W | nvidia-smi / amdgpu sysfs |
@@ -176,6 +230,33 @@ For layout pattern examples with complete HTML, see [layout-patterns.md](./refer
 | `vram_total` | Float GB (1 decimal) | nvidia-smi / amdgpu sysfs |
 | `fps` | Integer | MangoHud (requires active game) |
 | `frametime` | Float ms | MangoHud (requires active game) |
+
+### Per-core CPU (sysinfo)
+
+| Key pattern | Format | Description |
+|-------------|--------|-------------|
+| `cpu_c0_util` – `cpu_cN_util` | Float % | Per-core utilization (0-indexed) |
+| `cpu_c0_freq` – `cpu_cN_freq` | Integer MHz | Per-core frequency |
+
+### Per-core temperature (hwmon coretemp)
+
+| Key pattern | Format | Description |
+|-------------|--------|-------------|
+| `cpu_c0_temp` – `cpu_cN_temp` | Integer °C | Per-core temp from "Core N" hwmon label |
+
+### CCD temps (hwmon k10temp, AMD Zen3+)
+
+| Key | Format | Description |
+|-----|--------|-------------|
+| `cpu_ccd0_temp` | Integer °C | CCD0 temp (Tccd1 label, 0-indexed) |
+| `cpu_ccd1_temp` | Integer °C | CCD1 temp (Tccd2 label) |
+
+### Network (sysinfo, available after second poll)
+
+| Key | Format | Description |
+|-----|--------|-------------|
+| `net_rx` | Integer B/s | Download throughput (sum of non-loopback interfaces) |
+| `net_tx` | Integer B/s | Upload throughput |
 
 Always use `{{ key | default(value="--") }}` — sensors may be unavailable.
 
@@ -217,6 +298,7 @@ The rendering pipeline: Tera template substitution → HTML parsing → taffy fl
 
 ## References
 
+- [components.md](./references/components.md) — Full component catalog: signatures, args, examples (graph, btop_bars, btop_net, btop_ram, background)
 - [color-system.md](./references/color-system.md) — Temperature ramps, utilization coding, full palette
 - [layout-patterns.md](./references/layout-patterns.md) — Concrete layout examples with complete HTML
 - [rendering-engine.md](./references/rendering-engine.md) — Full engine details, pipeline architecture, extension guide

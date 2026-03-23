@@ -9,15 +9,20 @@
 //!   cargo run --example preview_layout neon-dash                 # layouts/<name>.html
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use thermalwriter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::theme::ThemePalette;
 
 /// Returns (content, display_name, is_svg).
 fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
@@ -64,6 +69,29 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
     }
 }
 
+/// Generate synthetic history data for preview (60 points, sinusoidal wave around a base value).
+/// Uses a deterministic pattern so previews are reproducible.
+fn fill_synthetic_history(history: &mut SensorHistory, metrics: &[String], sensor_data: &HashMap<String, String>) {
+    let sample_count = 60usize;
+    for metric in metrics {
+        // Use current sensor value as base if available, otherwise pick a reasonable default
+        let base: f64 = sensor_data.get(metric)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50.0);
+
+        for i in 0..sample_count {
+            // Sinusoidal variation ±20% of base
+            let phase = (i as f64 / sample_count as f64) * std::f64::consts::TAU;
+            let amplitude = base * 0.2;
+            let value = (base + amplitude * phase.sin()).max(0.0);
+
+            let mut data = HashMap::new();
+            data.insert(metric.clone(), format!("{:.1}", value));
+            history.record(&data);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let name_or_path = std::env::args().nth(1).unwrap_or("system-stats".to_string());
     let (template, display_name, is_svg) = load_template(&name_or_path)?;
@@ -87,10 +115,37 @@ fn main() -> Result<()> {
 
     let mut renderer: Box<dyn FrameSource> = if is_svg {
         println!("Using SVG renderer");
-        Box::new(SvgRenderer::new(&template, 480, 480)?)
+
+        // Parse frontmatter for history/animation config
+        let frontmatter = LayoutFrontmatter::parse(&template);
+
+        // Create sensor history and pre-fill with synthetic data
+        let sensor_history = if !frontmatter.history_configs.is_empty() {
+            let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
+            println!("Frontmatter history metrics: {:?}", metrics);
+
+            let mut history = SensorHistory::new();
+            for (metric, cfg) in &frontmatter.history_configs {
+                history.configure_metric(metric, cfg.duration);
+            }
+            fill_synthetic_history(&mut history, &metrics, &sensors);
+            println!("Pre-filled {} metrics with {} synthetic samples each", metrics.len(), 60);
+            Some(Arc::new(Mutex::new(history)))
+        } else {
+            None
+        };
+
+        let theme = ThemePalette::default();
+        let mut renderer = SvgRenderer::new(&template, 480, 480)?;
+        if let Some(hist) = sensor_history {
+            renderer.set_history(hist);
+        }
+        renderer.set_theme(theme);
+        Box::new(renderer)
     } else {
         Box::new(TemplateRenderer::new(&template, 480, 480)?)
     };
+
     let pixmap = renderer.render(&sensors)?;
 
     let path = format!("/tmp/thermalwriter_{}.png", display_name);
