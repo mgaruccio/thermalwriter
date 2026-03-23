@@ -5,7 +5,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/thermalrighter daemon
+ExecStart=%h/.cargo/bin/thermalrighter daemon
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
