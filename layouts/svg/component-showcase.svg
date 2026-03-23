@@ -1,0 +1,67 @@
+{# history: cpu_temp=60s, cpu_util=60s, cpu_c0_util=60s, cpu_c1_util=60s, cpu_c2_util=60s, cpu_c3_util=60s, net_rx=120s, net_tx=120s, ram_used=120s #}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
+
+  <defs>
+    <linearGradient id="topFade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#08080f" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#08080f" stop-opacity="0.0"/>
+    </linearGradient>
+  </defs>
+
+  {{ background(pattern="grid", color="#ffffff08", spacing=24) }}
+
+  {{ graph(data=cpu_util_history, x=0, y=0, w=480, h=120,
+           style="area", fill="#e9456022", stroke="#e9456066", stroke_width=1) }}
+
+  <rect x="0" y="0" width="480" height="120" fill="url(#topFade)" opacity="0.6"/>
+
+  <text x="16" y="30" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="{{ theme_text_dim }}">CPU TEMPERATURE</text>
+
+  {% if cpu_temp and cpu_temp | int >= 80 %}
+    <text x="16" y="88" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_critical }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
+  {% elif cpu_temp and cpu_temp | int >= 65 %}
+    <text x="16" y="88" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_warning }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
+  {% else %}
+    <text x="16" y="88" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_primary }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
+  {% endif %}
+
+  <text x="350" y="60" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_text_dim }}" text-anchor="end">{{ cpu_util | default(value="--") }}%</text>
+  <text x="350" y="88" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="{{ theme_text_dim }}" text-anchor="end">LOAD</text>
+
+  <line x1="0" y1="124" x2="480" y2="124" stroke="{{ theme_primary }}" stroke-width="1" opacity="0.3"/>
+
+  <text x="16" y="148" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">CORE UTILIZATION</text>
+
+  {{ btop_bars(histories=[cpu_c0_util_history, cpu_c1_util_history, cpu_c2_util_history, cpu_c3_util_history],
+              x=16, y=158, w=448, h=52, color="{{ theme_primary }}") }}
+
+  <line x1="0" y1="220" x2="480" y2="220" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
+
+  <text x="16" y="242" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">NETWORK</text>
+  <text x="240" y="242" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_secondary }}" text-anchor="middle">RX</text>
+  <text x="350" y="242" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_primary }}" text-anchor="middle">TX</text>
+
+  {{ btop_net(rx_data=net_rx_history, tx_data=net_tx_history,
+             x=16, y=250, w=448, h=64,
+             rx_color="{{ theme_secondary }}", tx_color="{{ theme_primary }}") }}
+
+  <line x1="0" y1="322" x2="480" y2="322" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
+
+  <text x="16" y="344" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">MEMORY</text>
+  <text x="360" y="344" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="{{ theme_accent }}" text-anchor="end">{{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</text>
+
+  {{ btop_ram(data=ram_used_history, total=64.0,
+             x=16, y=352, w=448, h=48, fill="{{ theme_accent }}55") }}
+
+  <line x1="0" y1="410" x2="480" y2="410" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
+
+  <text x="16" y="432" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">GPU</text>
+  <text x="16" y="464" font-family="DejaVu Sans Mono, monospace" font-size="36" fill="{{ theme_secondary }}">{{ gpu_temp | default(value="--") }}°C</text>
+
+  <text x="200" y="432" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">VRAM</text>
+  <text x="200" y="464" font-family="DejaVu Sans Mono, monospace" font-size="36" fill="{{ theme_accent }}">{{ vram_used | default(value="--") }}G</text>
+
+  <text x="370" y="432" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">POWER</text>
+  <text x="370" y="464" font-family="DejaVu Sans Mono, monospace" font-size="36" fill="#FFD080">{{ gpu_power | default(value="--") }}W</text>
+
+</svg>
