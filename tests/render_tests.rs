@@ -1,4 +1,5 @@
 use thermalrighter::render::parser::*;
+use thermalrighter::render::layout::*;
 
 #[test]
 fn parse_style_extracts_flex_properties() {
@@ -43,4 +44,29 @@ fn parse_html_nested_elements() {
     assert_eq!(el.children.len(), 2);
     assert_eq!(el.children[0].text.as_deref(), Some("CPU 65C"));
     assert_eq!(el.children[1].text.as_deref(), Some("GPU 72C"));
+}
+
+#[test]
+fn layout_single_element_fills_container() {
+    let el = parse_html(r#"<div style="width: 480px; height: 480px;">Hello</div>"#).unwrap();
+    let nodes = compute_layout(&el, 480.0, 480.0).unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert!((nodes[0].x - 0.0).abs() < 1.0);
+    assert!((nodes[0].y - 0.0).abs() < 1.0);
+    assert!((nodes[0].width - 480.0).abs() < 1.0);
+    assert!((nodes[0].height - 480.0).abs() < 1.0);
+}
+
+#[test]
+fn layout_flex_column_stacks_children() {
+    let html = r#"<div style="display: flex; flex-direction: column; width: 480px; height: 480px;">
+        <div style="height: 100px;">Top</div>
+        <div style="height: 100px;">Bottom</div>
+    </div>"#;
+    let el = parse_html(html).unwrap();
+    let nodes = compute_layout(&el, 480.0, 480.0).unwrap();
+    // Find children by text
+    let top = nodes.iter().find(|n| n.text.as_deref() == Some("Top")).unwrap();
+    let bottom = nodes.iter().find(|n| n.text.as_deref() == Some("Bottom")).unwrap();
+    assert!(bottom.y > top.y, "Bottom should be below Top");
 }
