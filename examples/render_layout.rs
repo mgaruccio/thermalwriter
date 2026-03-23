@@ -10,17 +10,21 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
+use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::service::tick::encode_jpeg;
+use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
 /// Returns (content, display_name, is_svg).
@@ -85,6 +89,17 @@ fn mock_sensors() -> SensorData {
     m
 }
 
+/// Generate mock sensor data with slight variation for history (to make graphs visible).
+fn mock_sensors_varying(iteration: u64) -> SensorData {
+    let mut m = mock_sensors();
+    let phase = (iteration as f64 * 0.3).sin();
+    let cpu_util: f64 = 42.0 + phase * 15.0;
+    let cpu_temp: f64 = 67.0 + phase * 5.0;
+    m.insert("cpu_util".into(), format!("{:.1}", cpu_util));
+    m.insert("cpu_temp".into(), format!("{:.0}", cpu_temp));
+    m
+}
+
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -114,6 +129,22 @@ fn main() -> Result<()> {
     hub.poll();
     thread::sleep(Duration::from_millis(250));
 
+    // Parse frontmatter for history config
+    let frontmatter = LayoutFrontmatter::parse(&template);
+
+    // Create sensor history if any metrics are configured in frontmatter
+    let sensor_history: Option<Arc<Mutex<SensorHistory>>> = if is_svg && !frontmatter.history_configs.is_empty() {
+        let mut history = SensorHistory::new();
+        for (metric, cfg) in &frontmatter.history_configs {
+            history.configure_metric(metric, cfg.duration);
+        }
+        let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
+        println!("History tracking: {:?}", metrics);
+        Some(Arc::new(Mutex::new(history)))
+    } else {
+        None
+    };
+
     let initial_sensors = if use_mock {
         let mock = mock_sensors();
         println!("Using MOCK sensor data (gaming load):");
@@ -137,10 +168,23 @@ fn main() -> Result<()> {
     // Render initial frame
     let mut renderer: Box<dyn FrameSource> = if is_svg {
         println!("Using SVG renderer");
-        Box::new(SvgRenderer::new(&template, 480, 480)?)
+        let mut renderer = SvgRenderer::new(&template, 480, 480)?;
+        if let Some(ref hist) = sensor_history {
+            renderer.set_history(hist.clone());
+        }
+        renderer.set_theme(ThemePalette::default());
+        Box::new(renderer)
     } else {
         Box::new(TemplateRenderer::new(&template, 480, 480)?)
     };
+
+    // Record initial sensors into history
+    if let Some(ref hist) = sensor_history {
+        if let Ok(mut h) = hist.lock() {
+            h.record(&initial_sensors);
+        }
+    }
+
     let pixmap = renderer.render(&initial_sensors)?;
 
     let png_path = format!("/tmp/thermalwriter_{}.png", display_name);
@@ -159,16 +203,36 @@ fn main() -> Result<()> {
     let mode = if use_mock { "mock" } else { "live" };
     println!("Sending '{}' ({}) for {}s — go look at the display!", display_name, mode, duration_secs);
     let start = std::time::Instant::now();
+    let mut iteration = 0u64;
     while start.elapsed() < Duration::from_secs(duration_secs) {
         let sensors = if use_mock {
-            mock_sensors()
+            mock_sensors_varying(iteration)
         } else {
             hub.poll()
         };
+
+        // Record into history on each poll cycle
+        if let Some(ref hist) = sensor_history {
+            if let Ok(mut h) = hist.lock() {
+                h.record(&sensors);
+            }
+        }
+
         let pixmap = renderer.render(&sensors)?;
         let jpeg_data = encode_jpeg(&pixmap, 85, 180)?;
         transport.send_frame(&jpeg_data)?;
         thread::sleep(Duration::from_millis(500));
+        iteration += 1;
+    }
+
+    // Print history stats
+    if let Some(ref hist) = sensor_history {
+        if let Ok(h) = hist.lock() {
+            for metric in h.configured_metrics() {
+                let count = h.query(&metric, 10000).len();
+                println!("Recorded {} samples for {}", count, metric);
+            }
+        }
     }
 
     transport.close();
