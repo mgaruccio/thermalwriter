@@ -1,6 +1,7 @@
 use thermalrighter::sensor::hwmon::HwmonProvider;
 use thermalrighter::sensor::amdgpu::AmdGpuProvider;
 use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalrighter::sensor::mangohud::MangoHudProvider;
 use thermalrighter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
@@ -255,4 +256,123 @@ fn sysinfo_ram_format_one_decimal() {
     let parts: Vec<&str> = ram_used.value.split('.').collect();
     assert_eq!(parts.len(), 2, "Expected 1 decimal place in '{}'", ram_used.value);
     assert_eq!(parts[1].len(), 1, "Expected exactly 1 decimal digit in '{}'", ram_used.value);
+}
+
+// ─── MangoHudProvider tests ──────────────────────────────────────────────────
+
+fn write_mangohud_csv(dir: &std::path::Path, filename: &str, content: &str) {
+    fs::write(dir.join(filename), content).unwrap();
+}
+
+#[test]
+fn mangohud_reads_fps_and_frametime() {
+    let tmp = TempDir::new().unwrap();
+    write_mangohud_csv(
+        tmp.path(),
+        "game.csv",
+        "fps,frametime,cpu_load,gpu_load\n120,8.333,45,72\n",
+    );
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let fps = readings.iter().find(|r| r.key == "fps").unwrap();
+    assert_eq!(fps.value, "120");
+
+    let frametime = readings.iter().find(|r| r.key == "frametime").unwrap();
+    assert_eq!(frametime.value, "8.3");
+}
+
+#[test]
+fn mangohud_reads_cpu_and_gpu_load() {
+    let tmp = TempDir::new().unwrap();
+    write_mangohud_csv(
+        tmp.path(),
+        "game.csv",
+        "fps,frametime,cpu_load,gpu_load\n60,16.667,30,95\n",
+    );
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let cpu = readings.iter().find(|r| r.key == "cpu_load").unwrap();
+    assert_eq!(cpu.value, "30");
+
+    let gpu = readings.iter().find(|r| r.key == "gpu_load").unwrap();
+    assert_eq!(gpu.value, "95");
+}
+
+#[test]
+fn mangohud_no_csv_files_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    // No files in directory
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+    assert!(readings.is_empty());
+}
+
+#[test]
+fn mangohud_missing_log_dir_returns_empty() {
+    let mut provider = MangoHudProvider::with_log_dir("/nonexistent/mangohud/path".into());
+    let readings = provider.poll().unwrap();
+    assert!(readings.is_empty());
+}
+
+#[test]
+fn mangohud_headers_but_no_data_rows_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    write_mangohud_csv(
+        tmp.path(),
+        "game.csv",
+        "fps,frametime,cpu_load,gpu_load\n",
+    );
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+    assert!(readings.is_empty());
+}
+
+#[test]
+fn mangohud_fps_rounded_to_integer() {
+    let tmp = TempDir::new().unwrap();
+    write_mangohud_csv(
+        tmp.path(),
+        "game.csv",
+        "fps,frametime,cpu_load,gpu_load\n119.7,8.351,50,80\n",
+    );
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let fps = readings.iter().find(|r| r.key == "fps").unwrap();
+    // 119.7 rounds to 120
+    assert_eq!(fps.value, "120");
+}
+
+#[test]
+fn mangohud_reads_most_recent_csv_when_multiple_files() {
+    let tmp = TempDir::new().unwrap();
+
+    // Write older file first
+    write_mangohud_csv(
+        tmp.path(),
+        "old_game.csv",
+        "fps,frametime,cpu_load,gpu_load\n30,33.3,10,20\n",
+    );
+
+    // Small delay to ensure different mtime, then write newer file
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    write_mangohud_csv(
+        tmp.path(),
+        "new_game.csv",
+        "fps,frametime,cpu_load,gpu_load\n144,6.944,70,90\n",
+    );
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    // Should use the most recently modified file (new_game.csv)
+    let fps = readings.iter().find(|r| r.key == "fps").unwrap();
+    assert_eq!(fps.value, "144");
 }
