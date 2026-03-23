@@ -71,10 +71,28 @@ impl SensorProvider for HwmonProvider {
                         if is_cpu_chip && !cpu_temp_aliased {
                             readings.push(SensorReading {
                                 key: "cpu_temp".to_string(),
-                                value: deg,
+                                value: deg.clone(),
                                 unit: "°C".to_string(),
                             });
                             cpu_temp_aliased = true;
+                        }
+                        // Per-core temp alias: "Core N" label → cpu_cN_temp
+                        if is_cpu_chip {
+                            if let Some(core_num) = parse_core_label(&label) {
+                                readings.push(SensorReading {
+                                    key: format!("cpu_c{}_temp", core_num),
+                                    value: deg.clone(),
+                                    unit: "°C".to_string(),
+                                });
+                            }
+                            // CCD temp alias: "TccdN" label → cpu_ccd{N-1}_temp
+                            if let Some(ccd_idx) = parse_ccd_label(&label) {
+                                readings.push(SensorReading {
+                                    key: format!("cpu_ccd{}_temp", ccd_idx),
+                                    value: deg,
+                                    unit: "°C".to_string(),
+                                });
+                            }
                         }
                     }
                 }
@@ -123,4 +141,25 @@ impl SensorProvider for HwmonProvider {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Parse "Core N" or "Core N" (case-insensitive) label → core index N.
+/// Returns None if label doesn't match the pattern.
+fn parse_core_label(label: &str) -> Option<u32> {
+    let label = label.trim();
+    let lower = label.to_lowercase();
+    let rest = lower.strip_prefix("core ")?;
+    rest.trim().parse::<u32>().ok()
+}
+
+/// Parse "TccdN" label → 0-indexed CCD index (Tccd1 → 0, Tccd2 → 1).
+/// Returns None if label doesn't match the pattern.
+fn parse_ccd_label(label: &str) -> Option<u32> {
+    let label = label.trim();
+    // Match case-insensitive "Tccd" prefix
+    let lower = label.to_lowercase();
+    let rest = lower.strip_prefix("tccd")?;
+    let n: u32 = rest.trim().parse().ok()?;
+    if n == 0 { return None; } // Tccd0 doesn't exist in practice; guard against underflow
+    Some(n - 1)
 }

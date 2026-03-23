@@ -510,3 +510,74 @@ fn mangohud_reads_most_recent_csv_when_multiple_files() {
     let fps = readings.iter().find(|r| r.key == "fps").unwrap();
     assert_eq!(fps.value, "144");
 }
+
+// ─── HwmonProvider per-core temp + CCD alias tests ───────────────────────────
+
+#[test]
+fn hwmon_emits_per_core_temp_alias_from_core_label() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "coretemp\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "70000\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_label"), "Core 0\n").unwrap();
+    fs::write(hwmon_dir.join("temp2_input"), "72000\n").unwrap();
+    fs::write(hwmon_dir.join("temp2_label"), "Core 1\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let c0 = readings.iter().find(|r| r.key == "cpu_c0_temp").unwrap();
+    assert_eq!(c0.value, "70");
+    assert_eq!(c0.unit, "°C");
+
+    let c1 = readings.iter().find(|r| r.key == "cpu_c1_temp").unwrap();
+    assert_eq!(c1.value, "72");
+}
+
+#[test]
+fn hwmon_emits_ccd_temp_alias_from_tccd_label() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "k10temp\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "60000\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_label"), "Tctl\n").unwrap();
+    fs::write(hwmon_dir.join("temp3_input"), "62000\n").unwrap();
+    fs::write(hwmon_dir.join("temp3_label"), "Tccd1\n").unwrap();
+    fs::write(hwmon_dir.join("temp4_input"), "65000\n").unwrap();
+    fs::write(hwmon_dir.join("temp4_label"), "Tccd2\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    // Tccd1 → cpu_ccd0_temp (0-indexed)
+    let ccd0 = readings.iter().find(|r| r.key == "cpu_ccd0_temp").unwrap();
+    assert_eq!(ccd0.value, "62");
+    assert_eq!(ccd0.unit, "°C");
+
+    // Tccd2 → cpu_ccd1_temp (0-indexed)
+    let ccd1 = readings.iter().find(|r| r.key == "cpu_ccd1_temp").unwrap();
+    assert_eq!(ccd1.value, "65");
+}
+
+#[test]
+fn hwmon_no_per_core_or_ccd_alias_for_non_cpu_chip() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "nct6798\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "35000\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_label"), "Core 0\n").unwrap();
+    fs::write(hwmon_dir.join("temp2_input"), "40000\n").unwrap();
+    fs::write(hwmon_dir.join("temp2_label"), "Tccd1\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    assert!(
+        readings.iter().all(|r| !r.key.starts_with("cpu_c") || r.key == "cpu_temp"),
+        "Non-CPU chip should not emit per-core or CCD aliases: {:?}",
+        readings.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+}
