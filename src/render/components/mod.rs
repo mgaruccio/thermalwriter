@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod background;
 pub mod btop;
 pub mod graph;
