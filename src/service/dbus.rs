@@ -15,6 +15,7 @@ pub struct ServiceState {
     pub connected: bool,
     pub resolution: (u32, u32),
     pub tick_rate: u32,
+    pub jpeg_quality: u8,
     pub shutdown_tx: watch::Sender<bool>,
     pub layout_dir: std::path::PathBuf,
     /// Notify the tick loop to reload the frame source with a new layout name.
@@ -39,7 +40,9 @@ impl DisplayInterface {
         name: String,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<String> {
-        let state = self.state.lock().await;
+        // Hold the lock through both the channel send and state update — no TOCTOU window.
+        // tokio::sync::Mutex is safe to hold across .await.
+        let mut state = self.state.lock().await;
         let layout_path = state.layout_dir.join(&name);
         if !layout_path.exists() {
             return Err(zbus::fdo::Error::InvalidArgs(
@@ -48,9 +51,6 @@ impl DisplayInterface {
         }
         state.layout_change_tx.send(name.clone()).await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        drop(state);
-
-        let mut state = self.state.lock().await;
         state.active_layout = name.clone();
 
         Self::layout_changed(&emitter, &name).await?;

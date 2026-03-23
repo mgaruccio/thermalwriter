@@ -70,7 +70,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
             let mut fs = MockFrameSource;
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, shutdown_rx).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })

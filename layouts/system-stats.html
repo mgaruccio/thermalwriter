@@ -1,0 +1,10 @@
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #1a1a2e; color: #ffffff; font-size: 28px; padding: 16px; gap: 12px;">
+  <div style="font-size: 20px; color: #888888;">thermalrighter</div>
+  <div style="display: flex; flex-direction: column; gap: 8px;">
+    <span style="color: #e94560;">CPU  {{ cpu_temp | default(value="--") }}°C  {{ cpu_util | default(value="--") }}%</span>
+    <span style="color: #0f3460;">GPU  {{ gpu_temp | default(value="--") }}°C  {{ gpu_util | default(value="--") }}%</span>
+    <span style="color: #16213e;">PWR  {{ gpu_power | default(value="--") }}W</span>
+    <span style="color: #533483;">RAM  {{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</span>
+    <span style="color: #e94560;">FPS  {{ fps | default(value="--") }}</span>
+  </div>
+</div>

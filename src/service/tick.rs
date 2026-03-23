@@ -49,10 +49,11 @@ pub async fn run_tick_loop(
     frame_source: &mut dyn FrameSource,
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
+    jpeg_quality: u8,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
-    info!("Tick loop started: {} FPS ({:?} per tick)", tick_rate_fps, tick_duration);
+    info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}", tick_rate_fps, tick_duration, jpeg_quality);
 
     loop {
         let tick_start = Instant::now();
@@ -70,7 +71,7 @@ pub async fn run_tick_loop(
         match frame_source.render(&sensors) {
             Ok(pixmap) => {
                 // Encode to JPEG
-                match encode_jpeg(&pixmap, 85) {
+                match encode_jpeg(&pixmap, jpeg_quality) {
                     Ok(jpeg) => {
                         debug!("Frame rendered: {} bytes JPEG", jpeg.len());
                         if let Err(e) = transport.send_frame(&jpeg) {
@@ -89,8 +90,9 @@ pub async fn run_tick_loop(
             tokio::time::sleep(tick_duration - elapsed).await;
         }
 
-        // Check shutdown again after sleep
-        if shutdown.has_changed().unwrap_or(false) && *shutdown.borrow() {
+        // Check shutdown again after sleep.
+        // unwrap_or(true): if sender is dropped the daemon should exit.
+        if shutdown.has_changed().unwrap_or(true) && *shutdown.borrow() {
             break;
         }
     }

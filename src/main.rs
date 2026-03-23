@@ -1,3 +1,101 @@
-fn main() {
-    println!("thermalrighter");
+use std::path::PathBuf;
+use std::sync::Arc;
+use anyhow::Result;
+use log::info;
+use tokio::sync::{Mutex, watch, mpsc};
+
+use thermalrighter::sensor::SensorHub;
+use thermalrighter::sensor::hwmon::HwmonProvider;
+use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalrighter::sensor::amdgpu::AmdGpuProvider;
+use thermalrighter::sensor::mangohud::MangoHudProvider;
+use thermalrighter::render::TemplateRenderer;
+use thermalrighter::service::dbus::{self, ServiceState};
+use thermalrighter::service::tick;
+use thermalrighter::transport::Transport;
+use thermalrighter::transport::bulk_usb::BulkUsb;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::init();
+
+    // TODO: CLI dispatch (daemon vs ctl subcommands) — Task 20
+    // For now, always run the daemon.
+
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
+        .join("thermalrighter");
+    let layout_dir = config_dir.join("layouts");
+    std::fs::create_dir_all(&layout_dir)?;
+
+    // Load default layout — user file takes precedence over built-in
+    let default_layout_path = layout_dir.join("system-stats.html");
+    let template = if default_layout_path.exists() {
+        std::fs::read_to_string(&default_layout_path)?
+    } else {
+        include_str!("../layouts/system-stats.html").to_string()
+    };
+
+    // Setup USB transport
+    let mut transport = BulkUsb::new()?;
+    let device_info = transport.handshake()?;
+    info!("Device: {}x{}, PM={}, JPEG={}", device_info.width, device_info.height,
+          device_info.pm, device_info.use_jpeg);
+
+    // Setup sensor hub with all providers
+    let mut sensor_hub = SensorHub::new();
+    sensor_hub.add_provider(Box::new(HwmonProvider::new()));
+    sensor_hub.add_provider(Box::new(SysinfoProvider::new()));
+    sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
+    sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
+
+    // Setup template renderer
+    let mut frame_source = TemplateRenderer::new(&template, device_info.width, device_info.height)?;
+
+    // Shared state for D-Bus ↔ tick loop communication
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (layout_tx, mut layout_rx) = mpsc::channel::<String>(4);
+
+    let state = Arc::new(Mutex::new(ServiceState {
+        active_layout: "system-stats.html".to_string(),
+        connected: true,
+        resolution: (device_info.width, device_info.height),
+        tick_rate: 2,
+        jpeg_quality: 85,
+        shutdown_tx,
+        layout_dir: layout_dir.clone(),
+        layout_change_tx: layout_tx,
+    }));
+
+    // Start D-Bus service (connection must stay alive)
+    let _connection = dbus::serve(state.clone()).await?;
+    info!("D-Bus service started");
+
+    // Layout change listener: reload frame source when D-Bus SetLayout is called
+    let layout_dir_clone = layout_dir.clone();
+    tokio::spawn(async move {
+        while let Some(name) = layout_rx.recv().await {
+            let path = layout_dir_clone.join(&name);
+            match std::fs::read_to_string(&path) {
+                Ok(_html) => info!("Layout change requested: {} (tick loop will reload)", name),
+                Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
+            }
+        }
+    });
+
+    // Run tick loop — blocks until shutdown signal
+    let tick_rate = state.lock().await.tick_rate;
+    let jpeg_quality = state.lock().await.jpeg_quality;
+    tick::run_tick_loop(
+        &mut transport,
+        &mut frame_source,
+        &mut sensor_hub,
+        tick_rate,
+        jpeg_quality,
+        shutdown_rx,
+    ).await?;
+
+    transport.close();
+    info!("thermalrighter shutdown complete");
+    Ok(())
 }
