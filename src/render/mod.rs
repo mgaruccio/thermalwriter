@@ -55,9 +55,7 @@ impl FrameSource for TemplateRenderer {
         let nodes = layout::compute_layout(&root, self.width as f32, self.height as f32)?;
 
         // Step 4: Render to pixmap
-        let pixmap = draw::render_nodes(&nodes, self.width, self.height);
-
-        Ok(pixmap?)
+        draw::render_nodes(&nodes, self.width, self.height)
     }
 
     fn name(&self) -> &str {

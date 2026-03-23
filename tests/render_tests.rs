@@ -86,7 +86,11 @@ fn template_renderer_produces_480x480_pixmap() {
     let pixmap = renderer.render(&sensors).unwrap();
     assert_eq!(pixmap.width(), 480);
     assert_eq!(pixmap.height(), 480);
-    // Verify the background isn't all black (it should be #1a1a2e)
-    let pixel = &pixmap.data()[0..4]; // first pixel RGBA
-    assert!(pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0, "Background should not be black");
+    // Verify the background color is exactly #1a1a2e (RGBA: 0x1a, 0x1a, 0x2e, 0xff)
+    let data = pixmap.data();
+    let pixel = &data[0..4]; // first pixel RGBA
+    assert_eq!(pixel[0], 0x1a, "R channel should be 0x1a");
+    assert_eq!(pixel[1], 0x1a, "G channel should be 0x1a");
+    assert_eq!(pixel[2], 0x2e, "B channel should be 0x2e");
+    assert_eq!(pixel[3], 0xff, "Alpha channel should be 0xff (fully opaque)");
 }

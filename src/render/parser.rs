@@ -97,7 +97,7 @@ pub fn parse_style(style_str: &str) -> ElementStyle {
             "width" => style.width = parse_px(val),
             "height" => style.height = parse_px(val),
             "color" => style.color = Color::from_hex(val),
-            "background" => style.background = Color::from_hex(val),
+            "background" | "background-color" => style.background = Color::from_hex(val),
             _ => {} // Ignore unknown properties
         }
     }

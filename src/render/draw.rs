@@ -18,8 +18,10 @@ fn default_font() -> &'static Font {
 }
 
 /// Render a list of positioned layout nodes into a tiny-skia Pixmap.
-pub fn render_nodes(nodes: &[LayoutNode], width: u32, height: u32) -> Pixmap {
-    let mut pixmap = Pixmap::new(width, height).unwrap();
+pub fn render_nodes(nodes: &[LayoutNode], width: u32, height: u32) -> anyhow::Result<Pixmap> {
+    use anyhow::Context;
+    let mut pixmap = Pixmap::new(width, height)
+        .context("Failed to create pixmap")?;
 
     for node in nodes {
         // Draw background
@@ -53,7 +55,7 @@ pub fn render_nodes(nodes: &[LayoutNode], width: u32, height: u32) -> Pixmap {
         }
     }
 
-    pixmap
+    Ok(pixmap)
 }
 
 fn draw_text(
@@ -120,7 +122,7 @@ fn draw_text(
                 data[idx]     = ((color.r as u16 * a + data[idx]     as u16 * inv_a) / 255) as u8;
                 data[idx + 1] = ((color.g as u16 * a + data[idx + 1] as u16 * inv_a) / 255) as u8;
                 data[idx + 2] = ((color.b as u16 * a + data[idx + 2] as u16 * inv_a) / 255) as u8;
-                data[idx + 3] = 255;
+                data[idx + 3] = 255; // Always fully opaque — LCD output has no transparency channel
             }
         }
 

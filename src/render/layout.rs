@@ -112,7 +112,7 @@ pub fn compute_layout(root: &Element, container_w: f32, container_h: f32) -> Res
 
     // Collect layout results with absolute positions
     let mut result = Vec::new();
-    collect_layout_nodes(&taffy, root_id, 0.0, 0.0, &node_map, &mut result);
+    collect_layout_nodes(&taffy, root_id, 0.0, 0.0, &node_map, &mut result)?;
     Ok(result)
 }
 
@@ -123,8 +123,8 @@ fn collect_layout_nodes(
     parent_y: f32,
     node_map: &[(NodeId, Element)],
     out: &mut Vec<LayoutNode>,
-) {
-    let layout = taffy.layout(node_id).unwrap();
+) -> Result<()> {
+    let layout = taffy.layout(node_id)?;
     let abs_x = parent_x + layout.location.x;
     let abs_y = parent_y + layout.location.y;
 
@@ -139,7 +139,8 @@ fn collect_layout_nodes(
         });
     }
 
-    for &child_id in taffy.children(node_id).unwrap().iter() {
-        collect_layout_nodes(taffy, child_id, abs_x, abs_y, node_map, out);
+    for &child_id in taffy.children(node_id)?.iter() {
+        collect_layout_nodes(taffy, child_id, abs_x, abs_y, node_map, out)?;
     }
+    Ok(())
 }
