@@ -1,0 +1,135 @@
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 480px;
+    height: 480px;
+    background: linear-gradient(135deg, #0f0c29, #1a1a3e, #24243e);
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+  }
+  .card {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 14px;
+  }
+  .top-row {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+  }
+  .gauge {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .label {
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .big-val {
+    font-size: 56px;
+    font-weight: bold;
+    line-height: 1;
+  }
+  .unit {
+    font-size: 16px;
+    color: #999;
+  }
+  .cpu-val { color: #ff6b81; }
+  .gpu-val { color: #70a1ff; }
+  .bottom-strip {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+  }
+  .stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 10px 4px;
+  }
+  .stat-val {
+    font-size: 22px;
+    font-weight: bold;
+    color: #ddd;
+  }
+  .stat-label {
+    font-size: 10px;
+    color: #777;
+    letter-spacing: 1px;
+  }
+  .fps-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 12px;
+  }
+  .fps-val {
+    font-size: 80px;
+    font-weight: bold;
+    color: #2ed573;
+    line-height: 1;
+  }
+  .accent-bar {
+    width: 60px;
+    height: 3px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, #ff6b81, #70a1ff);
+  }
+</style>
+</head>
+<body>
+  <div class="top-row">
+    <div class="card gauge">
+      <span class="label">CPU</span>
+      <span class="big-val cpu-val">{{ cpu_temp | default(value="--") }}</span>
+      <span class="unit">°C &middot; {{ cpu_util | default(value="--") }}%</span>
+      <div class="accent-bar" style="background: linear-gradient(90deg, #ff6b81, #ff4757);"></div>
+    </div>
+    <div class="card gauge">
+      <span class="label">GPU</span>
+      <span class="big-val gpu-val">{{ gpu_temp | default(value="--") }}</span>
+      <span class="unit">°C &middot; {{ gpu_util | default(value="--") }}%</span>
+      <div class="accent-bar" style="background: linear-gradient(90deg, #70a1ff, #1e90ff);"></div>
+    </div>
+  </div>
+
+  <div class="card fps-section">
+    <span class="label">Framerate</span>
+    <span class="fps-val">{{ fps | default(value="--") }}</span>
+    <span class="unit">FPS</span>
+  </div>
+
+  <div class="card bottom-strip">
+    <div class="stat">
+      <span class="stat-val">{{ ram_used | default(value="--") }}G</span>
+      <span class="stat-label">RAM</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val">{{ vram_used | default(value="--") }}G</span>
+      <span class="stat-label">VRAM</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val">{{ gpu_power | default(value="--") }}W</span>
+      <span class="stat-label">POWER</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val">{{ gpu_clock | default(value="--") }}</span>
+      <span class="stat-label">MHZ</span>
+    </div>
+  </div>
+</body>
+</html>

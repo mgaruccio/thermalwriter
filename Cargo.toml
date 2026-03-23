@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 rusb = "0.9"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 taffy = "0.7"
 tera = "1"
 fontdue = "0.9"
@@ -22,6 +22,25 @@ env_logger = "0.11"
 anyhow = "1"
 thiserror = "2"
 dirs = "6"
+resvg = "0.47.0"
+
+# Blitz HTML/CSS engine (optional — full CSS support via Stylo/Servo)
+blitz-html = { version = "0.2", optional = true }
+blitz-dom = { version = "0.2", optional = true, default-features = false }
+blitz-paint = { version = "0.2", optional = true, default-features = false }
+blitz-traits = { version = "0.2", optional = true, default-features = false }
+anyrender = { version = "0.6", optional = true }
+anyrender_vello_cpu = { version = "0.7", optional = true }
+peniko = { version = "0.5", optional = true }
+png = { version = "0.17", optional = true }
+
+[features]
+default = []
+blitz = ["dep:blitz-html", "dep:blitz-dom", "dep:blitz-paint", "dep:blitz-traits", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:png"]
+
+[[example]]
+name = "preview_blitz"
+required-features = ["blitz"]
 
 [dev-dependencies]
 tempfile = "3"

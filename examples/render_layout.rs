@@ -13,6 +13,7 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
+use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::sensor::SensorHub;
 use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
@@ -21,7 +22,8 @@ use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::service::tick::encode_jpeg;
 use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
-fn load_template(name_or_path: &str) -> Result<(String, String)> {
+/// Returns (content, display_name, is_svg).
+fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
     // Try as file path first (absolute or relative)
     let path = Path::new(name_or_path);
     if path.exists() && path.is_file() {
@@ -31,7 +33,17 @@ fn load_template(name_or_path: &str) -> Result<(String, String)> {
             .and_then(|s| s.to_str())
             .unwrap_or("custom")
             .to_string();
-        return Ok((content, display_name));
+        let is_svg = path.extension().is_some_and(|e| e == "svg");
+        return Ok((content, display_name, is_svg));
+    }
+
+    // Try as layouts/svg/<name>.svg
+    let svg_path = format!("layouts/svg/{}.svg", name_or_path);
+    let path = Path::new(&svg_path);
+    if path.exists() && path.is_file() {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        return Ok((content, name_or_path.to_string(), true));
     }
 
     // Try as layouts/<name>.html
@@ -40,14 +52,14 @@ fn load_template(name_or_path: &str) -> Result<(String, String)> {
     if path.exists() && path.is_file() {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        return Ok((content, name_or_path.to_string()));
+        return Ok((content, name_or_path.to_string(), false));
     }
 
     // Fall back to built-in layouts
     match name_or_path {
-        "system-stats" => Ok((include_str!("../layouts/system-stats.html").to_string(), "system-stats".to_string())),
-        "gpu-focus" => Ok((include_str!("../layouts/gpu-focus.html").to_string(), "gpu-focus".to_string())),
-        "minimal" => Ok((include_str!("../layouts/minimal.html").to_string(), "minimal".to_string())),
+        "system-stats" => Ok((include_str!("../layouts/system-stats.html").to_string(), "system-stats".to_string(), false)),
+        "gpu-focus" => Ok((include_str!("../layouts/gpu-focus.html").to_string(), "gpu-focus".to_string(), false)),
+        "minimal" => Ok((include_str!("../layouts/minimal.html").to_string(), "minimal".to_string(), false)),
         other => anyhow::bail!(
             "Layout not found: '{}'\n\nUsage: cargo run --example render_layout [name_or_path] [seconds] [--mock]",
             other
@@ -87,7 +99,7 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
 
-    let (template, display_name) = load_template(name_or_path)?;
+    let (template, display_name, is_svg) = load_template(name_or_path)?;
 
     // Set up sensors (even in mock mode, for merging real data with mock overrides)
     let mut hub = SensorHub::new();
@@ -117,7 +129,12 @@ fn main() -> Result<()> {
     };
 
     // Render initial frame
-    let mut renderer = TemplateRenderer::new(&template, 480, 480)?;
+    let mut renderer: Box<dyn FrameSource> = if is_svg {
+        println!("Using SVG renderer");
+        Box::new(SvgRenderer::new(&template, 480, 480)?)
+    } else {
+        Box::new(TemplateRenderer::new(&template, 480, 480)?)
+    };
     let pixmap = renderer.render(&initial_sensors)?;
 
     let png_path = format!("/tmp/thermalwriter_{}.png", display_name);

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 use anyhow::Result;
-use image::{ImageBuffer, Rgba};
+use image::{ImageBuffer, Rgb};
 use log::{debug, info, warn};
 use tiny_skia::Pixmap;
 
@@ -67,26 +67,27 @@ pub fn encode_jpeg(pixmap: &Pixmap, quality: u8, rotation: u16) -> Result<Vec<u8
     // Rotate if needed
     let (rotated, out_w, out_h) = rotate_pixels(data, pixmap.width(), pixmap.height(), rotation);
 
-    // Convert premultiplied RGBA → straight RGBA
-    let mut rgba = Vec::with_capacity(rotated.len());
+    // Convert premultiplied RGBA → straight RGB (JPEG has no alpha channel)
+    let pixel_count = (out_w * out_h) as usize;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
     for chunk in rotated.chunks(4) {
         let a = chunk[3] as u16;
         if a == 0 {
-            rgba.extend_from_slice(&[0, 0, 0, 0]);
+            rgb.extend_from_slice(&[0, 0, 0]);
         } else {
             let r = ((chunk[0] as u16 * 255) / a).min(255) as u8;
             let g = ((chunk[1] as u16 * 255) / a).min(255) as u8;
             let b = ((chunk[2] as u16 * 255) / a).min(255) as u8;
-            rgba.extend_from_slice(&[r, g, b, chunk[3]]);
+            rgb.extend_from_slice(&[r, g, b]);
         }
     }
 
-    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rgba)
+    let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rgb)
         .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
 
     let mut buf = std::io::Cursor::new(Vec::new());
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-    image::DynamicImage::ImageRgba8(img).write_with_encoder(encoder)?;
+    image::DynamicImage::ImageRgb8(img).write_with_encoder(encoder)?;
 
     Ok(buf.into_inner())
 }

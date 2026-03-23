@@ -4,6 +4,10 @@
 pub mod parser;
 pub mod layout;
 pub mod draw;
+pub mod svg;
+
+#[cfg(feature = "blitz")]
+pub mod blitz;
 
 use std::collections::HashMap;
 use anyhow::Result;
