@@ -8,6 +8,10 @@ use super::{SensorDescriptor, SensorProvider, SensorReading};
 
 const DEFAULT_HWMON_PATH: &str = "/sys/class/hwmon";
 
+/// Chip names that correspond to CPU temperature sensors.
+/// These receive a canonical `cpu_temp` alias on their first temp reading.
+const CPU_CHIP_NAMES: &[&str] = &["k10temp", "coretemp", "zenpower", "k8temp", "fam15h_power"];
+
 pub struct HwmonProvider {
     base_path: PathBuf,
 }
@@ -39,10 +43,15 @@ impl SensorProvider for HwmonProvider {
             Err(_) => return Ok(readings), // Missing sysfs — return empty, not error
         };
 
+        let mut cpu_temp_aliased = false;
+        let mut cpu_fan_aliased = false;
+
         for entry in entries.flatten() {
             let hwmon_dir = entry.path();
             let chip_name = Self::read_file_trimmed(&hwmon_dir.join("name"))
                 .unwrap_or_else(|| "unknown".to_string());
+
+            let is_cpu_chip = CPU_CHIP_NAMES.contains(&chip_name.as_str());
 
             // Read temperatures (temp*_input files, millidegrees C)
             for i in 1..=16 {
@@ -52,11 +61,21 @@ impl SensorProvider for HwmonProvider {
                         let label = Self::read_file_trimmed(&hwmon_dir.join(format!("temp{}_label", i)))
                             .unwrap_or_else(|| format!("temp{}", i));
                         let key = format!("{}_{}_temp{}", chip_name, label.to_lowercase().replace(' ', "_"), i);
+                        let deg = (millideg / 1000).to_string();
                         readings.push(SensorReading {
                             key,
-                            value: (millideg / 1000).to_string(),
+                            value: deg.clone(),
                             unit: "°C".to_string(),
                         });
+                        // Emit canonical alias for templates
+                        if is_cpu_chip && !cpu_temp_aliased {
+                            readings.push(SensorReading {
+                                key: "cpu_temp".to_string(),
+                                value: deg,
+                                unit: "°C".to_string(),
+                            });
+                            cpu_temp_aliased = true;
+                        }
                     }
                 }
             }
@@ -69,11 +88,21 @@ impl SensorProvider for HwmonProvider {
                         let label = Self::read_file_trimmed(&hwmon_dir.join(format!("fan{}_label", i)))
                             .unwrap_or_else(|| format!("fan{}", i));
                         let key = format!("{}_{}_fan{}", chip_name, label.to_lowercase().replace(' ', "_"), i);
+                        let rpm_str = rpm.to_string();
                         readings.push(SensorReading {
                             key,
-                            value: rpm.to_string(),
+                            value: rpm_str.clone(),
                             unit: "RPM".to_string(),
                         });
+                        // Emit canonical alias for templates
+                        if is_cpu_chip && !cpu_fan_aliased {
+                            readings.push(SensorReading {
+                                key: "cpu_fan".to_string(),
+                                value: rpm_str,
+                                unit: "RPM".to_string(),
+                            });
+                            cpu_fan_aliased = true;
+                        }
                     }
                 }
             }

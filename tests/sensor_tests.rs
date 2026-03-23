@@ -41,6 +41,72 @@ fn hwmon_reads_fan_speed_from_sysfs() {
 }
 
 #[test]
+fn hwmon_emits_cpu_temp_alias_for_k10temp() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "k10temp\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "72000\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_label"), "Tctl\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let alias = readings.iter().find(|r| r.key == "cpu_temp").unwrap();
+    assert_eq!(alias.value, "72");
+    assert_eq!(alias.unit, "°C");
+}
+
+#[test]
+fn hwmon_emits_cpu_temp_alias_for_coretemp() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "coretemp\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "58000\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_label"), "Package id 0\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let alias = readings.iter().find(|r| r.key == "cpu_temp").unwrap();
+    assert_eq!(alias.value, "58");
+}
+
+#[test]
+fn hwmon_no_cpu_temp_alias_for_non_cpu_chip() {
+    let tmp = TempDir::new().unwrap();
+    let hwmon_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("name"), "nct6798\n").unwrap();
+    fs::write(hwmon_dir.join("temp1_input"), "35000\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    assert!(readings.iter().find(|r| r.key == "cpu_temp").is_none(),
+        "Non-CPU chip should not emit cpu_temp alias");
+}
+
+#[test]
+fn hwmon_cpu_temp_alias_only_emitted_once_across_chips() {
+    // Two CPU chips in same hwmon dir — cpu_temp should only appear once
+    let tmp = TempDir::new().unwrap();
+    for (i, chip) in ["k10temp", "coretemp"].iter().enumerate() {
+        let hwmon_dir = tmp.path().join(format!("hwmon{}", i));
+        fs::create_dir_all(&hwmon_dir).unwrap();
+        fs::write(hwmon_dir.join("name"), format!("{}\n", chip)).unwrap();
+        fs::write(hwmon_dir.join("temp1_input"), "50000\n").unwrap();
+    }
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let cpu_temp_count = readings.iter().filter(|r| r.key == "cpu_temp").count();
+    assert_eq!(cpu_temp_count, 1, "cpu_temp alias should appear exactly once");
+}
+
+#[test]
 fn hwmon_millidegree_integer_division() {
     // Verify 65500 millidegrees → "65" (integer division, truncates not rounds)
     let tmp = TempDir::new().unwrap();
