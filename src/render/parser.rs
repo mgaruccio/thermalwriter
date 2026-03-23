@@ -168,10 +168,15 @@ impl<'a> HtmlParser<'a> {
                 // Child element
                 children.push(self.parse_element()?);
             } else if self.pos < self.input.len() {
-                // Text content
+                // Text content — advance by char boundary to handle multi-byte UTF-8
                 let start = self.pos;
                 while self.pos < self.input.len() && !self.starts_with("<") {
-                    self.pos += 1;
+                    // Advance to the next char boundary (handles multi-byte chars like °)
+                    self.pos += self.input[self.pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input.len() - self.pos);
                 }
                 let t = self.input[start..self.pos].trim();
                 if !t.is_empty() {
