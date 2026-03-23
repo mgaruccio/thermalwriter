@@ -1,9 +1,9 @@
 ---
 date: 2026-03-23
-topic: thermalrighter-service
+topic: thermalwriter-service
 ---
 
-# thermalrighter — Lightweight Cooler Display Service
+# thermalwriter — Lightweight Cooler Display Service
 
 ## What We're Building
 
@@ -15,7 +15,7 @@ The core insight: the cooler LCD is a dumb framebuffer — it shows whatever fra
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                  thermalrighter                   │
+│                  thermalwriter                   │
 │                  (daemon)                         │
 │                                                   │
 │  ┌─────────────┐  ┌──────────────┐               │
@@ -62,7 +62,7 @@ The core insight: the cooler LCD is a dumb framebuffer — it shows whatever fra
 - **JPEG frame encoding**: device requires it (PM=4 bulk protocol). JPEG at 480x480 is fast and small (~30-50KB per frame)
 - **Trait-based frame sources**: TemplateRenderer is primary, but screen mirroring/GPU effects/static images are future FrameSource implementations with no architectural changes
 - **Trait-based sensor providers**: extensible without modifying core. Ship with hwmon, sysinfo, MangoHud CSV, AMDGPU
-- **systemd user service**: auto-starts on login, config in ~/.config/thermalrighter/
+- **systemd user service**: auto-starts on login, config in ~/.config/thermalwriter/
 
 ## Transport Layer
 
@@ -158,11 +158,11 @@ MangoHud provider watches CSV output directory, tails latest file, parses most r
 
 ## D-Bus Interface
 
-Service name: `com.thermalrighter.Service`
-Object path: `/com/thermalrighter/display`
+Service name: `com.thermalwriter.Service`
+Object path: `/com/thermalwriter/display`
 
 ```
-Interface: com.thermalrighter.Display
+Interface: com.thermalwriter.Display
 
 Methods:
   SetLayout(path: String)          - Load a layout file and switch to it
@@ -194,19 +194,19 @@ Implemented via `zbus` derive macros.
 Subcommands of the main binary:
 
 ```
-thermalrighter ctl status          # show current state
-thermalrighter ctl layout <name>   # switch layout
-thermalrighter ctl image <path>    # push static image
-thermalrighter ctl brightness <n>  # set brightness
-thermalrighter ctl layouts         # list available layouts
-thermalrighter ctl sensors         # list sensor readings
-thermalrighter ctl reload          # reload config
+thermalwriter ctl status          # show current state
+thermalwriter ctl layout <name>   # switch layout
+thermalwriter ctl image <path>    # push static image
+thermalwriter ctl brightness <n>  # set brightness
+thermalwriter ctl layouts         # list available layouts
+thermalwriter ctl sensors         # list sensor readings
+thermalwriter ctl reload          # reload config
 ```
 
 ## Service Lifecycle
 
-- systemd user service: systemctl --user start/enable thermalrighter
-- Config directory: ~/.config/thermalrighter/
+- systemd user service: systemctl --user start/enable thermalwriter
+- Config directory: ~/.config/thermalwriter/
   - config.toml: tick rate, default layout, sensor poll interval, device settings
   - layouts/: HTML/CSS layout files
 - Ships with 2-3 built-in layouts (system stats, GPU focus, minimal)

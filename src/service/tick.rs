@@ -1,0 +1,163 @@
+// Tick loop: polls sensors, renders a frame, encodes to JPEG, sends via transport.
+
+use std::time::{Duration, Instant};
+use anyhow::Result;
+use image::{ImageBuffer, Rgba};
+use log::{debug, info, warn};
+use tiny_skia::Pixmap;
+
+use crate::render::FrameSource;
+use crate::sensor::SensorHub;
+use crate::transport::Transport;
+
+/// Rotate raw RGBA pixel data by the given degrees (0, 90, 180, 270).
+/// Returns (new_data, new_width, new_height).
+pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec<u8>, u32, u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let pixel_count = w * h;
+
+    match degrees {
+        0 => (data.to_vec(), width, height),
+        180 => {
+            let mut out = vec![0u8; data.len()];
+            for i in 0..pixel_count {
+                let src = i * 4;
+                let dst = (pixel_count - 1 - i) * 4;
+                out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+            }
+            (out, width, height)
+        }
+        90 => {
+            let mut out = vec![0u8; data.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let src = (y * w + x) * 4;
+                    let dst = (x * h + (h - 1 - y)) * 4;
+                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                }
+            }
+            (out, height, width)
+        }
+        270 => {
+            let mut out = vec![0u8; data.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let src = (y * w + x) * 4;
+                    let dst = ((w - 1 - x) * h + y) * 4;
+                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                }
+            }
+            (out, height, width)
+        }
+        _ => {
+            log::warn!("Unsupported rotation {}, using 0", degrees);
+            (data.to_vec(), width, height)
+        }
+    }
+}
+
+/// Encode a tiny-skia Pixmap to JPEG bytes, with optional rotation.
+///
+/// tiny-skia uses premultiplied RGBA; we de-multiply before JPEG encoding
+/// since JPEG doesn't support alpha and the image crate expects straight RGB(A).
+pub fn encode_jpeg(pixmap: &Pixmap, quality: u8, rotation: u16) -> Result<Vec<u8>> {
+    let data = pixmap.data(); // premultiplied RGBA
+
+    // Rotate if needed
+    let (rotated, out_w, out_h) = rotate_pixels(data, pixmap.width(), pixmap.height(), rotation);
+
+    // Convert premultiplied RGBA → straight RGBA
+    let mut rgba = Vec::with_capacity(rotated.len());
+    for chunk in rotated.chunks(4) {
+        let a = chunk[3] as u16;
+        if a == 0 {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let r = ((chunk[0] as u16 * 255) / a).min(255) as u8;
+            let g = ((chunk[1] as u16 * 255) / a).min(255) as u8;
+            let b = ((chunk[2] as u16 * 255) / a).min(255) as u8;
+            rgba.extend_from_slice(&[r, g, b, chunk[3]]);
+        }
+    }
+
+    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rgba)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+    image::DynamicImage::ImageRgba8(img).write_with_encoder(encoder)?;
+
+    Ok(buf.into_inner())
+}
+
+/// Run the tick loop. Blocks until `shutdown` is signaled.
+///
+/// `template_rx`: watch channel carrying updated HTML template strings.
+/// When a new value arrives, `frame_source.set_template()` is called before the next render.
+pub async fn run_tick_loop(
+    transport: &mut dyn Transport,
+    frame_source: &mut dyn FrameSource,
+    sensor_hub: &mut SensorHub,
+    tick_rate_fps: u32,
+    jpeg_quality: u8,
+    rotation: u16,
+    mut template_rx: tokio::sync::watch::Receiver<String>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
+    info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}, rotation={}°", tick_rate_fps, tick_duration, jpeg_quality, rotation);
+
+    loop {
+        let tick_start = Instant::now();
+
+        // Check shutdown
+        if *shutdown.borrow() {
+            info!("Tick loop shutdown requested");
+            break;
+        }
+
+        // Apply template update if one arrived since last tick
+        if template_rx.has_changed().unwrap_or(false) {
+            let new_template = template_rx.borrow_and_update().clone();
+            if !new_template.is_empty() {
+                info!("Applying template update ({} bytes)", new_template.len());
+                frame_source.set_template(&new_template);
+            }
+        }
+
+        // Poll sensors
+        let sensors = sensor_hub.poll();
+
+        // Render frame
+        match frame_source.render(&sensors) {
+            Ok(pixmap) => {
+                // Encode to JPEG
+                match encode_jpeg(&pixmap, jpeg_quality, rotation) {
+                    Ok(jpeg) => {
+                        debug!("Frame rendered: {} bytes JPEG", jpeg.len());
+                        if let Err(e) = transport.send_frame(&jpeg) {
+                            warn!("Failed to send frame: {}", e);
+                        }
+                    }
+                    Err(e) => warn!("JPEG encode failed: {}", e),
+                }
+            }
+            Err(e) => warn!("Render failed: {}", e),
+        }
+
+        // Sleep until next tick
+        let elapsed = tick_start.elapsed();
+        if elapsed < tick_duration {
+            tokio::time::sleep(tick_duration - elapsed).await;
+        }
+
+        // Check shutdown again after sleep.
+        // unwrap_or(true): if sender is dropped the daemon should exit.
+        if shutdown.has_changed().unwrap_or(true) && *shutdown.borrow() {
+            break;
+        }
+    }
+
+    Ok(())
+}

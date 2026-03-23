@@ -1,4 +1,4 @@
-# thermalrighter Implementation Plan
+# thermalwriter Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use forge:executing-plans to implement this plan task-by-task.
 
@@ -31,11 +31,11 @@
 - Endpoints are discovered by iterating the active configuration's interfaces
 
 **zbus API (verified via Context7):**
-- `#[interface(name = "com.thermalrighter.Display")]` derive macro on impl block
+- `#[interface(name = "com.thermalwriter.Display")]` derive macro on impl block
 - Methods are just `async fn` or `fn` on the impl
 - Properties use `#[zbus(property)]` on getter/setter methods
 - Signals use `#[zbus(signal)]` on method signatures
-- `Builder::session()?.name("com.thermalrighter.Service")?.serve_at(path, obj)?.build().await?`
+- `Builder::session()?.name("com.thermalwriter.Service")?.serve_at(path, obj)?.build().await?`
 - Client proxy uses `#[proxy(...)]` trait derive macro
 
 **taffy API (verified via Context7):**
@@ -81,7 +81,7 @@
 
 ### Project Structure
 ```
-thermalrighter/
+thermalwriter/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs              # Entry point: daemon or CLI dispatch
@@ -111,7 +111,7 @@ thermalrighter/
 │   ├── gpu-focus.html       # GPU-centric layout
 │   └── minimal.html         # Clock + CPU temp only
 ├── systemd/
-│   └── thermalrighter.service  # systemd user unit
+│   └── thermalwriter.service  # systemd user unit
 └── tests/
     ├── transport_tests.rs
     ├── render_tests.rs
@@ -162,7 +162,7 @@ thermalrighter/
 `Cargo.toml` dependencies:
 ```toml
 [package]
-name = "thermalrighter"
+name = "thermalwriter"
 version = "0.1.0"
 edition = "2024"
 
@@ -189,7 +189,7 @@ thiserror = "2"
 tempfile = "3"
 ```
 
-Each module's `mod.rs` should have a comment describing its purpose and be empty otherwise. `src/main.rs` should just call `println!("thermalrighter")` and exit. `src/lib.rs` should declare the modules:
+Each module's `mod.rs` should have a comment describing its purpose and be empty otherwise. `src/main.rs` should just call `println!("thermalwriter")` and exit. `src/lib.rs` should declare the modules:
 ```rust
 pub mod transport;
 pub mod sensor;
@@ -202,7 +202,7 @@ pub mod service;
 - [ ] `cargo test` runs (even with zero tests)
 - [ ] All module files exist and are declared in `lib.rs`
 - [ ] No unused dependency warnings (each dep will be used; warnings are OK for now since modules are stubs)
-- [ ] `cargo run` prints "thermalrighter" and exits cleanly
+- [ ] `cargo run` prints "thermalwriter" and exits cleanly
 - [ ] Committed with message "feat: project scaffolding with dependencies"
 
 ---
@@ -246,7 +246,7 @@ pub trait Transport: Send {
 
 In `tests/transport_tests.rs`:
 ```rust
-use thermalrighter::transport::bulk_usb;
+use thermalwriter::transport::bulk_usb;
 
 #[test]
 fn handshake_payload_is_64_bytes() {
@@ -527,7 +527,7 @@ In `examples/send_test_frame.rs`:
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use std::io::Cursor;
-use thermalrighter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -703,7 +703,7 @@ pub fn parse_style(style_str: &str) -> ElementStyle {
 
 In `tests/render_tests.rs`:
 ```rust
-use thermalrighter::render::parser::*;
+use thermalwriter::render::parser::*;
 
 #[test]
 fn parse_style_extracts_flex_properties() {
@@ -973,8 +973,8 @@ git commit -m "feat: HTML/CSS subset parser for layout templates"
 
 Add to `tests/render_tests.rs`:
 ```rust
-use thermalrighter::render::layout::*;
-use thermalrighter::render::parser::*;
+use thermalwriter::render::layout::*;
+use thermalwriter::render::parser::*;
 
 #[test]
 fn layout_single_element_fills_container() {
@@ -1180,7 +1180,7 @@ git commit -m "feat: taffy-based layout computation from element tree"
 
 Add to `tests/render_tests.rs`:
 ```rust
-use thermalrighter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::render::{FrameSource, TemplateRenderer};
 use std::collections::HashMap;
 
 #[test]
@@ -1542,8 +1542,8 @@ impl SensorHub {
 
 In `tests/sensor_tests.rs`:
 ```rust
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::SensorProvider;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
 
@@ -1819,8 +1819,8 @@ Before starting, confirm with devs who implemented Tasks 2-3, 6-8, and 11-13 tha
 
 Add to `tests/integration_tests.rs`:
 ```rust
-use thermalrighter::render::{SensorData, FrameSource};
-use thermalrighter::transport::{DeviceInfo, Transport};
+use thermalwriter::render::{SensorData, FrameSource};
+use thermalwriter::transport::{DeviceInfo, Transport};
 use anyhow::Result;
 use tiny_skia::Pixmap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1849,7 +1849,7 @@ impl FrameSource for MockFrameSource {
 
 #[test]
 fn jpeg_encode_produces_valid_output() {
-    use thermalrighter::service::tick::encode_jpeg;
+    use thermalwriter::service::tick::encode_jpeg;
     let pixmap = Pixmap::new(480, 480).unwrap();
     let jpeg = encode_jpeg(&pixmap, 85).unwrap();
     // JPEG files start with FF D8
@@ -2022,7 +2022,7 @@ impl DisplayInterface {
     }
 }
 
-#[interface(name = "com.thermalrighter.Display")]
+#[interface(name = "com.thermalwriter.Display")]
 impl DisplayInterface {
     async fn set_layout(&self, name: String,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
@@ -2137,12 +2137,12 @@ impl DisplayInterface {
 pub async fn serve(state: Arc<Mutex<ServiceState>>) -> anyhow::Result<zbus::Connection> {
     let iface = DisplayInterface::new(state);
     let connection = zbus::connection::Builder::session()?
-        .name("com.thermalrighter.Service")?
-        .serve_at("/com/thermalrighter/display", iface)?
+        .name("com.thermalwriter.Service")?
+        .serve_at("/com/thermalwriter/display", iface)?
         .build()
         .await?;
 
-    info!("D-Bus service registered: com.thermalrighter.Service");
+    info!("D-Bus service registered: com.thermalwriter.Service");
     Ok(connection)
 }
 ```
@@ -2158,16 +2158,16 @@ use tokio::sync::{Mutex, watch, mpsc};
 
 mod cli;
 
-use thermalrighter::sensor::SensorHub;
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalrighter::sensor::amdgpu::AmdGpuProvider;
-use thermalrighter::sensor::mangohud::MangoHudProvider;
-use thermalrighter::render::TemplateRenderer;
-use thermalrighter::service::dbus::{self, ServiceState};
-use thermalrighter::service::tick;
-use thermalrighter::transport::Transport;
-use thermalrighter::transport::bulk_usb::BulkUsb;
+use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::render::TemplateRenderer;
+use thermalwriter::service::dbus::{self, ServiceState};
+use thermalwriter::service::tick;
+use thermalwriter::transport::Transport;
+use thermalwriter::transport::bulk_usb::BulkUsb;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -2178,7 +2178,7 @@ async fn main() -> Result<()> {
 
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("thermalrighter");
+        .join("thermalwriter");
     let layout_dir = config_dir.join("layouts");
     std::fs::create_dir_all(&layout_dir)?;
 
@@ -2244,7 +2244,7 @@ async fn main() -> Result<()> {
     ).await?;
 
     transport.close();
-    info!("thermalrighter shutdown complete");
+    info!("thermalwriter shutdown complete");
     Ok(())
 }
 ```
@@ -2278,7 +2278,7 @@ git commit -m "feat: D-Bus interface and daemon main entry point"
 - [ ] D-Bus `set_tick_rate` validates range (1-30) — prevents 0 FPS (infinite loop) or unreasonable rates
 - [ ] D-Bus `set_layout` checks that the layout file exists before accepting — prevents silent failures
 - [ ] `ServiceState` uses `Arc<Mutex<>>` for shared access between D-Bus and tick loop — not `Rc` (would panic in async context)
-- [ ] D-Bus service name is `com.thermalrighter.Service` and object path is `/com/thermalrighter/display` — matching the design doc
+- [ ] D-Bus service name is `com.thermalwriter.Service` and object path is `/com/thermalwriter/display` — matching the design doc
 
 **Quality items (non-blocking):**
 - [ ] Tick loop logs frame render time for performance monitoring
@@ -2296,7 +2296,7 @@ git commit -m "feat: D-Bus interface and daemon main entry point"
 - D-Bus interface exposes SetLayout, GetStatus, ListLayouts, Stop, and properties
 - Daemon starts, connects to device, and pushes live-rendered frames
 - Test by running the daemon and verifying the cooler LCD shows sensor data
-- Verify D-Bus works: `busctl call com.thermalrighter.Service /com/thermalrighter/display com.thermalrighter.Display GetStatus`
+- Verify D-Bus works: `busctl call com.thermalwriter.Service /com/thermalwriter/display com.thermalwriter.Display GetStatus`
 - Review findings and resolutions
 
 **Wait for user response before proceeding to Task 20.**
@@ -2312,8 +2312,8 @@ git commit -m "feat: D-Bus interface and daemon main entry point"
 - Modify: `src/main.rs` — dispatch between `daemon` and `ctl` subcommands
 
 **Implement:** CLI using clap with two top-level subcommands:
-- `thermalrighter daemon` — start the background service (current main.rs logic)
-- `thermalrighter ctl <subcommand>` — D-Bus client commands
+- `thermalwriter daemon` — start the background service (current main.rs logic)
+- `thermalwriter ctl <subcommand>` — D-Bus client commands
 
 The `ctl` subcommand uses zbus proxy (the `#[proxy(...)]` derive macro) to call D-Bus methods:
 - `ctl status` → calls `GetStatus()`, prints key-value pairs
@@ -2326,9 +2326,9 @@ The `ctl` subcommand uses zbus proxy (the `#[proxy(...)]` derive macro) to call 
 Follow the zbus proxy pattern from Context7 research:
 ```rust
 #[zbus::proxy(
-    interface = "com.thermalrighter.Display",
-    default_service = "com.thermalrighter.Service",
-    default_path = "/com/thermalrighter/display"
+    interface = "com.thermalwriter.Display",
+    default_service = "com.thermalwriter.Service",
+    default_path = "/com/thermalwriter/display"
 )]
 trait Display {
     async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
@@ -2339,9 +2339,9 @@ trait Display {
 
 **Confirm checklist:**
 - [ ] Failing test written FIRST (at minimum: test that CLI parses known subcommands without error)
-- [ ] `thermalrighter` with no args prints help and exits
-- [ ] `thermalrighter daemon` runs the service (moves existing main logic into a function)
-- [ ] `thermalrighter ctl status` connects to D-Bus and prints output, or prints clear error if service isn't running
+- [ ] `thermalwriter` with no args prints help and exits
+- [ ] `thermalwriter daemon` runs the service (moves existing main logic into a function)
+- [ ] `thermalwriter ctl status` connects to D-Bus and prints output, or prints clear error if service isn't running
 - [ ] Proxy trait matches the D-Bus interface in `dbus.rs` exactly (same method signatures)
 - [ ] No `unwrap()` on D-Bus proxy calls — user-facing errors should be readable
 - [ ] Committed with clear message
@@ -2359,7 +2359,7 @@ trait Display {
 
 **Implement:** TOML config parsing and 3 built-in HTML layouts.
 
-Config file at `~/.config/thermalrighter/config.toml`:
+Config file at `~/.config/thermalwriter/config.toml`:
 ```toml
 [display]
 tick_rate = 2
@@ -2378,7 +2378,7 @@ Three built-in layouts embedded via `include_str!`:
 - `gpu-focus.html`: GPU-centric with larger GPU metrics, smaller CPU
 - `minimal.html`: Just a clock and CPU temp
 
-On first run, copy built-in layouts to `~/.config/thermalrighter/layouts/` so users can edit them.
+On first run, copy built-in layouts to `~/.config/thermalwriter/layouts/` so users can edit them.
 
 **Confirm checklist:**
 - [ ] Failing test written FIRST (config parsing with known TOML input)
@@ -2395,19 +2395,19 @@ On first run, copy built-in layouts to `~/.config/thermalrighter/layouts/` so us
 ### Task 22: systemd user service unit [DO-CONFIRM]
 
 **Files:**
-- Create: `systemd/thermalrighter.service`
+- Create: `systemd/thermalwriter.service`
 
 **Implement:** A systemd user service unit file.
 
 ```ini
 [Unit]
 Description=Thermalright Cooler LCD Display Service
-Documentation=https://github.com/mgaruccio/thermalrighter
+Documentation=https://github.com/mgaruccio/thermalwriter
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/thermalrighter daemon
+ExecStart=/usr/bin/thermalwriter daemon
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
@@ -2433,7 +2433,7 @@ WantedBy=default.target
 
 **Killer items (blocking):**
 - [ ] CLI proxy trait in `cli.rs` matches D-Bus interface in `dbus.rs` — same method names, same parameter types, same return types
-- [ ] `thermalrighter ctl status` exits with non-zero code when D-Bus service is not running (e.g., exit code 1 with "Service not running" message)
+- [ ] `thermalwriter ctl status` exits with non-zero code when D-Bus service is not running (e.g., exit code 1 with "Service not running" message)
 - [ ] Config `default_layout` is used on startup — verify in `main.rs` that it reads the config before loading the layout
 - [ ] Built-in layouts parse successfully through `parse_html()` without errors — run each through the parser in a test
 - [ ] systemd service has `After=default.target` — without this, the service may start before the user's D-Bus session is ready
@@ -2452,8 +2452,8 @@ WantedBy=default.target
 
 **Present to user:**
 - Complete working system: daemon + CLI + config + systemd service
-- Demo: `systemctl --user start thermalrighter`, verify LCD shows live data
-- Demo: `thermalrighter ctl status`, `thermalrighter ctl layouts`, `thermalrighter ctl layout gpu-focus.html`
+- Demo: `systemctl --user start thermalwriter`, verify LCD shows live data
+- Demo: `thermalwriter ctl status`, `thermalwriter ctl layouts`, `thermalwriter ctl layout gpu-focus.html`
 - Full test suite passes
 - List of all sensor keys available
 - Binary size and memory footprint compared to trcc

@@ -1,0 +1,10 @@
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #000000; color: #ffffff; padding: 40px; gap: 24px; justify-content: center; align-items: center;">
+  <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
+    <span style="font-size: 72px; color: #ffffff;">{{ cpu_temp | default(value="--") }}°C</span>
+    <span style="font-size: 20px; color: #888888;">CPU TEMP</span>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 4px; align-items: center;">
+    <span style="font-size: 32px; color: #444444;">{{ cpu_util | default(value="--") }}%</span>
+    <span style="font-size: 14px; color: #333333;">LOAD</span>
+  </div>
+</div>

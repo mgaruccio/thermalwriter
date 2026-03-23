@@ -1,0 +1,37 @@
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #0d0d1a; color: #e0e0e0; padding: 20px; gap: 10px;">
+  <div style="font-size: 16px; color: #666666;">GPU FOCUS</div>
+  <div style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 12px; gap: 4px;">
+      <span style="font-size: 14px; color: #888888;">GPU TEMPERATURE</span>
+      <span style="font-size: 52px; color: #e94560;">{{ gpu_temp | default(value="--") }}°C</span>
+    </div>
+    <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 12px; gap: 4px;">
+      <span style="font-size: 14px; color: #888888;">GPU UTILIZATION</span>
+      <span style="font-size: 52px; color: #0f3460;">{{ gpu_util | default(value="--") }}%</span>
+    </div>
+    <div style="display: flex; flex-direction: row; gap: 8px;">
+      <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 10px; gap: 2px;">
+        <span style="font-size: 12px; color: #888888;">POWER</span>
+        <span style="font-size: 24px; color: #533483;">{{ gpu_power | default(value="--") }}W</span>
+      </div>
+      <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 10px; gap: 2px;">
+        <span style="font-size: 12px; color: #888888;">VRAM</span>
+        <span style="font-size: 24px; color: #533483;">{{ vram_used | default(value="--") }}/{{ vram_total | default(value="--") }}G</span>
+      </div>
+      <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 10px; gap: 2px;">
+        <span style="font-size: 12px; color: #888888;">FPS</span>
+        <span style="font-size: 24px; color: #e94560;">{{ fps | default(value="--") }}</span>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: row; gap: 8px;">
+      <div style="display: flex; flex-direction: column; background: #111122; padding: 10px; gap: 2px;">
+        <span style="font-size: 12px; color: #666666;">CPU</span>
+        <span style="font-size: 18px; color: #aaaaaa;">{{ cpu_temp | default(value="--") }}°C {{ cpu_util | default(value="--") }}%</span>
+      </div>
+      <div style="display: flex; flex-direction: column; background: #111122; padding: 10px; gap: 2px;">
+        <span style="font-size: 12px; color: #666666;">RAM</span>
+        <span style="font-size: 18px; color: #aaaaaa;">{{ ram_used | default(value="--") }}/{{ ram_total | default(value="--") }}G</span>
+      </div>
+    </div>
+  </div>
+</div>
