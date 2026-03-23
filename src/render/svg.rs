@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use resvg::usvg;
+use tera::Tera;
 use tiny_skia::{Pixmap, Transform};
 
 use super::{FrameSource, SensorData};
@@ -13,7 +14,8 @@ const EMBEDDED_FONT_FAMILY: &str = "DejaVu Sans Mono";
 
 /// Renders SVG templates with sensor data substitution via Tera + resvg.
 pub struct SvgRenderer<'a> {
-    template: String,
+    tera: Tera,
+    template_name: String,
     width: u32,
     height: u32,
     options: usvg::Options<'a>,
@@ -30,8 +32,15 @@ impl<'a> SvgRenderer<'a> {
         // Map the CSS "monospace" generic family to our embedded font
         options.fontdb_mut().set_monospace_family(EMBEDDED_FONT_FAMILY);
 
+        let mut tera = Tera::default();
+        tera.autoescape_on(vec![]); // Disable autoescaping for SVG
+        super::components::register_all(&mut tera);
+        tera.add_raw_template("layout", template)
+            .context("Failed to add template to Tera")?;
+
         Ok(Self {
-            template: template.to_string(),
+            tera,
+            template_name: "layout".to_string(),
             width,
             height,
             options,
@@ -46,7 +55,7 @@ impl FrameSource for SvgRenderer<'static> {
         for (key, value) in sensors {
             context.insert(key, value);
         }
-        let svg_string = tera::Tera::one_off(&self.template, &context, false)
+        let svg_string = self.tera.render(&self.template_name, &context)
             .context("Tera template substitution failed")?;
 
         // Step 2: Parse SVG with usvg
@@ -73,6 +82,7 @@ impl FrameSource for SvgRenderer<'static> {
     }
 
     fn set_template(&mut self, template: &str) {
-        self.template = template.to_string();
+        // Re-add template to the persistent Tera instance
+        let _ = self.tera.add_raw_template(&self.template_name, template);
     }
 }
