@@ -1,4 +1,6 @@
 use thermalrighter::sensor::hwmon::HwmonProvider;
+use thermalrighter::sensor::amdgpu::AmdGpuProvider;
+use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalrighter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
@@ -110,4 +112,147 @@ fn sensor_hub_continues_on_provider_failure() {
     // Should not panic, returns empty map
     let data = hub.poll();
     assert!(data.is_empty());
+}
+
+// ─── AmdGpuProvider tests ────────────────────────────────────────────────────
+
+/// Build a fake DRM sysfs tree for testing AmdGpuProvider.
+/// Returns: (TempDir, card_device_path)
+fn build_fake_drm_tree(tmp: &TempDir) -> std::path::PathBuf {
+    let card_dir = tmp.path().join("card0").join("device");
+    fs::create_dir_all(&card_dir).unwrap();
+
+    // GPU utilization
+    fs::write(card_dir.join("gpu_busy_percent"), "42\n").unwrap();
+
+    // VRAM: 4 GiB used, 8 GiB total
+    fs::write(card_dir.join("mem_info_vram_used"), "4294967296\n").unwrap();
+    fs::write(card_dir.join("mem_info_vram_total"), "8589934592\n").unwrap();
+
+    // hwmon subdir for power and temperature
+    let hwmon_dir = card_dir.join("hwmon").join("hwmon0");
+    fs::create_dir_all(&hwmon_dir).unwrap();
+    fs::write(hwmon_dir.join("power1_average"), "120000000\n").unwrap(); // 120 W in microwatts
+    fs::write(hwmon_dir.join("temp1_input"), "65000\n").unwrap(); // 65°C in millidegrees
+
+    tmp.path().to_path_buf()
+}
+
+#[test]
+fn amdgpu_reads_gpu_utilization() {
+    let tmp = TempDir::new().unwrap();
+    build_fake_drm_tree(&tmp);
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let util = readings.iter().find(|r| r.key == "gpu_util").unwrap();
+    assert_eq!(util.value, "42");
+}
+
+#[test]
+fn amdgpu_converts_vram_bytes_to_gb() {
+    let tmp = TempDir::new().unwrap();
+    build_fake_drm_tree(&tmp);
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let used = readings.iter().find(|r| r.key == "vram_used").unwrap();
+    assert_eq!(used.value, "4.0");
+
+    let total = readings.iter().find(|r| r.key == "vram_total").unwrap();
+    assert_eq!(total.value, "8.0");
+}
+
+#[test]
+fn amdgpu_converts_microwatts_to_watts() {
+    let tmp = TempDir::new().unwrap();
+    build_fake_drm_tree(&tmp);
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let power = readings.iter().find(|r| r.key == "gpu_power").unwrap();
+    assert_eq!(power.value, "120");
+}
+
+#[test]
+fn amdgpu_converts_millidegrees_to_degrees() {
+    let tmp = TempDir::new().unwrap();
+    build_fake_drm_tree(&tmp);
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let temp = readings.iter().find(|r| r.key == "gpu_temp").unwrap();
+    assert_eq!(temp.value, "65");
+}
+
+#[test]
+fn amdgpu_missing_sysfs_returns_empty_not_error() {
+    let mut provider = AmdGpuProvider::with_base_path("/nonexistent/drm/path".into());
+    let result = provider.poll().unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn amdgpu_partial_sysfs_no_panic() {
+    // Missing hwmon subdir — should still return partial readings
+    let tmp = TempDir::new().unwrap();
+    let card_dir = tmp.path().join("card0").join("device");
+    fs::create_dir_all(&card_dir).unwrap();
+    fs::write(card_dir.join("gpu_busy_percent"), "55\n").unwrap();
+    // No hwmon, no VRAM files
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    // gpu_util should be present, no panic on missing files
+    let util = readings.iter().find(|r| r.key == "gpu_util").unwrap();
+    assert_eq!(util.value, "55");
+}
+
+// ─── SysinfoProvider tests ───────────────────────────────────────────────────
+
+#[test]
+fn sysinfo_returns_ram_readings() {
+    let mut provider = SysinfoProvider::new();
+    let readings = provider.poll().unwrap();
+
+    let ram_used = readings.iter().find(|r| r.key == "ram_used").unwrap();
+    let ram_total = readings.iter().find(|r| r.key == "ram_total").unwrap();
+
+    // Values should be non-zero on any real machine
+    let used: f64 = ram_used.value.parse().unwrap();
+    let total: f64 = ram_total.value.parse().unwrap();
+    assert!(used > 0.0);
+    assert!(total > 0.0);
+    assert!(used <= total);
+    assert_eq!(ram_used.unit, "GB");
+    assert_eq!(ram_total.unit, "GB");
+}
+
+#[test]
+fn sysinfo_returns_cpu_util() {
+    let mut provider = SysinfoProvider::new();
+    let readings = provider.poll().unwrap();
+
+    let cpu = readings.iter().find(|r| r.key == "cpu_util").unwrap();
+    let util: f64 = cpu.value.parse().unwrap();
+    // CPU util should be 0-100
+    assert!((0.0..=100.0).contains(&util));
+    assert_eq!(cpu.unit, "%");
+}
+
+#[test]
+fn sysinfo_ram_format_one_decimal() {
+    let mut provider = SysinfoProvider::new();
+    let readings = provider.poll().unwrap();
+
+    let ram_used = readings.iter().find(|r| r.key == "ram_used").unwrap();
+    // Should have exactly 1 decimal place e.g. "7.8"
+    let parts: Vec<&str> = ram_used.value.split('.').collect();
+    assert_eq!(parts.len(), 2, "Expected 1 decimal place in '{}'", ram_used.value);
+    assert_eq!(parts[1].len(), 1, "Expected exactly 1 decimal digit in '{}'", ram_used.value);
 }
