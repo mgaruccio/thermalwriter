@@ -76,7 +76,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
             let mut fs = MockFrameSource { last_template: None };
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })
@@ -126,7 +126,7 @@ async fn tick_loop_applies_template_update() {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
             let mut fs = TrackingFrameSource { applied: applied_clone };
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
         })
     });
 
