@@ -190,10 +190,9 @@ Renders a full-canvas background. Three modes: SVG pattern, base64 PNG, or file 
 ```
 
 **Notes:**
-- Pattern mode emits `<defs><pattern>` + `<rect>` — unique pattern ID prevents collisions
+- Pattern mode emits `<defs><pattern>` + `<rect>` — each call gets a deterministic `bg-pattern-{hash}` ID based on `(pattern, color, spacing)`, so multiple calls with different args coexist safely in the same SVG document
 - Image mode uses SVG `<image href="data:image/png;base64,...">` — resvg supports this
 - Call background FIRST in document order so it appears behind other elements
-- At most one background per layout (last call wins)
 
 ---
 

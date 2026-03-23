@@ -118,6 +118,8 @@ impl FrameSource for SvgRenderer<'static> {
 
     fn set_template(&mut self, template: &str) {
         // Re-add template to the persistent Tera instance
-        let _ = self.tera.add_raw_template(&self.template_name, template);
+        if let Err(e) = self.tera.add_raw_template(&self.template_name, template) {
+            log::warn!("Failed to update template: {}", e);
+        }
     }
 }
