@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use crate::theme::ThemePalette;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -52,9 +53,18 @@ impl Default for SensorsConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
+pub struct ThemeConfig {
+    pub source: String,
+    pub background_image: Option<String>,
+    pub manual: Option<ThemePalette>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Config {
     pub display: DisplayConfig,
     pub sensors: SensorsConfig,
+    pub theme: ThemeConfig,
 }
 
 impl Config {
