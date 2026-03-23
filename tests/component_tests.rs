@@ -182,3 +182,51 @@ fn background_with_opacity_sets_attribute() {
 
     assert!(result.contains("opacity=\"0.3\""), "Should set opacity attribute");
 }
+
+#[test]
+fn background_pattern_id_matches_fill_reference() {
+    // The fill="url(#X)" on the rect must reference the same id="X" in the pattern def.
+    let mut tera = Tera::default();
+    thermalwriter::render::components::register_all(&mut tera);
+
+    let context = Context::new();
+    let template = r##"{{ background(pattern="dots", color="#ff000020", spacing=15) }}"##;
+    tera.add_raw_template("test.svg", template).unwrap();
+    let result = tera.render("test.svg", &context).unwrap();
+
+    // Extract id from pattern element: id="bg-pattern-XXXX"
+    let id_start = result.find("id=\"").unwrap() + 4;
+    let id_end = result[id_start..].find('"').unwrap() + id_start;
+    let pat_id = &result[id_start..id_end];
+
+    let expected_fill = format!("fill=\"url(#{})", pat_id);
+    assert!(result.contains(&expected_fill), "fill url reference should match pattern id: {}", result);
+}
+
+#[test]
+fn background_different_patterns_produce_different_ids() {
+    let mut tera = Tera::default();
+    thermalwriter::render::components::register_all(&mut tera);
+
+    let context = Context::new();
+    let template_grid = r##"{{ background(pattern="grid", color="#ffffff10", spacing=20) }}"##;
+    let template_dots = r##"{{ background(pattern="dots", color="#ffffff10", spacing=20) }}"##;
+
+    tera.add_raw_template("grid.svg", template_grid).unwrap();
+    tera.add_raw_template("dots.svg", template_dots).unwrap();
+
+    let result_grid = tera.render("grid.svg", &context).unwrap();
+    let result_dots = tera.render("dots.svg", &context).unwrap();
+
+    let extract_id = |s: &str| -> String {
+        let start = s.find("id=\"").unwrap() + 4;
+        let end = s[start..].find('"').unwrap() + start;
+        s[start..end].to_string()
+    };
+
+    let id_grid = extract_id(&result_grid);
+    let id_dots = extract_id(&result_dots);
+    assert_ne!(id_grid, id_dots, "Different pattern args should produce different IDs");
+    assert!(id_grid.starts_with("bg-pattern-"), "ID should have bg-pattern- prefix");
+    assert!(id_dots.starts_with("bg-pattern-"), "ID should have bg-pattern- prefix");
+}

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use tera::{Function, Result, Value};
 
 /// Tera function that emits SVG background fragments.
@@ -46,15 +48,21 @@ impl Function for BackgroundFunction {
         let color = args.get("color").and_then(|v| v.as_str()).unwrap_or("#ffffff10");
         let spacing = args.get("spacing").and_then(|v| v.as_f64()).unwrap_or(20.0);
 
+        // Generate a unique pattern ID from the args so multiple background()
+        // calls in the same SVG document don't collide on id="bg-pattern".
+        let pat_id = unique_pattern_id(pattern, color, spacing as u64);
+
         let pattern_def = match pattern {
             "dots" => format!(
-                r#"<defs><pattern id="bg-pattern" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><circle cx="{h}" cy="{h}" r="1" fill="{c}"/></pattern></defs>"#,
+                r#"<defs><pattern id="{id}" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><circle cx="{h}" cy="{h}" r="1" fill="{c}"/></pattern></defs>"#,
+                id = pat_id,
                 s = spacing,
                 h = spacing / 2.0,
                 c = color
             ),
             "carbon" => format!(
-                r#"<defs><pattern id="bg-pattern" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="{h}" height="{h}" fill="{c}"/><rect x="{h}" y="{h}" width="{h}" height="{h}" fill="{c}"/></pattern></defs>"#,
+                r#"<defs><pattern id="{id}" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="{h}" height="{h}" fill="{c}"/><rect x="{h}" y="{h}" width="{h}" height="{h}" fill="{c}"/></pattern></defs>"#,
+                id = pat_id,
                 s = spacing,
                 h = spacing / 2.0,
                 c = color
@@ -64,7 +72,8 @@ impl Function for BackgroundFunction {
                 let row_h = r * 1.732;
                 let col_w = spacing * 1.5;
                 format!(
-                    r#"<defs><pattern id="bg-pattern" x="0" y="0" width="{cw}" height="{rh}" patternUnits="userSpaceOnUse"><polygon points="{r},0 {d},{q} {d},{t} {r},{rh} 0,{t} 0,{q}" fill="none" stroke="{c}" stroke-width="0.5"/></pattern></defs>"#,
+                    r#"<defs><pattern id="{id}" x="0" y="0" width="{cw}" height="{rh}" patternUnits="userSpaceOnUse"><polygon points="{r},0 {d},{q} {d},{t} {r},{rh} 0,{t} 0,{q}" fill="none" stroke="{c}" stroke-width="0.5"/></pattern></defs>"#,
+                    id = pat_id,
                     cw = col_w,
                     rh = row_h,
                     r = r,
@@ -77,7 +86,8 @@ impl Function for BackgroundFunction {
             _ => {
                 // Default: grid
                 format!(
-                    r#"<defs><pattern id="bg-pattern" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><line x1="{s}" y1="0" x2="{s}" y2="{s}" stroke="{c}" stroke-width="0.5"/><line x1="0" y1="{s}" x2="{s}" y2="{s}" stroke="{c}" stroke-width="0.5"/></pattern></defs>"#,
+                    r#"<defs><pattern id="{id}" x="0" y="0" width="{s}" height="{s}" patternUnits="userSpaceOnUse"><line x1="{s}" y1="0" x2="{s}" y2="{s}" stroke="{c}" stroke-width="0.5"/><line x1="0" y1="{s}" x2="{s}" y2="{s}" stroke="{c}" stroke-width="0.5"/></pattern></defs>"#,
+                    id = pat_id,
                     s = spacing,
                     c = color
                 )
@@ -85,11 +95,12 @@ impl Function for BackgroundFunction {
         };
 
         let svg = format!(
-            r#"<g opacity="{op}">{pat}<rect x="0" y="0" width="{w}" height="{h}" fill="url(#bg-pattern)"/></g>"#,
+            r#"<g opacity="{op}">{pat}<rect x="0" y="0" width="{w}" height="{h}" fill="url(#{id})"/></g>"#,
             op = opacity,
             pat = pattern_def,
             w = w,
-            h = h
+            h = h,
+            id = pat_id
         );
 
         Ok(Value::String(svg))
@@ -98,4 +109,15 @@ impl Function for BackgroundFunction {
     fn is_safe(&self) -> bool {
         true // Don't HTML-escape the SVG output
     }
+}
+
+/// Generate a deterministic pattern ID from the pattern arguments.
+/// Two calls with the same args produce the same ID (idempotent).
+/// Two calls with different args produce different IDs (collision-free in practice).
+fn unique_pattern_id(pattern: &str, color: &str, spacing: u64) -> String {
+    let mut h = DefaultHasher::new();
+    pattern.hash(&mut h);
+    color.hash(&mut h);
+    spacing.hash(&mut h);
+    format!("bg-pattern-{:x}", h.finish())
 }
