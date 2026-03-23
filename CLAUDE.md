@@ -33,7 +33,7 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (57 tests)
+cargo test                               # run tests (93 tests)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
@@ -66,7 +66,7 @@ Key gotchas:
 - HTML layouts: every text element needs explicit `height` (taffy can't measure text)
 - HTML layouts: comments (`<!-- -->`) break the custom parser
 - Seeded layouts in ~/.config/thermalwriter/layouts/ don't auto-update — copy manually after changes
-- Built-in SVG layouts: svg/neon-dash, svg/arc-gauge, svg/cyber-grid
+- Built-in SVG layouts: svg/neon-dash-v2 (default), svg/neon-dash, svg/arc-gauge, svg/cyber-grid
 - Built-in HTML layouts: system-stats, gpu-focus, minimal, neon-dash, dual-gauge, fps-hero
 
 ## Config
@@ -75,7 +75,7 @@ Key gotchas:
 ```toml
 [display]
 tick_rate = 2
-default_layout = "svg/neon-dash.svg"
+default_layout = "svg/neon-dash-v2.svg"
 jpeg_quality = 85
 rotation = 180  # 0, 90, 180, 270
 
