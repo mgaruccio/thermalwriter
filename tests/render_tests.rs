@@ -1,6 +1,6 @@
-use thermalrighter::render::parser::*;
-use thermalrighter::render::layout::*;
-use thermalrighter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::render::parser::*;
+use thermalwriter::render::layout::*;
+use thermalwriter::render::{FrameSource, TemplateRenderer};
 use std::collections::HashMap;
 
 #[test]

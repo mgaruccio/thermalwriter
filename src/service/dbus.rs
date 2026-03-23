@@ -1,4 +1,4 @@
-// D-Bus interface: exposes service control via com.thermalrighter.Display.
+// D-Bus interface: exposes service control via com.thermalwriter.Display.
 // Methods: set_layout, get_status, list_layouts, list_sensors, stop, reload.
 // Properties: active_layout, connected, resolution, tick_rate.
 // Signals: layout_changed, device_connected, device_disconnected, error.
@@ -32,7 +32,7 @@ impl DisplayInterface {
     }
 }
 
-#[interface(name = "com.thermalrighter.Display")]
+#[interface(name = "com.thermalwriter.Display")]
 impl DisplayInterface {
     /// Switch the active layout. Returns an error if the layout file doesn't exist.
     async fn set_layout(
@@ -171,11 +171,11 @@ impl DisplayInterface {
 pub async fn serve(state: Arc<Mutex<ServiceState>>) -> anyhow::Result<zbus::Connection> {
     let iface = DisplayInterface::new(state);
     let connection = zbus::connection::Builder::session()?
-        .name("com.thermalrighter.Service")?
-        .serve_at("/com/thermalrighter/display", iface)?
+        .name("com.thermalwriter.Service")?
+        .serve_at("/com/thermalwriter/display", iface)?
         .build()
         .await?;
 
-    info!("D-Bus service registered: com.thermalrighter.Service at /com/thermalrighter/display");
+    info!("D-Bus service registered: com.thermalwriter.Service at /com/thermalwriter/display");
     Ok(connection)
 }

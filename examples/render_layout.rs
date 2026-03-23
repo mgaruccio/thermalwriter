@@ -5,14 +5,14 @@
 use anyhow::Result;
 use std::thread;
 use std::time::Duration;
-use thermalrighter::render::{FrameSource, TemplateRenderer};
-use thermalrighter::sensor::SensorHub;
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalrighter::sensor::amdgpu::AmdGpuProvider;
-use thermalrighter::sensor::nvidia::NvidiaProvider;
-use thermalrighter::service::tick::encode_jpeg;
-use thermalrighter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::service::tick::encode_jpeg;
+use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
     let pixmap = renderer.render(&sensors)?;
 
     // Save un-rotated PNG preview
-    let png_path = format!("/tmp/thermalrighter_{}.png", layout_name);
+    let png_path = format!("/tmp/thermalwriter_{}.png", layout_name);
     pixmap.save_png(&png_path)?;
     println!("\nSaved preview (before rotation): {}", png_path);
 

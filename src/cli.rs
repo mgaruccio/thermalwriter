@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 /// Thermalright cooler LCD display daemon and control CLI.
 #[derive(Parser, Debug)]
-#[command(name = "thermalrighter", about = "Thermalright cooler LCD display daemon")]
+#[command(name = "thermalwriter", about = "Thermalright cooler LCD display daemon")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -40,11 +40,11 @@ pub enum CtlCommand {
     Reload,
 }
 
-/// zbus proxy for the com.thermalrighter.Display D-Bus interface.
+/// zbus proxy for the com.thermalwriter.Display D-Bus interface.
 #[zbus::proxy(
-    interface = "com.thermalrighter.Display",
-    default_service = "com.thermalrighter.Service",
-    default_path = "/com/thermalrighter/display"
+    interface = "com.thermalwriter.Display",
+    default_service = "com.thermalwriter.Service",
+    default_path = "/com/thermalwriter/display"
 )]
 trait Display {
     async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
@@ -61,7 +61,7 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
         .context("Could not connect to D-Bus session bus — is D-Bus running?")?;
 
     let proxy = DisplayProxy::new(&connection).await
-        .context("Could not connect to thermalrighter service — is the daemon running?")?;
+        .context("Could not connect to thermalwriter service — is the daemon running?")?;
 
     match cmd {
         CtlCommand::Status => {
@@ -115,19 +115,19 @@ mod tests {
 
     #[test]
     fn cli_parses_daemon_subcommand() {
-        let cli = Cli::try_parse_from(["thermalrighter", "daemon"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "daemon"]).unwrap();
         assert!(matches!(cli.command, Command::Daemon));
     }
 
     #[test]
     fn cli_parses_ctl_status() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "status"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Status }));
     }
 
     #[test]
     fn cli_parses_ctl_layout() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "layout", "gpu-focus.html"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "layout", "gpu-focus.html"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Ctl { subcommand: CtlCommand::Layout { ref name } } if name == "gpu-focus.html"
@@ -136,38 +136,38 @@ mod tests {
 
     #[test]
     fn cli_parses_ctl_layouts() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "layouts"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "layouts"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Layouts }));
     }
 
     #[test]
     fn cli_parses_ctl_stop() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "stop"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "stop"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Stop }));
     }
 
     #[test]
     fn cli_parses_ctl_reload() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "reload"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "reload"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Reload }));
     }
 
     #[test]
     fn cli_parses_ctl_sensors() {
-        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "sensors"]).unwrap();
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "sensors"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Sensors }));
     }
 
     #[test]
     fn cli_no_args_fails() {
         // No subcommand should fail (clap requires a subcommand)
-        assert!(Cli::try_parse_from(["thermalrighter"]).is_err());
+        assert!(Cli::try_parse_from(["thermalwriter"]).is_err());
     }
 
     #[test]
     fn cli_help_text_is_valid() {
         // CommandFactory::command() builds the command — verifies clap config is correct
         let cmd = Cli::command();
-        assert_eq!(cmd.get_name(), "thermalrighter");
+        assert_eq!(cmd.get_name(), "thermalwriter");
     }
 }

@@ -2,12 +2,12 @@
 //! Usage: cargo run --example preview_layout [layout_name]
 
 use anyhow::Result;
-use thermalrighter::render::{FrameSource, TemplateRenderer};
-use thermalrighter::sensor::SensorHub;
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalrighter::sensor::amdgpu::AmdGpuProvider;
-use thermalrighter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
 
 fn main() -> Result<()> {
     let layout_name = std::env::args().nth(1).unwrap_or("system-stats".to_string());
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     let mut renderer = TemplateRenderer::new(template, 480, 480)?;
     let pixmap = renderer.render(&sensors)?;
 
-    let path = format!("/tmp/thermalrighter_{}.png", layout_name);
+    let path = format!("/tmp/thermalwriter_{}.png", layout_name);
     pixmap.save_png(&path)?;
     println!("Saved: {}", path);
     Ok(())

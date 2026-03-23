@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 use tiny_skia::*;
 use fontdue::{Font, FontSettings};
-use thermalrighter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 480;
@@ -129,8 +129,8 @@ fn main() -> Result<()> {
     let pixmap = draw_test_frame();
 
     // Save normal orientation preview
-    pixmap.save_png("/tmp/thermalrighter_test_normal.png")?;
-    println!("Saved normal preview: /tmp/thermalrighter_test_normal.png");
+    pixmap.save_png("/tmp/thermalwriter_test_normal.png")?;
+    println!("Saved normal preview: /tmp/thermalwriter_test_normal.png");
 
     // Flip for device
     let rotated = rotate_180(&pixmap);
@@ -140,8 +140,8 @@ fn main() -> Result<()> {
     // Also save rotated preview
     let mut rotated_pixmap = Pixmap::new(WIDTH, HEIGHT).unwrap();
     rotated_pixmap.data_mut().copy_from_slice(&rotated);
-    rotated_pixmap.save_png("/tmp/thermalrighter_test_rotated.png")?;
-    println!("Saved rotated preview: /tmp/thermalrighter_test_rotated.png");
+    rotated_pixmap.save_png("/tmp/thermalwriter_test_rotated.png")?;
+    println!("Saved rotated preview: /tmp/thermalwriter_test_rotated.png");
 
     // Open device
     println!("Opening device...");

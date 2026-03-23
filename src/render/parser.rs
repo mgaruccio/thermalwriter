@@ -1,5 +1,5 @@
 // HTML/CSS subset parser: converts HTML template strings into an element tree.
-// Only handles the subset needed for thermalrighter layouts:
+// Only handles the subset needed for thermalwriter layouts:
 //   - Elements: div, span, and similar block/inline tags
 //   - Attributes: style="" only
 //   - CSS properties: flex layout, colors, font, dimensions

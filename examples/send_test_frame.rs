@@ -7,7 +7,7 @@ use image::{ImageBuffer, Rgb};
 use std::io::Cursor;
 use std::thread;
 use std::time::Duration;
-use thermalrighter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
 fn main() -> Result<()> {
     env_logger::init();

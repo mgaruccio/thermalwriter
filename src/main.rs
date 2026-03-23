@@ -5,19 +5,19 @@ use clap::Parser;
 use log::info;
 use tokio::sync::{Mutex, watch, mpsc};
 
-use thermalrighter::cli::{Cli, Command};
-use thermalrighter::config::{Config, builtin_layouts};
-use thermalrighter::sensor::SensorHub;
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalrighter::sensor::amdgpu::AmdGpuProvider;
-use thermalrighter::sensor::nvidia::NvidiaProvider;
-use thermalrighter::sensor::mangohud::MangoHudProvider;
-use thermalrighter::render::TemplateRenderer;
-use thermalrighter::service::dbus::{self, ServiceState};
-use thermalrighter::service::tick;
-use thermalrighter::transport::Transport;
-use thermalrighter::transport::bulk_usb::BulkUsb;
+use thermalwriter::cli::{Cli, Command};
+use thermalwriter::config::{Config, builtin_layouts};
+use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::render::TemplateRenderer;
+use thermalwriter::service::dbus::{self, ServiceState};
+use thermalwriter::service::tick;
+use thermalwriter::transport::Transport;
+use thermalwriter::transport::bulk_usb::BulkUsb;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,14 +26,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Ctl { subcommand } => {
-            return thermalrighter::cli::run_ctl(subcommand).await;
+            return thermalwriter::cli::run_ctl(subcommand).await;
         }
         Command::Daemon => {} // fall through to daemon startup below
     }
 
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
-        .join("thermalrighter");
+        .join("thermalwriter");
     let layout_dir = config_dir.join("layouts");
     std::fs::create_dir_all(&layout_dir)?;
 
@@ -125,6 +125,6 @@ async fn main() -> Result<()> {
     ).await?;
 
     transport.close();
-    info!("thermalrighter shutdown complete");
+    info!("thermalwriter shutdown complete");
     Ok(())
 }

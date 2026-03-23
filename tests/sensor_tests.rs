@@ -1,8 +1,8 @@
-use thermalrighter::sensor::hwmon::HwmonProvider;
-use thermalrighter::sensor::amdgpu::AmdGpuProvider;
-use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalrighter::sensor::mangohud::MangoHudProvider;
-use thermalrighter::sensor::SensorProvider;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
+use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
 
@@ -141,7 +141,7 @@ fn hwmon_empty_dir_returns_empty_readings() {
 
 #[test]
 fn sensory_hub_aggregates_providers() {
-    use thermalrighter::sensor::SensorHub;
+    use thermalwriter::sensor::SensorHub;
 
     let tmp = TempDir::new().unwrap();
     let hwmon_dir = tmp.path().join("hwmon0");
@@ -161,7 +161,7 @@ fn sensory_hub_aggregates_providers() {
 
 #[test]
 fn sensor_hub_continues_on_provider_failure() {
-    use thermalrighter::sensor::{SensorHub, SensorReading, SensorDescriptor};
+    use thermalwriter::sensor::{SensorHub, SensorReading, SensorDescriptor};
     use anyhow::anyhow;
 
     struct FailingProvider;

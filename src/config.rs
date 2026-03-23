@@ -1,5 +1,5 @@
-// TOML config parsing for thermalrighter.
-// Config file location: ~/.config/thermalrighter/config.toml
+// TOML config parsing for thermalwriter.
+// Config file location: ~/.config/thermalwriter/config.toml
 // Missing file → defaults. Invalid TOML → error with path.
 
 use serde::{Deserialize, Serialize};
@@ -70,13 +70,13 @@ impl Config {
             .with_context(|| format!("Invalid TOML in config file: {}", path.display()))
     }
 
-    /// Returns the default config file path: ~/.config/thermalrighter/config.toml
+    /// Returns the default config file path: ~/.config/thermalwriter/config.toml
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from(
                 std::env::var("HOME").unwrap_or_default()
             ))
-            .join("thermalrighter")
+            .join("thermalwriter")
             .join("config.toml")
     }
 }

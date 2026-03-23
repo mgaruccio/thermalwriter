@@ -1,4 +1,4 @@
-# thermalrighter
+# thermalwriter
 
 Lightweight Rust daemon to drive Thermalright cooler LCD displays, replacing the 400MB Python/Qt `trcc` app.
 
@@ -9,12 +9,12 @@ To continue implementation, run:
 /forge:executing-plans
 ```
 
-Then point it at the plan: `docs/plans/2026-03-23-thermalrighter-impl.md`
+Then point it at the plan: `docs/plans/2026-03-23-thermalwriter-impl.md`
 
 ## Project State
 
-- **Design doc**: `docs/plans/2026-03-23-thermalrighter-design.md` (committed)
-- **Implementation plan**: `docs/plans/2026-03-23-thermalrighter-impl.md` (committed, 24 tasks across 5 phases)
+- **Design doc**: `docs/plans/2026-03-23-thermalwriter-design.md` (committed)
+- **Implementation plan**: `docs/plans/2026-03-23-thermalwriter-impl.md` (committed, 24 tasks across 5 phases)
 - **Current status**: No implementation started yet. Begin at Task 1.
 
 ## Architecture

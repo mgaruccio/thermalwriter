@@ -1,5 +1,5 @@
-use thermalrighter::config::Config;
-use thermalrighter::render::parser::parse_html;
+use thermalwriter::config::Config;
+use thermalwriter::render::parser::parse_html;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

@@ -1,4 +1,4 @@
-use thermalrighter::transport::bulk_usb;
+use thermalwriter::transport::bulk_usb;
 
 #[test]
 fn handshake_payload_is_64_bytes() {

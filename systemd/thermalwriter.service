@@ -1,11 +1,11 @@
 [Unit]
 Description=Thermalright Cooler LCD Display Service
-Documentation=https://github.com/mgaruccio/thermalrighter
+Documentation=https://github.com/mgaruccio/thermalwriter
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/thermalrighter daemon
+ExecStart=%h/.cargo/bin/thermalwriter daemon
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info

@@ -1,5 +1,5 @@
-use thermalrighter::render::{SensorData, FrameSource};
-use thermalrighter::transport::{DeviceInfo, Transport};
+use thermalwriter::render::{SensorData, FrameSource};
+use thermalwriter::transport::{DeviceInfo, Transport};
 use anyhow::Result;
 use tiny_skia::Pixmap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,7 +33,7 @@ impl FrameSource for MockFrameSource {
 
 #[test]
 fn jpeg_encode_produces_valid_output() {
-    use thermalrighter::service::tick::encode_jpeg;
+    use thermalwriter::service::tick::encode_jpeg;
     let pixmap = Pixmap::new(480, 480).unwrap();
     let jpeg = encode_jpeg(&pixmap, 85, 0).unwrap();
     // JPEG files start with FF D8
@@ -43,7 +43,7 @@ fn jpeg_encode_produces_valid_output() {
 
 #[test]
 fn jpeg_encode_quality_affects_size() {
-    use thermalrighter::service::tick::encode_jpeg;
+    use thermalwriter::service::tick::encode_jpeg;
     let pixmap = Pixmap::new(480, 480).unwrap();
     let jpeg_high = encode_jpeg(&pixmap, 95, 0).unwrap();
     let jpeg_low = encode_jpeg(&pixmap, 10, 0).unwrap();
@@ -55,8 +55,8 @@ fn jpeg_encode_quality_affects_size() {
 
 #[tokio::test]
 async fn tick_loop_sends_frames_and_stops_on_shutdown() {
-    use thermalrighter::service::tick::run_tick_loop;
-    use thermalrighter::sensor::SensorHub;
+    use thermalwriter::service::tick::run_tick_loop;
+    use thermalwriter::sensor::SensorHub;
     use std::sync::Arc;
 
     let frames_sent = Arc::new(AtomicU32::new(0));
@@ -93,8 +93,8 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
 
 #[tokio::test]
 async fn tick_loop_applies_template_update() {
-    use thermalrighter::service::tick::run_tick_loop;
-    use thermalrighter::sensor::SensorHub;
+    use thermalwriter::service::tick::run_tick_loop;
+    use thermalwriter::sensor::SensorHub;
     use std::sync::{Arc, Mutex as StdMutex};
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
