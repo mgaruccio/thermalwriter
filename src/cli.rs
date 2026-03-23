@@ -1,0 +1,173 @@
+use std::collections::HashMap;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+/// Thermalright cooler LCD display daemon and control CLI.
+#[derive(Parser, Debug)]
+#[command(name = "thermalrighter", about = "Thermalright cooler LCD display daemon")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Start the display daemon (USB transport + D-Bus service).
+    Daemon,
+    /// Control a running daemon via D-Bus.
+    Ctl {
+        #[command(subcommand)]
+        subcommand: CtlCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CtlCommand {
+    /// Show daemon status (active layout, connection, resolution, tick rate).
+    Status,
+    /// Switch the active layout.
+    Layout {
+        /// Layout filename (e.g. system-stats.html).
+        name: String,
+    },
+    /// List available layouts.
+    Layouts,
+    /// List available sensor keys.
+    Sensors,
+    /// Stop the daemon.
+    Stop,
+    /// Reload config and reconnect.
+    Reload,
+}
+
+/// zbus proxy for the com.thermalrighter.Display D-Bus interface.
+#[zbus::proxy(
+    interface = "com.thermalrighter.Display",
+    default_service = "com.thermalrighter.Service",
+    default_path = "/com/thermalrighter/display"
+)]
+trait Display {
+    async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
+    async fn set_layout(&self, name: &str) -> zbus::Result<String>;
+    async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
+    async fn list_sensors(&self) -> zbus::Result<Vec<String>>;
+    async fn stop(&self) -> zbus::Result<()>;
+    async fn reload(&self) -> zbus::Result<()>;
+}
+
+/// Execute a `ctl` subcommand against the running daemon over D-Bus.
+pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
+    let connection = zbus::Connection::session().await
+        .context("Could not connect to D-Bus session bus — is D-Bus running?")?;
+
+    let proxy = DisplayProxy::new(&connection).await
+        .context("Could not connect to thermalrighter service — is the daemon running?")?;
+
+    match cmd {
+        CtlCommand::Status => {
+            let status = proxy.get_status().await
+                .context("Failed to get status from daemon")?;
+            // Print in sorted key order for consistent output
+            let mut pairs: Vec<_> = status.into_iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in pairs {
+                println!("{}: {}", k, v);
+            }
+        }
+        CtlCommand::Layout { name } => {
+            let result = proxy.set_layout(&name).await
+                .context("Failed to set layout")?;
+            println!("{}", result);
+        }
+        CtlCommand::Layouts => {
+            let layouts = proxy.list_layouts().await
+                .context("Failed to list layouts")?;
+            for layout in layouts {
+                println!("{}", layout);
+            }
+        }
+        CtlCommand::Sensors => {
+            let sensors = proxy.list_sensors().await
+                .context("Failed to list sensors")?;
+            for sensor in sensors {
+                println!("{}", sensor);
+            }
+        }
+        CtlCommand::Stop => {
+            proxy.stop().await
+                .context("Failed to stop daemon")?;
+            println!("Daemon stop signal sent.");
+        }
+        CtlCommand::Reload => {
+            proxy.reload().await
+                .context("Failed to reload daemon")?;
+            println!("Daemon reload signal sent.");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_parses_daemon_subcommand() {
+        let cli = Cli::try_parse_from(["thermalrighter", "daemon"]).unwrap();
+        assert!(matches!(cli.command, Command::Daemon));
+    }
+
+    #[test]
+    fn cli_parses_ctl_status() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "status"]).unwrap();
+        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Status }));
+    }
+
+    #[test]
+    fn cli_parses_ctl_layout() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "layout", "gpu-focus.html"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Ctl { subcommand: CtlCommand::Layout { ref name } } if name == "gpu-focus.html"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_ctl_layouts() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "layouts"]).unwrap();
+        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Layouts }));
+    }
+
+    #[test]
+    fn cli_parses_ctl_stop() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "stop"]).unwrap();
+        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Stop }));
+    }
+
+    #[test]
+    fn cli_parses_ctl_reload() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "reload"]).unwrap();
+        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Reload }));
+    }
+
+    #[test]
+    fn cli_parses_ctl_sensors() {
+        let cli = Cli::try_parse_from(["thermalrighter", "ctl", "sensors"]).unwrap();
+        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Sensors }));
+    }
+
+    #[test]
+    fn cli_no_args_fails() {
+        // No subcommand should fail (clap requires a subcommand)
+        assert!(Cli::try_parse_from(["thermalrighter"]).is_err());
+    }
+
+    #[test]
+    fn cli_help_text_is_valid() {
+        // CommandFactory::command() builds the command — verifies clap config is correct
+        let cmd = Cli::command();
+        assert_eq!(cmd.get_name(), "thermalrighter");
+    }
+}

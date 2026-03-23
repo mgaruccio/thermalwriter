@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::Result;
+use clap::Parser;
 use log::info;
 use tokio::sync::{Mutex, watch, mpsc};
 
+use thermalrighter::cli::{Cli, Command};
 use thermalrighter::sensor::SensorHub;
 use thermalrighter::sensor::hwmon::HwmonProvider;
 use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
@@ -19,8 +21,13 @@ use thermalrighter::transport::bulk_usb::BulkUsb;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    // TODO: CLI dispatch (daemon vs ctl subcommands) — Task 20
-    // For now, always run the daemon.
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Ctl { subcommand } => {
+            return thermalrighter::cli::run_ctl(subcommand).await;
+        }
+        Command::Daemon => {} // fall through to daemon startup below
+    }
 
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
