@@ -102,6 +102,7 @@ impl BulkUsb {
         }
 
         if ep_out == 0 || ep_in == 0 {
+            let _ = handle.release_interface(0);
             bail!("Could not find bulk IN/OUT endpoints");
         }
 
@@ -163,7 +164,8 @@ impl Transport for BulkUsb {
         let info = self.info.as_ref().context("Handshake not performed")?;
 
         let cmd: u32 = if info.use_jpeg { 2 } else { 3 };
-        let header = build_frame_header(cmd, info.width, info.height, data.len() as u32);
+        let payload_len = u32::try_from(data.len()).context("frame too large")?;
+        let header = build_frame_header(cmd, info.width, info.height, payload_len);
 
         // Concatenate header + payload
         let mut frame = Vec::with_capacity(64 + data.len());
