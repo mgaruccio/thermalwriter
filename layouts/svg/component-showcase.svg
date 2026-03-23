@@ -33,7 +33,7 @@
   <text x="16" y="148" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">CORE UTILIZATION</text>
 
   {{ btop_bars(histories=[cpu_c0_util_history, cpu_c1_util_history, cpu_c2_util_history, cpu_c3_util_history],
-              x=16, y=158, w=448, h=52, color="{{ theme_primary }}") }}
+              x=16, y=158, w=448, h=52, color=theme_primary) }}
 
   <line x1="0" y1="220" x2="480" y2="220" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
 
@@ -43,15 +43,16 @@
 
   {{ btop_net(rx_data=net_rx_history, tx_data=net_tx_history,
              x=16, y=250, w=448, h=64,
-             rx_color="{{ theme_secondary }}", tx_color="{{ theme_primary }}") }}
+             rx_color=theme_secondary, tx_color=theme_primary) }}
 
   <line x1="0" y1="322" x2="480" y2="322" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
 
   <text x="16" y="344" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="{{ theme_text_dim }}">MEMORY</text>
   <text x="360" y="344" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="{{ theme_accent }}" text-anchor="end">{{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</text>
 
+  {% set theme_accent_alpha = theme_accent ~ "55" %}
   {{ btop_ram(data=ram_used_history, total=64.0,
-             x=16, y=352, w=448, h=48, fill="{{ theme_accent }}55") }}
+             x=16, y=352, w=448, h=48, fill=theme_accent_alpha) }}
 
   <line x1="0" y1="410" x2="480" y2="410" stroke="#ffffff" stroke-width="1" opacity="0.08"/>
 
