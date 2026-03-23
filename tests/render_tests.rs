@@ -1,5 +1,7 @@
 use thermalrighter::render::parser::*;
 use thermalrighter::render::layout::*;
+use thermalrighter::render::{FrameSource, TemplateRenderer};
+use std::collections::HashMap;
 
 #[test]
 fn parse_style_extracts_flex_properties() {
@@ -69,4 +71,22 @@ fn layout_flex_column_stacks_children() {
     let top = nodes.iter().find(|n| n.text.as_deref() == Some("Top")).unwrap();
     let bottom = nodes.iter().find(|n| n.text.as_deref() == Some("Bottom")).unwrap();
     assert!(bottom.y > top.y, "Bottom should be below Top");
+}
+
+#[test]
+fn template_renderer_produces_480x480_pixmap() {
+    let layout_html = r#"<div style="display: flex; flex-direction: column; padding: 12px; background: #1a1a2e; color: #ffffff; font-size: 24px;">
+        <span>CPU {{ cpu_temp }}C</span>
+    </div>"#;
+
+    let mut renderer = TemplateRenderer::new(layout_html, 480, 480).unwrap();
+    let mut sensors = HashMap::new();
+    sensors.insert("cpu_temp".to_string(), "65".to_string());
+
+    let pixmap = renderer.render(&sensors).unwrap();
+    assert_eq!(pixmap.width(), 480);
+    assert_eq!(pixmap.height(), 480);
+    // Verify the background isn't all black (it should be #1a1a2e)
+    let pixel = &pixmap.data()[0..4]; // first pixel RGBA
+    assert!(pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0, "Background should not be black");
 }
