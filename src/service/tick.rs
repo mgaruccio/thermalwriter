@@ -44,12 +44,16 @@ pub fn encode_jpeg(pixmap: &Pixmap, quality: u8) -> Result<Vec<u8>> {
 }
 
 /// Run the tick loop. Blocks until `shutdown` is signaled.
+///
+/// `template_rx`: watch channel carrying updated HTML template strings.
+/// When a new value arrives, `frame_source.set_template()` is called before the next render.
 pub async fn run_tick_loop(
     transport: &mut dyn Transport,
     frame_source: &mut dyn FrameSource,
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
     jpeg_quality: u8,
+    mut template_rx: tokio::sync::watch::Receiver<String>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
@@ -62,6 +66,15 @@ pub async fn run_tick_loop(
         if *shutdown.borrow() {
             info!("Tick loop shutdown requested");
             break;
+        }
+
+        // Apply template update if one arrived since last tick
+        if template_rx.has_changed().unwrap_or(false) {
+            let new_template = template_rx.borrow_and_update().clone();
+            if !new_template.is_empty() {
+                info!("Applying template update ({} bytes)", new_template.len());
+                frame_source.set_template(&new_template);
+            }
         }
 
         // Poll sensors

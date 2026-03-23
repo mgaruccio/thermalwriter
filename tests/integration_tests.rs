@@ -18,12 +18,17 @@ impl Transport for MockTransport {
     fn close(&mut self) {}
 }
 
-struct MockFrameSource;
+struct MockFrameSource {
+    last_template: Option<String>,
+}
 impl FrameSource for MockFrameSource {
     fn render(&mut self, _sensors: &SensorData) -> Result<Pixmap> {
         Ok(Pixmap::new(480, 480).unwrap())
     }
     fn name(&self) -> &str { "mock" }
+    fn set_template(&mut self, template: &str) {
+        self.last_template = Some(template.to_string());
+    }
 }
 
 #[test]
@@ -58,6 +63,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     let frames_sent_clone = Arc::clone(&frames_sent);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
 
     // Run tick loop on a blocking thread — Transport/FrameSource are not Send
     // so we run synchronously inside spawn_blocking
@@ -68,9 +74,9 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             .unwrap();
         rt.block_on(async {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
-            let mut fs = MockFrameSource;
+            let mut fs = MockFrameSource { last_template: None };
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, shutdown_rx).await.unwrap();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, template_rx, shutdown_rx).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })
@@ -83,4 +89,54 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     let count = handle.await.unwrap();
     assert!(count >= 1, "Expected at least 1 frame sent, got {}", count);
     let _ = frames_sent_clone; // suppress unused warning
+}
+
+#[tokio::test]
+async fn tick_loop_applies_template_update() {
+    use thermalrighter::service::tick::run_tick_loop;
+    use thermalrighter::sensor::SensorHub;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+
+    // Capture which templates were applied via shared state
+    let applied = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let applied_clone = Arc::clone(&applied);
+
+    struct TrackingFrameSource {
+        applied: Arc<StdMutex<Vec<String>>>,
+    }
+    impl FrameSource for TrackingFrameSource {
+        fn render(&mut self, _sensors: &SensorData) -> Result<Pixmap> {
+            Ok(Pixmap::new(480, 480).unwrap())
+        }
+        fn name(&self) -> &str { "tracking" }
+        fn set_template(&mut self, template: &str) {
+            self.applied.lock().unwrap().push(template.to_string());
+        }
+    }
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
+            let mut fs = TrackingFrameSource { applied: applied_clone };
+            let mut hub = SensorHub::new();
+            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, template_rx, shutdown_rx).await.unwrap();
+        })
+    });
+
+    // Send a template update then shut down
+    template_tx.send("new-template".to_string()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    shutdown_tx.send(true).unwrap();
+    handle.await.unwrap();
+
+    let calls = applied.lock().unwrap();
+    assert!(!calls.is_empty(), "set_template should have been called after template_tx update");
+    assert_eq!(calls[0], "new-template");
 }

@@ -16,6 +16,8 @@ pub type SensorData = HashMap<String, String>;
 pub trait FrameSource: Send {
     fn render(&mut self, sensors: &SensorData) -> Result<Pixmap>;
     fn name(&self) -> &str;
+    /// Hot-swap the template. Default no-op for frame sources that don't use templates.
+    fn set_template(&mut self, _template: &str) {}
 }
 
 /// Renders HTML/CSS templates with sensor data substitution.

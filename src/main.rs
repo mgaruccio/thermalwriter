@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
     // Shared state for D-Bus ↔ tick loop communication
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (layout_tx, mut layout_rx) = mpsc::channel::<String>(4);
+    let (template_tx, template_rx) = watch::channel(String::new());
 
     let state = Arc::new(Mutex::new(ServiceState {
         active_layout: config.display.default_layout.clone(),
@@ -88,13 +89,19 @@ async fn main() -> Result<()> {
     let _connection = dbus::serve(state.clone()).await?;
     info!("D-Bus service started");
 
-    // Layout change listener: reload frame source when D-Bus SetLayout is called
+    // Layout change listener: read new layout file and push HTML to tick loop via watch channel
     let layout_dir_clone = layout_dir.clone();
     tokio::spawn(async move {
         while let Some(name) = layout_rx.recv().await {
             let path = layout_dir_clone.join(&name);
             match std::fs::read_to_string(&path) {
-                Ok(_html) => info!("Layout change requested: {} (tick loop will reload)", name),
+                Ok(html) => {
+                    info!("Layout changed to: {} ({} bytes)", name, html.len());
+                    if template_tx.send(html).is_err() {
+                        log::warn!("Tick loop gone — layout change dropped");
+                        break;
+                    }
+                }
                 Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
             }
         }
@@ -109,6 +116,7 @@ async fn main() -> Result<()> {
         &mut sensor_hub,
         tick_rate,
         jpeg_quality,
+        template_rx,
         shutdown_rx,
     ).await?;
 
