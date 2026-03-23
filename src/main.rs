@@ -6,6 +6,7 @@ use log::info;
 use tokio::sync::{Mutex, watch, mpsc};
 
 use thermalrighter::cli::{Cli, Command};
+use thermalrighter::config::{Config, builtin_layouts};
 use thermalrighter::sensor::SensorHub;
 use thermalrighter::sensor::hwmon::HwmonProvider;
 use thermalrighter::sensor::sysinfo_provider::SysinfoProvider;
@@ -35,12 +36,21 @@ async fn main() -> Result<()> {
     let layout_dir = config_dir.join("layouts");
     std::fs::create_dir_all(&layout_dir)?;
 
-    // Load default layout — user file takes precedence over built-in
-    let default_layout_path = layout_dir.join("system-stats.html");
-    let template = if default_layout_path.exists() {
-        std::fs::read_to_string(&default_layout_path)?
+    // Load config (defaults if file missing, error if invalid TOML)
+    let config_path = config_dir.join("config.toml");
+    let config = Config::load(&config_path)?;
+    info!("Config: tick_rate={}, layout={}, jpeg_quality={}",
+          config.display.tick_rate, config.display.default_layout, config.display.jpeg_quality);
+
+    // Seed built-in layouts on first run (only if files don't exist)
+    builtin_layouts::seed_layout_dir(&layout_dir)?;
+
+    // Load configured layout — user file in layout_dir takes precedence over built-in
+    let layout_path = layout_dir.join(&config.display.default_layout);
+    let template = if layout_path.exists() {
+        std::fs::read_to_string(&layout_path)?
     } else {
-        include_str!("../layouts/system-stats.html").to_string()
+        builtin_layouts::SYSTEM_STATS.to_string()
     };
 
     // Setup USB transport
@@ -64,11 +74,11 @@ async fn main() -> Result<()> {
     let (layout_tx, mut layout_rx) = mpsc::channel::<String>(4);
 
     let state = Arc::new(Mutex::new(ServiceState {
-        active_layout: "system-stats.html".to_string(),
+        active_layout: config.display.default_layout.clone(),
         connected: true,
         resolution: (device_info.width, device_info.height),
-        tick_rate: 2,
-        jpeg_quality: 85,
+        tick_rate: config.display.tick_rate,
+        jpeg_quality: config.display.jpeg_quality,
         shutdown_tx,
         layout_dir: layout_dir.clone(),
         layout_change_tx: layout_tx,
