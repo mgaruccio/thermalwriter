@@ -1,0 +1,14 @@
+[Unit]
+Description=Thermalright Cooler LCD Display Service
+Documentation=https://github.com/mgaruccio/thermalrighter
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/thermalrighter daemon
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
