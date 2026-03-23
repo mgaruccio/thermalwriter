@@ -31,12 +31,35 @@ Rust daemon with:
 ```bash
 cargo build                              # build
 cargo test                               # run tests (57 tests)
-cargo run --example preview_layout       # render layout to PNG (no USB)
-cargo run --example render_layout        # render + push to device (60s)
+cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
+cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
 systemctl --user status thermalwriter    # check daemon status
 thermalwriter ctl status                 # query daemon via D-Bus
 ```
+
+### Layout Development
+
+```bash
+# Preview (fast iteration):
+cargo run --example preview_layout layouts/my-layout.html
+# Push to hardware (stop daemon first):
+systemctl --user stop thermalwriter
+cargo run --example render_layout layouts/my-layout.html 15
+systemctl --user start thermalwriter
+# Use --mock for gaming-load fake data (FPS, high temps):
+cargo run --example render_layout fps-hero 15 --mock
+```
+
+## Layout Authoring
+
+See `skills/designing-layouts/SKILL.md` for the full design system.
+
+Key gotchas:
+- Every text element needs explicit `height` (taffy can't measure text — elements without height collapse to 0px)
+- HTML comments (`<!-- -->`) break the parser — don't use them
+- Labels dimmer than `#888888` are invisible on the LCD hardware
+- Built-in layouts: system-stats, gpu-focus, minimal, neon-dash, dual-gauge, fps-hero
 
 ## Config
 
