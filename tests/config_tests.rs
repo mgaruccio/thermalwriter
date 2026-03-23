@@ -29,7 +29,7 @@ mangohud_log_dir = "/tmp/mango"
 fn config_uses_defaults_when_file_missing() {
     let cfg = Config::load(std::path::Path::new("/nonexistent/path/config.toml")).unwrap();
     assert_eq!(cfg.display.tick_rate, 2);
-    assert_eq!(cfg.display.default_layout, "system-stats.html");
+    assert_eq!(cfg.display.default_layout, "svg/neon-dash.svg");
     assert_eq!(cfg.display.jpeg_quality, 85);
     assert_eq!(cfg.sensors.poll_interval_ms, 1000);
 }
@@ -45,7 +45,7 @@ tick_rate = 10
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(cfg.display.tick_rate, 10);
     // Unspecified fields should be defaults
-    assert_eq!(cfg.display.default_layout, "system-stats.html");
+    assert_eq!(cfg.display.default_layout, "svg/neon-dash.svg");
     assert_eq!(cfg.display.jpeg_quality, 85);
     assert_eq!(cfg.sensors.poll_interval_ms, 1000);
 }

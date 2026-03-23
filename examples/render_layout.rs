@@ -19,6 +19,7 @@ use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::service::tick::encode_jpeg;
 use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
 
@@ -107,6 +108,11 @@ fn main() -> Result<()> {
     hub.add_provider(Box::new(SysinfoProvider::new()));
     hub.add_provider(Box::new(AmdGpuProvider::new()));
     hub.add_provider(Box::new(NvidiaProvider::new()));
+    hub.add_provider(Box::new(RaplProvider::new()));
+
+    // Prime RAPL (needs two readings for delta)
+    hub.poll();
+    thread::sleep(Duration::from_millis(250));
 
     let initial_sensors = if use_mock {
         let mock = mock_sensors();

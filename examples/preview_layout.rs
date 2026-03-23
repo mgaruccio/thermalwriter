@@ -17,6 +17,7 @@ use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
 
 /// Returns (content, display_name, is_svg).
 fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
@@ -72,7 +73,11 @@ fn main() -> Result<()> {
     hub.add_provider(Box::new(SysinfoProvider::new()));
     hub.add_provider(Box::new(AmdGpuProvider::new()));
     hub.add_provider(Box::new(NvidiaProvider::new()));
+    hub.add_provider(Box::new(RaplProvider::new()));
 
+    // RAPL needs two polls to compute power delta
+    hub.poll();
+    std::thread::sleep(std::time::Duration::from_millis(250));
     let sensors = hub.poll();
     let mut keys: Vec<_> = sensors.iter().collect();
     keys.sort_by_key(|(k, _)| (*k).clone());

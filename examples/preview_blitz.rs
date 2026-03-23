@@ -16,6 +16,7 @@ use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
 
 fn load_template(name_or_path: &str) -> Result<(String, String)> {
     // Try as file path first
@@ -74,6 +75,9 @@ fn main() -> Result<()> {
         hub.add_provider(Box::new(SysinfoProvider::new()));
         hub.add_provider(Box::new(AmdGpuProvider::new()));
         hub.add_provider(Box::new(NvidiaProvider::new()));
+        hub.add_provider(Box::new(RaplProvider::new()));
+        hub.poll();
+        std::thread::sleep(std::time::Duration::from_millis(250));
         hub.poll()
     };
 

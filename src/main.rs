@@ -13,6 +13,7 @@ use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::render::TemplateRenderer;
 use thermalwriter::service::dbus::{self, ServiceState};
 use thermalwriter::service::tick;
@@ -67,9 +68,15 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
     sensor_hub.add_provider(Box::new(NvidiaProvider::new()));
     sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
+    sensor_hub.add_provider(Box::new(RaplProvider::new()));
 
-    // Setup template renderer
-    let mut frame_source = TemplateRenderer::new(&template, device_info.width, device_info.height)?;
+    // Setup renderer — SVG or HTML based on file extension
+    let is_svg = config.display.default_layout.ends_with(".svg");
+    let mut frame_source: Box<dyn thermalwriter::render::FrameSource> = if is_svg {
+        Box::new(thermalwriter::render::svg::SvgRenderer::new(&template, device_info.width, device_info.height)?)
+    } else {
+        Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
+    };
 
     // Shared state for D-Bus ↔ tick loop communication
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -115,7 +122,7 @@ async fn main() -> Result<()> {
     let rotation = config.display.rotation;
     tick::run_tick_loop(
         &mut transport,
-        &mut frame_source,
+        frame_source.as_mut(),
         &mut sensor_hub,
         tick_rate,
         jpeg_quality,

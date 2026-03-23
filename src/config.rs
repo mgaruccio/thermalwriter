@@ -25,7 +25,7 @@ impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             tick_rate: 2,
-            default_layout: "system-stats.html".to_string(),
+            default_layout: "svg/neon-dash.svg".to_string(),
             jpeg_quality: 85,
             rotation: 180,
         }
@@ -87,6 +87,11 @@ pub mod builtin_layouts {
     pub const GPU_FOCUS: &str = include_str!("../layouts/gpu-focus.html");
     pub const MINIMAL: &str = include_str!("../layouts/minimal.html");
 
+    // SVG layouts
+    pub const SVG_NEON_DASH: &str = include_str!("../layouts/svg/neon-dash.svg");
+    pub const SVG_ARC_GAUGE: &str = include_str!("../layouts/svg/arc-gauge.svg");
+    pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
+
     /// Copy built-in layouts to the layouts directory if they don't already exist.
     /// This lets users edit the layouts without losing the originals on first run.
     pub fn seed_layout_dir(layout_dir: &std::path::Path) -> anyhow::Result<()> {
@@ -95,9 +100,16 @@ pub mod builtin_layouts {
             ("system-stats.html", SYSTEM_STATS),
             ("gpu-focus.html", GPU_FOCUS),
             ("minimal.html", MINIMAL),
+            ("svg/neon-dash.svg", SVG_NEON_DASH),
+            ("svg/arc-gauge.svg", SVG_ARC_GAUGE),
+            ("svg/cyber-grid.svg", SVG_CYBER_GRID),
         ];
         for (name, content) in &layouts {
             let dest = layout_dir.join(name);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create layout dir: {}", parent.display()))?;
+            }
             if !dest.exists() {
                 std::fs::write(&dest, content)
                     .with_context(|| format!("Failed to write built-in layout: {}", dest.display()))?;

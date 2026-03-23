@@ -12,8 +12,11 @@ Lightweight Rust daemon to drive Thermalright cooler LCD displays, replacing the
 
 Rust daemon with:
 - **USB bulk transport** (rusb) — sends JPEG frames to cooler LCD, 180° rotation
-- **HTML/CSS template rendering** (taffy + tiny-skia + tera + fontdue) — layout engine
-- **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud) — system metrics
+- **Pluggable renderers** via `FrameSource` trait in `src/render/mod.rs`
+  - `SvgRenderer` (primary) — SVG templates + Tera + resvg → Pixmap
+  - `TemplateRenderer` (legacy) — custom HTML subset, taffy + fontdue
+  - `BlitzRenderer` (experimental) — behind `--features blitz`, alpha quality
+- **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics
 - **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`)
 - **CLI** (clap) — `thermalwriter daemon` / `thermalwriter ctl ...`
 - **systemd user service** — auto-starts on login
@@ -42,10 +45,10 @@ thermalwriter ctl status                 # query daemon via D-Bus
 
 ```bash
 # Preview (fast iteration):
-cargo run --example preview_layout layouts/my-layout.html
+cargo run --example preview_layout layouts/svg/neon-dash.svg
 # Push to hardware (stop daemon first):
 systemctl --user stop thermalwriter
-cargo run --example render_layout layouts/my-layout.html 15
+cargo run --example render_layout layouts/svg/neon-dash.svg 15
 systemctl --user start thermalwriter
 # Use --mock for gaming-load fake data (FPS, high temps):
 cargo run --example render_layout fps-hero 15 --mock
@@ -55,11 +58,16 @@ cargo run --example render_layout fps-hero 15 --mock
 
 See `skills/designing-layouts/SKILL.md` for the full design system.
 
+SVG is the primary layout format. HTML layouts still work via the legacy TemplateRenderer.
+
 Key gotchas:
-- Every text element needs explicit `height` (taffy can't measure text — elements without height collapse to 0px)
-- HTML comments (`<!-- -->`) break the parser — don't use them
-- Labels dimmer than `#888888` are invisible on the LCD hardware
-- Built-in layouts: system-stats, gpu-focus, minimal, neon-dash, dual-gauge, fps-hero
+- LCD backlight washes out dim text — use opacity >= 0.7, colors >= #999999, labels >= 14px
+- SVG text uses absolute x/y positioning (no flexbox) — 480x480 fixed canvas
+- HTML layouts: every text element needs explicit `height` (taffy can't measure text)
+- HTML layouts: comments (`<!-- -->`) break the custom parser
+- Seeded layouts in ~/.config/thermalwriter/layouts/ don't auto-update — copy manually after changes
+- Built-in SVG layouts: svg/neon-dash, svg/arc-gauge, svg/cyber-grid
+- Built-in HTML layouts: system-stats, gpu-focus, minimal, neon-dash, dual-gauge, fps-hero
 
 ## Config
 
@@ -67,7 +75,7 @@ Key gotchas:
 ```toml
 [display]
 tick_rate = 2
-default_layout = "system-stats.html"
+default_layout = "svg/neon-dash.svg"
 jpeg_quality = 85
 rotation = 180  # 0, 90, 180, 270
 
@@ -79,4 +87,4 @@ Layouts in `~/.config/thermalwriter/layouts/` — built-in layouts seeded on fir
 
 ## Key Dependencies
 
-rusb, zbus, tiny-skia, taffy, tera, fontdue, image, sysinfo, tokio, clap, dirs
+rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, sysinfo, tokio, clap, dirs
