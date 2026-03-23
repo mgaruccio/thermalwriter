@@ -58,10 +58,10 @@ fn hwmon_millidegree_integer_division() {
 }
 
 #[test]
-fn hwmon_missing_base_path_returns_error() {
+fn hwmon_missing_base_path_returns_empty() {
     let mut provider = HwmonProvider::with_base_path("/nonexistent/path/hwmon".into());
-    let result = provider.poll();
-    assert!(result.is_err());
+    let readings = provider.poll().unwrap();
+    assert!(readings.is_empty());
 }
 
 #[test]

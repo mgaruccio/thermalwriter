@@ -57,7 +57,7 @@ impl FrameSource for TemplateRenderer {
         // Step 4: Render to pixmap
         let pixmap = draw::render_nodes(&nodes, self.width, self.height);
 
-        Ok(pixmap)
+        Ok(pixmap?)
     }
 
     fn name(&self) -> &str {

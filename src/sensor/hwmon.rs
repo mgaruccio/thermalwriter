@@ -34,7 +34,10 @@ impl SensorProvider for HwmonProvider {
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
         let mut readings = Vec::new();
-        let entries = fs::read_dir(&self.base_path)?;
+        let entries = match fs::read_dir(&self.base_path) {
+            Ok(e) => e,
+            Err(_) => return Ok(readings), // Missing sysfs — return empty, not error
+        };
 
         for entry in entries.flatten() {
             let hwmon_dir = entry.path();
