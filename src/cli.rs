@@ -50,6 +50,11 @@ pub enum CtlCommand {
     Stop,
     /// Reload config and reconnect.
     Reload,
+    /// Start xvfb mirror mode — capture any X11 application on the LCD.
+    Mirror {
+        /// Shell command to run inside the virtual display.
+        command: String,
+    },
 }
 
 /// zbus proxy for the com.thermalwriter.Display D-Bus interface.
@@ -61,6 +66,7 @@ pub enum CtlCommand {
 trait Display {
     async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
     async fn set_layout(&self, name: &str) -> zbus::Result<String>;
+    async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;
     async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
     async fn list_sensors(&self) -> zbus::Result<Vec<String>>;
     async fn stop(&self) -> zbus::Result<()>;
@@ -114,6 +120,11 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
             proxy.reload().await
                 .context("Failed to reload daemon")?;
             println!("Daemon reload signal sent.");
+        }
+        CtlCommand::Mirror { command } => {
+            let result = proxy.set_mode("xvfb", &command).await
+                .context("Failed to set mirror mode")?;
+            println!("{}", result);
         }
     }
 
@@ -258,5 +269,14 @@ mod tests {
         // CommandFactory::command() builds the command — verifies clap config is correct
         let cmd = Cli::command();
         assert_eq!(cmd.get_name(), "thermalwriter");
+    }
+
+    #[test]
+    fn cli_parses_ctl_mirror() {
+        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "mirror", "conky -c foo.conf"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Ctl { subcommand: CtlCommand::Mirror { ref command } } if command == "conky -c foo.conf"
+        ));
     }
 }

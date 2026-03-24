@@ -72,13 +72,14 @@ pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u
 
 /// Run the tick loop. Blocks until `shutdown` is signaled.
 ///
+/// `frame_source`: owned initial frame source (swappable via `source_rx`).
+/// `source_rx`: channel for hot-swapping the frame source at runtime.
 /// `template_rx`: watch channel carrying updated HTML template strings.
-/// When a new value arrives, `frame_source.set_template()` is called before the next render.
-///
 /// `sensor_history`: optional shared history buffer — updated each time sensors are polled.
 pub async fn run_tick_loop(
     transport: &mut dyn Transport,
-    frame_source: &mut dyn FrameSource,
+    mut frame_source: Box<dyn FrameSource>,
+    source_rx: &mut tokio::sync::mpsc::Receiver<Box<dyn FrameSource>>,
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
     jpeg_quality: u8,
@@ -101,6 +102,12 @@ pub async fn run_tick_loop(
         if *shutdown.borrow() {
             info!("Tick loop shutdown requested");
             break;
+        }
+
+        // Check for a new frame source (non-blocking)
+        if let Ok(new_source) = source_rx.try_recv() {
+            info!("Frame source swapped to: {}", new_source.name());
+            frame_source = new_source;
         }
 
         // Apply template update if one arrived since last tick

@@ -9,17 +9,27 @@ use tokio::sync::{Mutex, watch};
 use zbus::{interface, object_server::SignalEmitter};
 use log::info;
 
+/// Message sent through the mode change channel to switch display modes.
+#[derive(Debug, Clone)]
+pub enum ModeChange {
+    /// Switch to an SVG or HTML layout by name.
+    Layout(String),
+    /// Switch to xvfb capture mode with the given shell command.
+    Xvfb { command: String },
+}
+
 /// Shared state between the D-Bus interface and the tick loop.
 pub struct ServiceState {
     pub active_layout: String,
+    pub mode: String,
     pub connected: bool,
     pub resolution: (u32, u32),
     pub tick_rate: u32,
     pub jpeg_quality: u8,
     pub shutdown_tx: watch::Sender<bool>,
     pub layout_dir: std::path::PathBuf,
-    /// Notify the tick loop to reload the frame source with a new layout name.
-    pub layout_change_tx: tokio::sync::mpsc::Sender<String>,
+    /// Notify the daemon to switch display mode or layout.
+    pub mode_change_tx: tokio::sync::mpsc::Sender<ModeChange>,
 }
 
 pub struct DisplayInterface {
@@ -49,12 +59,47 @@ impl DisplayInterface {
                 format!("Layout not found: {}", name)
             ));
         }
-        state.layout_change_tx.send(name.clone()).await
+        state.mode_change_tx.send(ModeChange::Layout(name.clone())).await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.active_layout = name.clone();
+        state.mode = "svg".to_string();
 
         Self::layout_changed(&emitter, &name).await?;
         Ok(format!("Layout set to: {}", name))
+    }
+
+    /// Switch display mode. mode="xvfb" starts capture with the given command.
+    /// mode="svg" or mode="html" with command as layout name switches back to layout mode.
+    async fn set_mode(&self, mode: String, command: String) -> zbus::fdo::Result<String> {
+        let mut state = self.state.lock().await;
+        let change = match mode.as_str() {
+            "xvfb" => {
+                if command.is_empty() {
+                    return Err(zbus::fdo::Error::InvalidArgs(
+                        "xvfb mode requires a command".to_string()
+                    ));
+                }
+                ModeChange::Xvfb { command: command.clone() }
+            }
+            "svg" | "html" => {
+                let layout_path = state.layout_dir.join(&command);
+                if !layout_path.exists() {
+                    return Err(zbus::fdo::Error::InvalidArgs(
+                        format!("Layout not found: {}", command)
+                    ));
+                }
+                ModeChange::Layout(command.clone())
+            }
+            _ => return Err(zbus::fdo::Error::InvalidArgs(
+                format!("Unknown mode: {} (expected svg, html, or xvfb)", mode)
+            )),
+        };
+
+        state.mode_change_tx.send(change).await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        state.mode = mode.clone();
+
+        Ok(format!("Mode set to: {} ({})", mode, command))
     }
 
     /// Return a snapshot of service status as key→value pairs.
@@ -62,6 +107,7 @@ impl DisplayInterface {
         let state = self.state.lock().await;
         let mut status = HashMap::new();
         status.insert("active_layout".to_string(), state.active_layout.clone());
+        status.insert("mode".to_string(), state.mode.clone());
         status.insert("connected".to_string(), state.connected.to_string());
         status.insert("resolution".to_string(),
             format!("{}x{}", state.resolution.0, state.resolution.1));

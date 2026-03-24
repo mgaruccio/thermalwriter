@@ -73,9 +73,10 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             .unwrap();
         rt.block_on(async {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
-            let mut fs = MockFrameSource { last_template: None };
+            let fs: Box<dyn thermalwriter::render::FrameSource> = Box::new(MockFrameSource { last_template: None });
+            let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })
@@ -123,9 +124,10 @@ async fn tick_loop_applies_template_update() {
             .unwrap();
         rt.block_on(async {
             let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
-            let mut fs = TrackingFrameSource { applied: applied_clone };
+            let fs: Box<dyn thermalwriter::render::FrameSource> = Box::new(TrackingFrameSource { applied: applied_clone });
+            let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
-            run_tick_loop(&mut t, &mut fs, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
         })
     });
 

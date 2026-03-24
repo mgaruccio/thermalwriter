@@ -20,6 +20,8 @@ pub struct DisplayConfig {
     /// Depends on how the cooler is physically mounted. Default 180 for
     /// Peerless Vision with LCD at bottom.
     pub rotation: u16,
+    /// Display mode: "svg", "html", or "xvfb".
+    pub mode: String,
 }
 
 impl Default for DisplayConfig {
@@ -29,6 +31,7 @@ impl Default for DisplayConfig {
             default_layout: "svg/neon-dash-v2.svg".to_string(),
             jpeg_quality: 85,
             rotation: 180,
+            mode: "svg".to_string(),
         }
     }
 }
@@ -51,6 +54,24 @@ impl Default for SensorsConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct XvfbConfig {
+    /// Shell command to run inside the virtual display.
+    pub command: String,
+    /// Frame rate for xvfb capture mode (1-60 FPS).
+    pub tick_rate: u32,
+}
+
+impl Default for XvfbConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            tick_rate: 15,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ThemeConfig {
@@ -65,6 +86,7 @@ pub struct Config {
     pub display: DisplayConfig,
     pub sensors: SensorsConfig,
     pub theme: ThemeConfig,
+    pub xvfb: XvfbConfig,
 }
 
 impl Config {
