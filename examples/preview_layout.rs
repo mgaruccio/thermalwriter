@@ -146,10 +146,10 @@ fn main() -> Result<()> {
         Box::new(TemplateRenderer::new(&template, 480, 480)?)
     };
 
-    let pixmap = renderer.render(&sensors)?;
+    let frame = renderer.render(&sensors)?;
 
     let path = format!("/tmp/thermalwriter_{}.png", display_name);
-    pixmap.save_png(&path)?;
+    frame.save_png(&path)?;
     println!("Saved: {}", path);
     Ok(())
 }

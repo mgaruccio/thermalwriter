@@ -13,7 +13,7 @@ use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::Fill;
 use peniko::kurbo::Rect;
 
-use super::{FrameSource, SensorData};
+use super::{FrameSource, RawFrame, SensorData};
 
 /// Renders HTML/CSS layouts using Blitz (Stylo + Taffy + Vello CPU).
 /// Supports the full CSS spec including border-radius, gradients, box-shadow, etc.
@@ -99,7 +99,7 @@ impl BlitzRenderer {
 }
 
 impl FrameSource for BlitzRenderer {
-    fn render(&mut self, sensors: &SensorData) -> Result<Pixmap> {
+    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
         // Step 1: Tera template substitution
         let mut context = tera::Context::new();
         for (key, value) in sensors {
@@ -108,7 +108,8 @@ impl FrameSource for BlitzRenderer {
         let html = tera::Tera::one_off(&self.template, &context, false)?;
 
         // Step 2: Render via Blitz
-        self.render_html(&html)
+        let pixmap = self.render_html(&html)?;
+        Ok(RawFrame::from_pixmap(&pixmap))
     }
 
     fn name(&self) -> &str {

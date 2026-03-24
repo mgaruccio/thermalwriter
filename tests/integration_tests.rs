@@ -1,7 +1,6 @@
-use thermalwriter::render::{SensorData, FrameSource};
+use thermalwriter::render::{SensorData, FrameSource, RawFrame};
 use thermalwriter::transport::{DeviceInfo, Transport};
 use anyhow::Result;
-use tiny_skia::Pixmap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 struct MockTransport {
@@ -22,8 +21,8 @@ struct MockFrameSource {
     last_template: Option<String>,
 }
 impl FrameSource for MockFrameSource {
-    fn render(&mut self, _sensors: &SensorData) -> Result<Pixmap> {
-        Ok(Pixmap::new(480, 480).unwrap())
+    fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+        Ok(RawFrame { data: vec![0u8; 480 * 480 * 3], width: 480, height: 480 })
     }
     fn name(&self) -> &str { "mock" }
     fn set_template(&mut self, template: &str) {
@@ -34,8 +33,8 @@ impl FrameSource for MockFrameSource {
 #[test]
 fn jpeg_encode_produces_valid_output() {
     use thermalwriter::service::tick::encode_jpeg;
-    let pixmap = Pixmap::new(480, 480).unwrap();
-    let jpeg = encode_jpeg(&pixmap, 85, 0).unwrap();
+    let frame = RawFrame { data: vec![0u8; 480 * 480 * 3], width: 480, height: 480 };
+    let jpeg = encode_jpeg(&frame, 85, 0).unwrap();
     // JPEG files start with FF D8
     assert_eq!(&jpeg[0..2], &[0xFF, 0xD8]);
     assert!(jpeg.len() > 100, "JPEG should be more than 100 bytes");
@@ -44,9 +43,9 @@ fn jpeg_encode_produces_valid_output() {
 #[test]
 fn jpeg_encode_quality_affects_size() {
     use thermalwriter::service::tick::encode_jpeg;
-    let pixmap = Pixmap::new(480, 480).unwrap();
-    let jpeg_high = encode_jpeg(&pixmap, 95, 0).unwrap();
-    let jpeg_low = encode_jpeg(&pixmap, 10, 0).unwrap();
+    let frame = RawFrame { data: vec![0u8; 480 * 480 * 3], width: 480, height: 480 };
+    let jpeg_high = encode_jpeg(&frame, 95, 0).unwrap();
+    let jpeg_low = encode_jpeg(&frame, 10, 0).unwrap();
     // Higher quality should be >= lower quality in size
     // (for a solid-color image they may be equal, but both must be valid JPEG)
     assert_eq!(&jpeg_high[0..2], &[0xFF, 0xD8]);
@@ -108,8 +107,8 @@ async fn tick_loop_applies_template_update() {
         applied: Arc<StdMutex<Vec<String>>>,
     }
     impl FrameSource for TrackingFrameSource {
-        fn render(&mut self, _sensors: &SensorData) -> Result<Pixmap> {
-            Ok(Pixmap::new(480, 480).unwrap())
+        fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+            Ok(RawFrame { data: vec![0u8; 480 * 480 * 3], width: 480, height: 480 })
         }
         fn name(&self) -> &str { "tracking" }
         fn set_template(&mut self, template: &str) {

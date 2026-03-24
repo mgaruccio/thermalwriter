@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tiny_skia::{Color, Pixmap};
 use crate::config::Config;
+use crate::render::RawFrame;
 use crate::service::tick::encode_jpeg;
 use crate::transport::Transport;
 use crate::transport::bulk_usb::BulkUsb;
@@ -127,13 +127,11 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     let rotation = config.display.rotation;
 
     // Pre-render two solid-color frames (red and blue) for visual confirmation
-    let mut pixmap_red = Pixmap::new(480, 480).context("Failed to create pixmap")?;
-    pixmap_red.fill(Color::from_rgba8(255, 0, 0, 255));
-    let jpeg_red = encode_jpeg(&pixmap_red, quality, rotation)?;
+    let frame_red = RawFrame { data: vec![255, 0, 0].repeat(480 * 480), width: 480, height: 480 };
+    let jpeg_red = encode_jpeg(&frame_red, quality, rotation)?;
 
-    let mut pixmap_blue = Pixmap::new(480, 480).context("Failed to create pixmap")?;
-    pixmap_blue.fill(Color::from_rgba8(0, 0, 255, 255));
-    let jpeg_blue = encode_jpeg(&pixmap_blue, quality, rotation)?;
+    let frame_blue = RawFrame { data: vec![0, 0, 255].repeat(480 * 480), width: 480, height: 480 };
+    let jpeg_blue = encode_jpeg(&frame_blue, quality, rotation)?;
 
     // Open USB device and handshake
     let mut transport = BulkUsb::new()?;

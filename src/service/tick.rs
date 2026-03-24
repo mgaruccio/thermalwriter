@@ -6,14 +6,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use log::{debug, info, warn};
-use tiny_skia::Pixmap;
 
-use crate::render::FrameSource;
+use crate::render::{FrameSource, RawFrame};
 use crate::sensor::history::SensorHistory;
 use crate::sensor::SensorHub;
 use crate::transport::Transport;
 
-/// Rotate raw RGBA pixel data by the given degrees (0, 90, 180, 270).
+/// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
 /// Returns (new_data, new_width, new_height).
 pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec<u8>, u32, u32) {
     let w = width as usize;
@@ -25,9 +24,9 @@ pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec
         180 => {
             let mut out = vec![0u8; data.len()];
             for i in 0..pixel_count {
-                let src = i * 4;
-                let dst = (pixel_count - 1 - i) * 4;
-                out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                let src = i * 3;
+                let dst = (pixel_count - 1 - i) * 3;
+                out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
             }
             (out, width, height)
         }
@@ -35,9 +34,9 @@ pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec
             let mut out = vec![0u8; data.len()];
             for y in 0..h {
                 for x in 0..w {
-                    let src = (y * w + x) * 4;
-                    let dst = (x * h + (h - 1 - y)) * 4;
-                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                    let src = (y * w + x) * 3;
+                    let dst = (x * h + (h - 1 - y)) * 3;
+                    out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
                 }
             }
             (out, height, width)
@@ -46,9 +45,9 @@ pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec
             let mut out = vec![0u8; data.len()];
             for y in 0..h {
                 for x in 0..w {
-                    let src = (y * w + x) * 4;
-                    let dst = ((w - 1 - x) * h + y) * 4;
-                    out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                    let src = (y * w + x) * 3;
+                    let dst = ((w - 1 - x) * h + y) * 3;
+                    out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
                 }
             }
             (out, height, width)
@@ -60,38 +59,14 @@ pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec
     }
 }
 
-/// Encode a tiny-skia Pixmap to JPEG bytes, with optional rotation.
-///
-/// tiny-skia uses premultiplied RGBA; we de-multiply before JPEG encoding
-/// since JPEG doesn't support alpha and the image crate expects straight RGB(A).
-pub fn encode_jpeg(pixmap: &Pixmap, quality: u8, rotation: u16) -> Result<Vec<u8>> {
-    let data = pixmap.data(); // premultiplied RGBA
-
-    // Rotate if needed
-    let (rotated, out_w, out_h) = rotate_pixels(data, pixmap.width(), pixmap.height(), rotation);
-
-    // Convert premultiplied RGBA → straight RGB (JPEG has no alpha channel)
-    let pixel_count = (out_w * out_h) as usize;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for chunk in rotated.chunks(4) {
-        let a = chunk[3] as u16;
-        if a == 0 {
-            rgb.extend_from_slice(&[0, 0, 0]);
-        } else {
-            let r = ((chunk[0] as u16 * 255) / a).min(255) as u8;
-            let g = ((chunk[1] as u16 * 255) / a).min(255) as u8;
-            let b = ((chunk[2] as u16 * 255) / a).min(255) as u8;
-            rgb.extend_from_slice(&[r, g, b]);
-        }
-    }
-
-    let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rgb)
+/// Encode a RawFrame to JPEG bytes, with optional rotation.
+pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u8>> {
+    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation);
+    let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rotated)
         .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
-
     let mut buf = std::io::Cursor::new(Vec::new());
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
     image::DynamicImage::ImageRgb8(img).write_with_encoder(encoder)?;
-
     Ok(buf.into_inner())
 }
 
@@ -155,9 +130,9 @@ pub async fn run_tick_loop(
 
         // Render frame
         match frame_source.render(sensors) {
-            Ok(pixmap) => {
+            Ok(frame) => {
                 // Encode to JPEG
-                match encode_jpeg(&pixmap, jpeg_quality, rotation) {
+                match encode_jpeg(&frame, jpeg_quality, rotation) {
                     Ok(jpeg) => {
                         debug!("Frame rendered: {} bytes JPEG", jpeg.len());
                         if let Err(e) = transport.send_frame(&jpeg) {

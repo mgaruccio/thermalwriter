@@ -185,13 +185,13 @@ fn main() -> Result<()> {
         }
     }
 
-    let pixmap = renderer.render(&initial_sensors)?;
+    let frame = renderer.render(&initial_sensors)?;
 
     let png_path = format!("/tmp/thermalwriter_{}.png", display_name);
-    pixmap.save_png(&png_path)?;
+    frame.save_png(&png_path)?;
     println!("\nSaved preview: {}", png_path);
 
-    let jpeg_data = encode_jpeg(&pixmap, 85, 180)?;
+    let jpeg_data = encode_jpeg(&frame, 85, 180)?;
     println!("JPEG encoded: {} bytes (rotated 180°)", jpeg_data.len());
 
     // Open device and send continuously
@@ -218,8 +218,8 @@ fn main() -> Result<()> {
             }
         }
 
-        let pixmap = renderer.render(&sensors)?;
-        let jpeg_data = encode_jpeg(&pixmap, 85, 180)?;
+        let frame = renderer.render(&sensors)?;
+        let jpeg_data = encode_jpeg(&frame, 85, 180)?;
         transport.send_frame(&jpeg_data)?;
         thread::sleep(Duration::from_millis(500));
         iteration += 1;

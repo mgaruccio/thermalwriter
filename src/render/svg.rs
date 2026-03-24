@@ -10,7 +10,7 @@ use tiny_skia::{Pixmap, Transform};
 
 use crate::sensor::history::SensorHistory;
 use crate::theme::ThemePalette;
-use super::{FrameSource, SensorData};
+use super::{FrameSource, RawFrame, SensorData};
 
 // Font file is named JetBrainsMono but is actually DejaVu Sans Mono
 const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
@@ -70,7 +70,7 @@ impl<'a> SvgRenderer<'a> {
 }
 
 impl FrameSource for SvgRenderer<'static> {
-    fn render(&mut self, sensors: &SensorData) -> Result<Pixmap> {
+    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
         // Step 1: Build Tera context from sensors
         let mut context = tera::Context::new();
         for (key, value) in sensors {
@@ -109,7 +109,7 @@ impl FrameSource for SvgRenderer<'static> {
 
         resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-        Ok(pixmap)
+        Ok(RawFrame::from_pixmap(&pixmap))
     }
 
     fn name(&self) -> &str {

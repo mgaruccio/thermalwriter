@@ -78,8 +78,8 @@ fn svg_renderer_uses_persistent_tera_with_components() {
 
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
     let sensors: HashMap<String, String> = HashMap::new();
-    let pixmap = renderer.render(&sensors);
-    assert!(pixmap.is_ok(), "Renderer with component function should render: {:?}", pixmap.err());
+    let frame = renderer.render(&sensors);
+    assert!(frame.is_ok(), "Renderer with component function should render: {:?}", frame.err());
 }
 
 // ─── btop-style visualization component tests ─────────────────────────────────
