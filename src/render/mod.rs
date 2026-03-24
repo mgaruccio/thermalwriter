@@ -7,6 +7,7 @@ pub mod draw;
 pub mod svg;
 pub mod components;
 pub mod frontmatter;
+pub mod xvfb;
 
 #[cfg(feature = "blitz")]
 pub mod blitz;

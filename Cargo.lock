@@ -2985,6 +2985,7 @@ dependencies = [
  "fontdue",
  "image",
  "log",
+ "memmap2",
  "notify",
  "peniko",
  "png 0.17.16",
