@@ -56,7 +56,7 @@ fn find_unused_display() -> Result<u32> {
 
 /// Start Xvfb and a child application, returning a handle that owns both processes.
 ///
-/// `command` is the shell command to run inside the virtual display (e.g., "conky -c foo.conf").
+/// `command` is executed via `sh -c` inside the virtual display (e.g., "conky -c foo.conf").
 /// `width` and `height` set the virtual screen dimensions.
 pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     let display_num = find_unused_display()?;
@@ -84,13 +84,20 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 
     // Wait for screen file to appear
     let screen_file = fbdir.join("Xvfb_screen0");
+
+    // Build handle now (child_process: None) so Drop fires correctly on any failure below.
+    let mut handle = XvfbHandle {
+        xvfb_process,
+        child_process: None,
+        display_num,
+        fbdir: fbdir.clone(),
+        screen_file: screen_file.clone(),
+    };
+
     let deadline = Instant::now() + Duration::from_secs(5);
     while !screen_file.exists() {
         if Instant::now() > deadline {
-            // Cleanup on failure
-            let mut proc = xvfb_process;
-            let _ = proc.kill();
-            let _ = std::fs::remove_dir_all(&fbdir);
+            // Dropping handle kills Xvfb and cleans fbdir.
             bail!("Xvfb screen file did not appear within 5 seconds: {}", screen_file.display());
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -98,7 +105,8 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 
     info!("Xvfb screen file ready: {}", screen_file.display());
 
-    // Spawn the child application with DISPLAY set
+    // Spawn the child application with DISPLAY set.
+    // If spawn fails, handle drops here, killing Xvfb and cleaning up fbdir.
     let child_process = Command::new("sh")
         .args(["-c", command])
         .env("DISPLAY", &display)
@@ -108,14 +116,9 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         .with_context(|| format!("Failed to spawn child command: {}", command))?;
 
     info!("Spawned child application: {} (pid {})", command, child_process.id());
+    handle.child_process = Some(child_process);
 
-    Ok(XvfbHandle {
-        xvfb_process,
-        child_process: Some(child_process),
-        display_num,
-        fbdir,
-        screen_file,
-    })
+    Ok(handle)
 }
 
 #[cfg(test)]
