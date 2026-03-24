@@ -30,6 +30,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::Bench { duration } => {
+            return thermalwriter::cli::run_bench(duration);
+        }
         Command::Ctl { subcommand } => {
             return thermalwriter::cli::run_ctl(subcommand).await;
         }

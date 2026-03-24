@@ -120,6 +120,73 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
     Ok(())
 }
 
+/// Run the USB throughput benchmark.
+pub fn run_bench(duration_secs: u64) -> Result<()> {
+    let config = Config::load(&Config::default_path())?;
+    let quality = config.display.jpeg_quality;
+    let rotation = config.display.rotation;
+
+    // Pre-render two solid-color frames (red and blue) for visual confirmation
+    let mut pixmap_red = Pixmap::new(480, 480).context("Failed to create pixmap")?;
+    pixmap_red.fill(Color::from_rgba8(255, 0, 0, 255));
+    let jpeg_red = encode_jpeg(&pixmap_red, quality, rotation)?;
+
+    let mut pixmap_blue = Pixmap::new(480, 480).context("Failed to create pixmap")?;
+    pixmap_blue.fill(Color::from_rgba8(0, 0, 255, 255));
+    let jpeg_blue = encode_jpeg(&pixmap_blue, quality, rotation)?;
+
+    // Open USB device and handshake
+    let mut transport = BulkUsb::new()?;
+    let info = transport.handshake()?;
+
+    println!("Benchmarking display throughput...");
+    println!("  Device: {}x{}", info.width, info.height);
+    println!("  Frame size: {} bytes (JPEG q={})", jpeg_red.len(), quality);
+    println!("  Duration: {}s", duration_secs);
+    println!();
+
+    let duration = Duration::from_secs(duration_secs);
+    let mut frame_times: Vec<Duration> = Vec::new();
+    let mut use_red = true;
+
+    let bench_start = Instant::now();
+    while bench_start.elapsed() < duration {
+        let frame_start = Instant::now();
+        let jpeg = if use_red { &jpeg_red } else { &jpeg_blue };
+        transport.send_frame(jpeg)?;
+        frame_times.push(frame_start.elapsed());
+        use_red = !use_red;
+    }
+
+    transport.close();
+
+    // Report results
+    let total_elapsed = bench_start.elapsed();
+    let count = frame_times.len();
+    if count == 0 {
+        println!("No frames sent!");
+        return Ok(());
+    }
+
+    let avg_fps = count as f64 / total_elapsed.as_secs_f64();
+    let min = frame_times.iter().min().unwrap();
+    let max = frame_times.iter().max().unwrap();
+    let avg = Duration::from_nanos(
+        (frame_times.iter().map(|d| d.as_nanos()).sum::<u128>() / count as u128) as u64
+    );
+
+    println!("Results:");
+    println!("  Duration: {:.1}s", total_elapsed.as_secs_f64());
+    println!("  Frames sent: {}", count);
+    println!("  Average FPS: {:.1}", avg_fps);
+    println!("  Frame time: min={:.1}ms avg={:.1}ms max={:.1}ms",
+             min.as_secs_f64() * 1000.0,
+             avg.as_secs_f64() * 1000.0,
+             max.as_secs_f64() * 1000.0);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +235,18 @@ mod tests {
     fn cli_parses_ctl_sensors() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "sensors"]).unwrap();
         assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Sensors }));
+    }
+
+    #[test]
+    fn cli_parses_bench() {
+        let cli = Cli::try_parse_from(["thermalwriter", "bench"]).unwrap();
+        assert!(matches!(cli.command, Command::Bench { duration: 10 }));
+    }
+
+    #[test]
+    fn cli_parses_bench_with_duration() {
+        let cli = Cli::try_parse_from(["thermalwriter", "bench", "--duration", "30"]).unwrap();
+        assert!(matches!(cli.command, Command::Bench { duration: 30 }));
     }
 
     #[test]
