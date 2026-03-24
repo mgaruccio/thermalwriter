@@ -82,8 +82,9 @@ async fn main() -> Result<()> {
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
-    // Determine initial frame source and tick rate based on config mode
+    // Determine initial frame source, tick rate, and sensor history based on config mode
     let xvfb_tick_rate = config.xvfb.tick_rate.min(60).max(1);
+    let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>>;
     let (initial_frame_source, initial_xvfb_handle, active_tick_rate) =
         if config.display.mode == "xvfb" {
             if config.xvfb.command.is_empty() {
@@ -92,6 +93,7 @@ async fn main() -> Result<()> {
             let handle = xvfb_manager::start(&config.xvfb.command, device_info.width, device_info.height)?;
             let source = XvfbSource::new(handle.screen_file(), device_info.width, device_info.height)?;
             let boxed: Box<dyn FrameSource> = Box::new(source);
+            initial_sensor_history = None; // xvfb apps manage their own rendering
             (boxed, Some(handle), xvfb_tick_rate)
         } else {
             // Load configured layout — user file takes precedence over built-in
@@ -103,7 +105,7 @@ async fn main() -> Result<()> {
             };
 
             let frontmatter = LayoutFrontmatter::parse(&template);
-            let sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> = if !frontmatter.history_configs.is_empty() {
+            let sensor_history = if !frontmatter.history_configs.is_empty() {
                 let mut history = SensorHistory::new();
                 for (metric, cfg) in &frontmatter.history_configs {
                     history.configure_metric(metric, cfg.duration);
@@ -131,11 +133,9 @@ async fn main() -> Result<()> {
                 Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
             };
 
+            initial_sensor_history = sensor_history;
             (boxed, None, config.display.tick_rate)
         };
-
-    // Sensor history for the tick loop (only relevant in layout mode)
-    let sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> = None;
 
     // Shared state for D-Bus ↔ tick loop communication
     let state = Arc::new(Mutex::new(ServiceState {
@@ -157,7 +157,6 @@ async fn main() -> Result<()> {
     // Mode change listener: handles both layout switches and xvfb mode activation
     let layout_dir_clone = layout_dir.clone();
     let xvfb_tick_rate_cfg = xvfb_tick_rate;
-    let default_tick_rate = config.display.tick_rate;
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
@@ -191,11 +190,12 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             };
-                            let _ = source_tx.send(new_source).await;
+                            if source_tx.send(new_source).await.is_err() {
+                                log::warn!("Failed to send new frame source to tick loop — receiver dropped");
+                            }
                             // Also push raw template for set_template hot-swap path
                             let _ = template_tx.send(template);
                             info!("Switched to layout: {}", name);
-                            let _ = default_tick_rate; // suppress unused warning
                         }
                         Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
                     }
@@ -207,7 +207,9 @@ async fn main() -> Result<()> {
                         Ok(handle) => {
                             match XvfbSource::new(handle.screen_file(), 480, 480) {
                                 Ok(source) => {
-                                    let _ = source_tx.send(Box::new(source)).await;
+                                    if source_tx.send(Box::new(source)).await.is_err() {
+                                        log::warn!("Failed to send xvfb frame source to tick loop — receiver dropped");
+                                    }
                                     xvfb_handle = Some(handle);
                                     info!("Switched to xvfb mode: {} ({}fps)", command, xvfb_tick_rate_cfg);
                                 }
@@ -235,7 +237,7 @@ async fn main() -> Result<()> {
         rotation,
         template_rx,
         shutdown_rx,
-        sensor_history,
+        initial_sensor_history,
         sensor_poll_interval,
     ).await?;
 

@@ -62,7 +62,7 @@ impl DisplayInterface {
         state.mode_change_tx.send(ModeChange::Layout(name.clone())).await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.active_layout = name.clone();
-        state.mode = "svg".to_string();
+        state.mode = if name.ends_with(".html") { "html" } else { "svg" }.to_string();
 
         Self::layout_changed(&emitter, &name).await?;
         Ok(format!("Layout set to: {}", name))
