@@ -12,8 +12,9 @@ Lightweight Rust daemon to drive Thermalright cooler LCD displays, replacing the
 
 Rust daemon with:
 - **USB bulk transport** (rusb) — sends JPEG frames to cooler LCD, 180° rotation
-- **Pluggable renderers** via `FrameSource` trait in `src/render/mod.rs`
-  - `SvgRenderer` (primary) — SVG templates + Tera + resvg → Pixmap
+- **Pluggable renderers** via `FrameSource` trait in `src/render/mod.rs` (returns `RawFrame` — straight RGB)
+  - `SvgRenderer` (primary) — SVG templates + Tera + resvg → Pixmap → RawFrame
+  - `XvfbSource` — mmap-based capture from Xvfb virtual framebuffer (any X11 app)
   - `TemplateRenderer` (legacy) — custom HTML subset, taffy + fontdue
   - `BlitzRenderer` (experimental) — behind `--features blitz`, alpha quality
 - **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics
@@ -33,12 +34,14 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (93 tests)
+cargo test                               # run tests (107 tests)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
+cargo run -- bench                       # USB throughput benchmark (~750 FPS)
 systemctl --user status thermalwriter    # check daemon status
 thermalwriter ctl status                 # query daemon via D-Bus
+thermalwriter ctl mirror "command"       # xvfb capture mode (any X11 app)
 ```
 
 ### Layout Development
@@ -78,13 +81,18 @@ tick_rate = 2
 default_layout = "svg/neon-dash-v2.svg"
 jpeg_quality = 85
 rotation = 180  # 0, 90, 180, 270
+mode = "svg"    # "svg", "html", or "xvfb"
 
 [sensors]
 poll_interval_ms = 1000
+
+[xvfb]
+command = "conky -c ~/.config/conky/lcd.conf"
+tick_rate = 15  # 1-60 FPS for xvfb capture mode
 ```
 
 Layouts in `~/.config/thermalwriter/layouts/` — built-in layouts seeded on first run.
 
 ## Key Dependencies
 
-rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, sysinfo, tokio, clap, dirs
+rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, memmap2, sysinfo, tokio, clap, dirs
