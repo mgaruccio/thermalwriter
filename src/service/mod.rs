@@ -3,3 +3,4 @@
 
 pub mod tick;
 pub mod dbus;
+pub mod xvfb;
