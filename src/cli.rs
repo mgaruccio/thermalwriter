@@ -1,6 +1,12 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tiny_skia::{Color, Pixmap};
+use crate::config::Config;
+use crate::service::tick::encode_jpeg;
+use crate::transport::Transport;
+use crate::transport::bulk_usb::BulkUsb;
 
 /// Thermalright cooler LCD display daemon and control CLI.
 #[derive(Parser, Debug)]
@@ -18,6 +24,12 @@ pub enum Command {
     Ctl {
         #[command(subcommand)]
         subcommand: CtlCommand,
+    },
+    /// Benchmark display USB throughput.
+    Bench {
+        /// Duration in seconds (default: 10).
+        #[arg(long, default_value_t = 10)]
+        duration: u64,
     },
 }
 
