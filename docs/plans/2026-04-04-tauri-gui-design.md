@@ -3,231 +3,159 @@ date: 2026-04-04
 topic: tauri-gui
 ---
 
-# Tauri GUI — Control Panel for thermalwriter
+# thermalwriter GUI — Layout Configuration Tool
 
 ## What We're Building
 
-A Tauri v2 desktop app (Svelte frontend) that serves as a control panel for the thermalwriter daemon. It lets users switch layouts, configure which sensor feeds into each layout slot, adjust settings (tick rate, quality, rotation), and see a live preview of the LCD display — all without touching config files or the CLI.
+A Tauri v2 + Svelte GUI for configuring the thermalwriter cooler LCD display. The GUI reads variable declarations from SVG layout frontmatter, generates a configuration form (color pickers, text inputs, sensor dropdowns), and shows a live 480x480 preview that matches the real display pixel-for-pixel. Users pick a layout, tweak its variables, and apply — the daemon picks up the changes.
 
-The GUI is a regular window (not a system tray app). The daemon remains the owner of the display — the GUI is a client that talks to it over D-Bus via Tauri commands.
+This is a **configuration tool**, not a persistent app. It talks to the running daemon over D-Bus for sensor lists and applying changes, but can preview layouts standalone using mock sensor data.
 
 ## Why This Approach
 
-**Considered and rejected:**
+**Considered:**
 
-- **React / Vue frontend** — Svelte is the most natural Tauri pairing: smallest bundle, best reactivity model, and Mike prefers it.
-- **Direct D-Bus from frontend** — would require a JS D-Bus binding or WebSocket bridge. Tauri commands as a proxy layer is simpler, keeps the frontend pure UI, and the Rust backend already has zbus.
-- **Separate repo** — the GUI depends on shared types (sensor descriptors, slot definitions) and the D-Bus interface contract. Monorepo with a Cargo workspace keeps everything in sync.
-- **System tray app** — the daemon runs independently via systemd. The GUI is for configuration, not monitoring — you open it, make changes, close it.
-- **Shared memory for live preview** — overkill for 2 FPS at 30-50KB JPEG frames. D-Bus `GetFrame()` polling is simpler and sufficient.
-- **Tera variable parsing for slots** — would work with zero layout changes but gives a poor UX (raw variable names like `cpu_temp` as slot labels). SVG data attributes give layout authors control over slot names and labels.
+- **egui native GUI** — 100% Rust, no web dependencies. Rejected because egui's styling is functional but not attractive, and the project prioritizes a gaming aesthetic. Color pickers and rich form controls are also weaker in egui.
+- **Tauri + vanilla web** — No framework overhead. Rejected because a reactive framework like Svelte makes the dynamic form generation and live preview significantly cleaner.
+- **Tauri + React/Solid** — Rich ecosystem. Rejected as heavier than needed — Svelte compiles away, has excellent Tauri integration, and is sufficient for what's ultimately a form + canvas.
+
+**Chosen: Tauri v2 + Svelte.** Shares the Rust rendering pipeline (SvgRenderer) for pixel-perfect preview, Svelte compiles away framework overhead, Tauri scaffolds Svelte projects natively.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│               Tauri App                       │
-│                                               │
-│  ┌──────────────────────────────────────────┐ │
-│  │          Svelte Frontend                  │ │
-│  │                                           │ │
-│  │  ┌─────────────┐  ┌─────────────────┐    │ │
-│  │  │ LayoutPicker│  │  LivePreview     │    │ │
-│  │  │ SlotEditor  │  │  (480x480 JPEG)  │    │ │
-│  │  │ Settings    │  │                   │    │ │
-│  │  └──────┬──────┘  └────────┬─────────┘    │ │
-│  │         │                  │               │ │
-│  │         └───── invoke() ───┘               │ │
-│  └──────────────┬────────────────────────────┘ │
-│                 │ Tauri commands                │
-│  ┌──────────────▼────────────────────────────┐ │
-│  │        Rust Backend (src-tauri)            │ │
-│  │   commands.rs → zbus proxy → D-Bus        │ │
-│  └──────────────┬────────────────────────────┘ │
-└─────────────────┼────────────────────────────┘
-                  │ D-Bus (session bus)
-┌─────────────────▼────────────────────────────┐
-│          thermalwriter daemon                 │
-│   com.thermalwriter.Service                   │
-│   /com/thermalwriter/display                  │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│            Tauri App                         │
+│                                              │
+│  ┌──────────────────────────────────────┐   │
+│  │  Svelte Frontend                      │   │
+│  │  ┌────────────┐  ┌────────────────┐  │   │
+│  │  │ Preview     │  │ Config Form    │  │   │
+│  │  │ (480x480    │  │ (generated     │  │   │
+│  │  │  canvas)    │  │  from vars)    │  │   │
+│  │  └──────┬─────┘  └───────┬────────┘  │   │
+│  └─────────┼────────────────┼───────────┘   │
+│            │ invoke()       │ invoke()       │
+│  ┌─────────▼────────────────▼───────────┐   │
+│  │  Rust Backend (Tauri commands)        │   │
+│  │  - render_preview(vars) → PNG         │   │
+│  │  - list_layouts() → Vec<LayoutInfo>   │   │
+│  │  - get_layout_vars(name) → Vec<Var>   │   │
+│  │  - list_sensors() → Vec<String>       │   │
+│  │  - save_config(layout, vars)          │   │
+│  │  - apply_to_daemon(layout, vars)      │   │
+│  └──────────────────────────────────────┘   │
+│       │                           │          │
+│       │ SvgRenderer              │ D-Bus    │
+│       │ (resvg, tera)            │ (zbus)   │
+│       ▼                          ▼          │
+│   Preview frame           thermalwriter     │
+│                           daemon            │
+└─────────────────────────────────────────────┘
 ```
-
-## Repo Structure
-
-Full restructure into a Cargo workspace:
-
-```
-thermalwriter/
-├── Cargo.toml              # [workspace] members = ["crates/*", "gui/src-tauri"]
-├── crates/
-│   ├── daemon/             # existing daemon (moved from src/)
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   └── shared/             # shared types: sensor descriptors, slot definitions
-│       ├── Cargo.toml
-│       └── src/lib.rs
-├── gui/
-│   ├── src-tauri/          # Tauri Rust backend
-│   │   ├── Cargo.toml      # depends on shared crate + zbus
-│   │   └── src/
-│   │       ├── main.rs
-│   │       └── commands.rs
-│   ├── src/                # Svelte frontend
-│   │   ├── App.svelte
-│   │   ├── lib/
-│   │   │   ├── LayoutPicker.svelte
-│   │   │   ├── SlotEditor.svelte
-│   │   │   ├── LivePreview.svelte
-│   │   │   └── Settings.svelte
-│   │   └── main.ts
-│   ├── package.json
-│   ├── svelte.config.js
-│   ├── vite.config.ts
-│   └── tauri.conf.json
-├── layouts/                # SVG/HTML layout templates (unchanged)
-├── examples/               # preview_layout, render_layout, etc.
-├── skills/
-└── docs/
-```
-
-## Slot System — SVG Data Attributes
-
-Layouts declare configurable metric slots via data attributes on SVG elements:
-
-```svg
-<text x="120" y="80"
-      data-slot="primary-temp"
-      data-slot-label="Primary Temperature"
-      data-slot-default="cpu_temp"
-      data-slot-format="{value}°C">
-  {{ primary_temp }}°C
-</text>
-```
-
-**Attributes:**
-
-| Attribute | Required | Purpose |
-|-----------|----------|---------|
-| `data-slot` | yes | Unique slot ID within the layout |
-| `data-slot-label` | yes | Human-readable name shown in the GUI |
-| `data-slot-default` | yes | Sensor key used when no user binding exists |
-| `data-slot-format` | no | Display format (e.g., `{value}°C`, `{value}W`) |
-
-**Binding storage** — per-layout TOML in config directory:
-
-```toml
-# ~/.config/thermalwriter/bindings/neon-dash-v2.toml
-[slots]
-primary-temp = "cpu_temp"
-secondary-temp = "gpu_temp"
-power-display = "cpu_power"
-```
-
-**Resolution flow in the daemon:**
-
-1. Parse SVG for `data-slot` attributes → build slot map: `slot_id → (variable_name, default_sensor)`
-2. Load bindings file (if it exists); fall back to `data-slot-default` for unbound slots
-3. Build Tera context by mapping each slot's variable name to its bound sensor's current value
-4. Tera renders `{{ primary_temp }}` → actual sensor reading
-
-Elements without `data-slot` attributes continue to work as before — they use the literal sensor key as the Tera variable name.
-
-## D-Bus Extensions
-
-New methods added to `com.thermalwriter.Display`:
-
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `GetFrame()` | `→ ay` (byte array) | Returns current JPEG frame (~30-50KB) |
-| `GetLayoutSlots(name)` | `s → a(sss)` | Returns `(slot_id, label, current_sensor)` tuples |
-| `SetSlotBinding(layout, slot, sensor)` | `sss → ()` | Bind a slot to a sensor; writes to bindings TOML |
-| `GetSensorList()` | `→ a(sss)` | Returns `(key, value, provider)` for all sensors |
-
-All additive — no changes to existing D-Bus interface.
-
-The daemon stashes the latest JPEG frame in an `Arc<Mutex<Vec<u8>>>` after each tick. `GetFrame()` clones and returns it.
-
-## Tauri Commands
-
-Thin proxy layer — each command maps 1:1 to a D-Bus call:
-
-```rust
-#[tauri::command] async fn get_status() -> Result<HashMap<String, String>, String>;
-#[tauri::command] async fn set_layout(name: String) -> Result<String, String>;
-#[tauri::command] async fn get_frame() -> Result<Vec<u8>, String>;
-#[tauri::command] async fn get_layout_slots(name: String) -> Result<Vec<SlotInfo>, String>;
-#[tauri::command] async fn set_slot_binding(layout: String, slot: String, sensor: String) -> Result<(), String>;
-#[tauri::command] async fn list_sensors() -> Result<Vec<SensorInfo>, String>;
-#[tauri::command] async fn list_layouts() -> Result<Vec<String>, String>;
-#[tauri::command] async fn set_tick_rate(rate: u32) -> Result<(), String>;
-#[tauri::command] async fn set_jpeg_quality(quality: u8) -> Result<(), String>;
-#[tauri::command] async fn set_rotation(degrees: u32) -> Result<(), String>;
-```
-
-The Tauri backend creates one `zbus` proxy connection on startup and reuses it. If the daemon isn't running, commands return user-friendly errors.
-
-## Svelte Frontend
-
-### Layout
-
-Sidebar (left) + main area (right):
-
-```
-┌──────────────────┬──────────────────────────────┐
-│  Layout Picker   │                              │
-│  ┌────────────┐  │      Live Preview            │
-│  │ neon-dash  │  │      ┌──────────────┐        │
-│  │ arc-gauge  │  │      │  480x480     │        │
-│  │ cyber-grid │  │      │  JPEG frame  │        │
-│  │ fps-hero   │  │      │              │        │
-│  └────────────┘  │      └──────────────┘        │
-│                  │                              │
-│  Slot Editor     │  Settings                    │
-│  ┌────────────┐  │  ┌──────────────────────┐    │
-│  │ Primary    │  │  │ Tick rate: [2] FPS   │    │
-│  │ Temp: [▼]  │  │  │ Quality:  [85]      │    │
-│  │ Secondary  │  │  │ Rotation: [180°]    │    │
-│  │ Temp: [▼]  │  │  └──────────────────────┘    │
-│  └────────────┘  │                              │
-└──────────────────┴──────────────────────────────┘
-```
-
-### Components
-
-1. **LayoutPicker** — lists available layouts. Click to switch via `set_layout()`. Active layout highlighted. Could show thumbnail previews later.
-
-2. **SlotEditor** — appears when a layout is selected. Shows each slot's label with a dropdown of available sensors (from `list_sensors()`). Changes call `set_slot_binding()` and take effect on the next tick.
-
-3. **LivePreview** — polls `get_frame()` at the daemon's tick rate. Renders the JPEG bytes into an `<img>` via a blob URL or base64 data URI. Displayed at 480x480 (1:1) or scaled to fit.
-
-4. **Settings** — tick rate slider (1-30), JPEG quality slider (50-100), rotation dropdown (0/90/180/270). Each change calls the corresponding Tauri command immediately.
-
-### Styling
-
-Tokyo Night color palette to match Mike's desktop aesthetic. Dark background, muted text, accent colors from the theme.
 
 ## Key Decisions
 
-- **Tauri v2 + Svelte**: lightweight, Rust-native backend, reactive frontend with minimal bundle
-- **D-Bus proxy via Tauri commands**: clean separation, reuses existing daemon IPC, frontend stays pure UI
-- **SVG data attributes for slots**: layout authors control the UX, descriptive labels, graceful fallback for unattributed elements
-- **Per-layout binding files**: slot→sensor mappings stored as TOML, easy to edit by hand if needed
-- **Polling for live preview**: simple, sufficient at 2-4 FPS, no shared memory complexity
-- **Full workspace restructure**: daemon → `crates/daemon/`, shared types → `crates/shared/`, GUI → `gui/`
+- **Variable schema in SVG frontmatter**: Layouts declare their configurable variables inline using `{# vars: ... #}`. Single source of truth — the schema travels with the layout file. No sidecar files.
+- **Three variable types**: `color` (color picker), `text` (text input), `sensor` (dropdown of available sensors from the daemon). Covers cosmetic tweaks and data binding. More types added later as layouts need them.
+- **Reuse SvgRenderer for preview**: The Tauri Rust backend calls the same `SvgRenderer` the daemon uses. Preview is pixel-for-pixel identical to the real display.
+- **Config persistence in config.toml**: Variable overrides stored in `[layout_vars."layout-name"]` sections. Daemon reads these on startup; GUI reads/writes them via Tauri commands.
+- **Svelte frontend**: Compiles away, reactive bindings make form ↔ preview sync trivial, first-class Tauri scaffolding support.
+- **Workspace structure**: GUI lives in `gui/` as a separate Tauri crate within the Cargo workspace, depending on the thermalwriter library for rendering code.
 
-## External Prerequisites
+## Variable Schema Format
 
-- **Tauri v2 CLI**: `cargo install tauri-cli` — needed for `cargo tauri dev` / `cargo tauri build`
-- **Node.js / npm**: required for the Svelte frontend build tooling
-- **WebKitGTK**: Tauri's webview on Linux — likely already installed on Mike's desktop
-- **No new credentials or API keys needed** — everything is local D-Bus
+In SVG frontmatter (alongside existing `history:` and `animation:` directives):
+
+```
+{# vars:
+   theme_primary: color = #00ff88 "Primary accent color"
+   theme_secondary: color = #ff6b9d "Secondary accent color"
+   theme_background: color = #0a0a14 "Background color"
+   theme_text_dim: color = #666680 "Dim label color"
+   theme_critical: color = #ff4444 "Critical threshold color"
+   theme_warning: color = #ffaa00 "Warning threshold color"
+   cpu_label: text = "CPU" "Label for CPU panel"
+   gpu_label: text = "GPU" "Label for GPU panel"
+   top_sensor: sensor = cpu_temp "Main metric for top panel"
+   bottom_sensor: sensor = gpu_temp "Main metric for bottom panel"
+#}
+```
+
+Format per line: `name: type = default "help text"`
+
+Parsed by extending the existing `LayoutFrontmatter` in `src/render/frontmatter.rs`.
+
+## D-Bus Extensions
+
+Two new methods on `com.thermalwriter.Display`:
+
+- **`GetLayoutVars(name: String) -> Vec<(String, String, String, String)>`** — returns `(name, type, default, help_text)` tuples for the named layout
+- **`SetLayoutVars(name: String, vars: Dict<String, String>)`** — applies variable overrides, persists to config, triggers re-render
+
+Wire up the existing `ListSensors` placeholder to return actual sensor keys.
+
+## User Flow
+
+1. Open GUI → layout picker grid (thumbnails of all available layouts)
+2. Select layout → config form populates with layout's declared variables, preview shows current rendering
+3. Change a variable → preview re-renders live (~100ms debounce for color picker dragging)
+4. Click "Apply" → saves to config.toml, tells daemon to reload with new values
+5. Close GUI → daemon continues with applied settings
+
+## Preview Rendering
+
+Tauri command `render_preview` calls `SvgRenderer` with:
+- Template variables from the user's current form state
+- Sensor data: mock values (reusing existing `--mock` pattern) when daemon is not running, or live sensor snapshot from daemon via D-Bus when available
+
+Returns base64 PNG data URL. Frontend displays in `<img>` tag.
+
+## Project Structure
+
+```
+thermalwriter/              (workspace root)
+├── Cargo.toml              (workspace members: ".", "gui/src-tauri")
+├── src/                    (daemon + library crate)
+├── gui/
+│   ├── src-tauri/
+│   │   ├── Cargo.toml      (tauri app, depends on thermalwriter lib)
+│   │   └── src/
+│   │       └── main.rs     (tauri commands)
+│   ├── src/                (svelte frontend)
+│   │   ├── App.svelte
+│   │   ├── lib/
+│   │   │   ├── LayoutPicker.svelte
+│   │   │   ├── ConfigForm.svelte
+│   │   │   ├── Preview.svelte
+│   │   │   └── ColorPicker.svelte
+│   │   └── main.ts
+│   ├── package.json
+│   └── vite.config.ts
+└── layouts/
+```
+
+## Scope
+
+**In scope:**
+- Layout picker with thumbnail grid
+- Dynamic config form (color, text, sensor types)
+- Live 480x480 preview
+- Save variable overrides to config.toml
+- Apply changes to running daemon via D-Bus
+- Frontmatter variable schema parsing
+
+**Out of scope (future):**
+- Visual drag-and-drop layout editor
+- Creating new layouts from the GUI
+- Daemon lifecycle management (start/stop)
+- Sensor history graphs in the GUI
+- Additional variable types (number, boolean, enum)
 
 ## Open Questions
 
-- **Layout thumbnails in the picker**: should we render a static preview of each layout (via the daemon) or just show names? Could defer to v2.
-- **Hot-reload in the GUI**: when the daemon detects a layout file change, should it notify the GUI to refresh the slot editor?
-- **Error states**: what should the GUI show when the daemon isn't running? A "daemon offline" banner with a "start" button that runs `systemctl --user start thermalwriter`?
+- Should the GUI be installable via the same `cargo install` as the daemon, or packaged separately (AppImage, .deb)?
+- Thumbnail generation for the layout picker: render on-demand or cache at build time?
 
 ## Next Steps
 
