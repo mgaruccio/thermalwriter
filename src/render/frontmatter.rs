@@ -128,8 +128,9 @@ impl LayoutFrontmatter {
             if line.is_empty() {
                 continue;
             }
-            if let Some(parsed) = Self::parse_var_line(line) {
-                self.variables.insert(parsed.0, parsed.1);
+            match Self::parse_var_line(line) {
+                Some(parsed) => { self.variables.insert(parsed.0, parsed.1); }
+                None => log::warn!("frontmatter: skipping malformed or invalid var line: {:?}", line),
             }
         }
     }
@@ -173,13 +174,10 @@ impl LayoutFrontmatter {
 }
 
 fn is_valid_var_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
     let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !matches!(first, 'a'..='z' | '_') {
-        return false;
+    match chars.next() {
+        Some(c) if matches!(c, 'a'..='z' | '_') => {}
+        _ => return false,
     }
     chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'))
 }

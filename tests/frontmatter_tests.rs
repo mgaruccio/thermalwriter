@@ -96,3 +96,44 @@ fn existing_single_line_directives_still_work() {
 // Ensure VariableDecl is accessible from tests (compile check)
 #[allow(dead_code)]
 fn _type_check(_: VariableDecl) {}
+
+#[test]
+fn invalid_var_name_uppercase_is_rejected() {
+    // Variable names must match [a-z_][a-z0-9_]* — uppercase rejected
+    let svg = r##"{# vars:
+BadName: color = "#00ff88" "A color"
+good_name: color = "#00ff88" "A color"
+#}
+<svg/>"##;
+    let fm = LayoutFrontmatter::parse(svg);
+    assert!(!fm.variables.contains_key("BadName"), "uppercase name must be rejected");
+    assert!(fm.variables.contains_key("good_name"), "valid name must be accepted");
+}
+
+#[test]
+fn invalid_color_default_is_rejected() {
+    // Color values must be #rrggbb or #rrggbbaa hex
+    let svg = r##"{# vars:
+bad_color: color = "red" "Not a hex color"
+also_bad: color = "#gghhii" "Bad hex digits"
+good_color: color = "#ff8800" "Valid hex color"
+#}
+<svg/>"##;
+    let fm = LayoutFrontmatter::parse(svg);
+    assert!(!fm.variables.contains_key("bad_color"), "named color must be rejected");
+    assert!(!fm.variables.contains_key("also_bad"), "invalid hex digits must be rejected");
+    assert!(fm.variables.contains_key("good_color"), "valid hex color must be accepted");
+}
+
+#[test]
+fn text_with_tera_delimiters_is_rejected() {
+    // Text defaults must not contain {{ }} {% %} to prevent template injection
+    let svg = r#"{# vars:
+unsafe_text: text = "{{ cpu_temp }}" "Tera expression"
+safe_text: text = "CPU Temperature" "Plain text label"
+#}
+<svg/>"#;
+    let fm = LayoutFrontmatter::parse(svg);
+    assert!(!fm.variables.contains_key("unsafe_text"), "Tera delimiters must be rejected");
+    assert!(fm.variables.contains_key("safe_text"), "plain text must be accepted");
+}
