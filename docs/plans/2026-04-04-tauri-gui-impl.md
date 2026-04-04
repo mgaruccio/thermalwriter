@@ -1,5 +1,22 @@
 # Tauri GUI Implementation Plan
 
+## Refinement Summary
+
+**Refined on:** 2026-04-04
+**Research agents used:** 1 (repo-research-analyst for plan verification)
+**Review agents used:** 2 (architecture-strategist, code-simplicity-reviewer)
+**Adversarial review:** Completed (Gemini 3.1 Pro)
+
+### Key Improvements
+1. Fixed CRITICAL: `render_preview` now accepts `layout` param and loads the template
+2. Fixed CRITICAL: Feature-gating expanded to cover `cli.rs`, `service/tick.rs`, `render/mod.rs` imports
+3. Fixed CRITICAL: GUI loads saved layout_vars from config.toml, not just frontmatter defaults
+4. Fixed MAJOR: Added missing `list_sensors` Tauri command
+5. Fixed MAJOR: Moved "add vars to layouts" from Phase 5 to Phase 1 (test against real layouts)
+6. Fixed: `putImageData` expects straight (un-premultiplied) alpha — use `RawFrame` RGB + alpha=255
+7. Simplified: Tauri commands use D-Bus when daemon running, direct file reads as fallback
+8. Standardized: All Tauri commands return `Result<T, AppError>` consistently
+
 > **For Claude:** REQUIRED SUB-SKILL: Use forge:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build a Tauri v2 + Svelte 5 configuration GUI for thermalwriter that lets users pick layouts, configure variables, preview live, and apply to the running daemon.
@@ -17,7 +34,7 @@
 ### Key Files
 - `src/render/frontmatter.rs` — Current frontmatter parser (line-by-line, single-line `{# directive: spec #}`). Must be restructured for multi-line blocks.
 - `src/render/svg.rs:33-59` — `SvgRenderer::new()` constructor. Loads fonts at line 40 (`load_system_fonts()`), creates Tera instance. The GUI reuses this directly.
-- `src/render/svg.rs:72-125` — `FrameSource for SvgRenderer<'static>`. The `render()` method at line 73 returns `RawFrame` via `from_pixmap()`. For the GUI, skip `from_pixmap()` and use `pixmap.data()` directly (premultiplied RGBA).
+- `src/render/svg.rs:72-125` — `FrameSource for SvgRenderer<'static>`. The `render()` method at line 73 returns `RawFrame` via `from_pixmap()` which unpremultiplies alpha. For the GUI, use `RawFrame` (straight RGB) and append alpha=255 per pixel. **Do NOT use `pixmap.data()` directly** — `putImageData` expects straight alpha but `tiny_skia::Pixmap` stores premultiplied alpha.
 - `src/render/mod.rs:19-28` — `SensorData` type alias (`HashMap<String, String>`) and `RawFrame` struct.
 - `src/service/dbus.rs:14-19` — `ModeChange` enum for layout/xvfb switching.
 - `src/service/dbus.rs:22-33` — `ServiceState` struct. Needs `sensor_descriptors: Vec<SensorDescriptor>` added.
@@ -37,7 +54,8 @@
 - **Tauri State**: `tauri::State<T>` wraps in `Arc` internally. Never double-wrap. `std::sync::Mutex` for sync work, `tokio::sync::Mutex` only when holding across `.await`.
 - **zbus Proxy**: `DisplayProxy` is `Clone + Send`, internally reference-counted. No Mutex needed.
 - **Svelte 5**: `$state()`, `$derived()`, `$effect()` with cleanup for debouncing. `$state.snapshot()` before sending to `invoke()`.
-- **putImageData**: Expects premultiplied RGBA. `tiny_skia::Pixmap::data()` is already premultiplied RGBA. Direct pass-through, no conversion.
+- **putImageData**: Expects **straight (un-premultiplied) RGBA**. `tiny_skia::Pixmap::data()` is premultiplied RGBA — NOT compatible. Use `RawFrame::from_pixmap()` (which unpremultiplies) then append alpha=255 to each RGB pixel. The browser premultiplies internally on `putImageData`.
+- **toml_edit**: Use `DocumentMut::from_str()` to parse, index with `doc["layout_vars"]["name"]["key"]` to modify, `.to_string()` to serialize. Preserves comments and formatting.
 - **Tauri arg naming**: Rust `snake_case` auto-converts to `camelCase` on JS side.
 - **create-tauri-app**: `npm create tauri-app@latest` scaffolds Svelte + Vite + TypeScript.
 - **WebKit2GTK 4.1**: Required on Linux for Tauri v2 (not 4.0).
@@ -280,47 +298,77 @@ git commit -m "feat: add multi-line frontmatter parser with vars support"
 
 ## Phase 2: Workspace Setup + Tauri Scaffolding
 
-### Task 7: Feature-gate daemon dependencies and set up workspace [DO-CONFIRM]
+### Task 7: Feature-gate daemon dependencies and set up workspace [READ-DO]
 
 **Files:**
 - Modify: `Cargo.toml` (add workspace section, feature-gate rusb/memmap2)
-- Modify: `src/lib.rs` (conditional compilation for transport/xvfb modules)
-- Modify: `src/render/xvfb.rs` (gate behind feature)
-- Modify: `src/transport/mod.rs` and `src/transport/bulk_usb.rs` (gate behind feature)
+- Modify: `src/lib.rs` (conditional compilation for transport module)
+- Modify: `src/render/mod.rs:10` (gate `pub mod xvfb` behind feature)
+- Modify: `src/cli.rs:7-9` (gate transport imports and `run_bench` behind feature)
+- Modify: `src/service/tick.rs:13` (gate transport import behind feature)
+- Modify: `src/service/mod.rs` (if xvfb submodule is exported, gate it)
 
-**Implement:**
+**Step 1: Identify all modules that import gated deps**
 
-1. Add `[workspace]` section to root `Cargo.toml`:
-   ```toml
-   [workspace]
-   members = [".", "gui/src-tauri"]
-   default-members = ["."]
-   ```
+These must ALL be gated or the build breaks:
+- `src/transport/bulk_usb.rs:4` — `use rusb::...` (gate entire `transport` module)
+- `src/render/xvfb.rs:80,95` — `use memmap2::Mmap` (gate `render::xvfb` submodule)
+- `src/cli.rs:7-9` — `use crate::transport::{Transport, bulk_usb::BulkUsb}` (gate these imports + `run_bench()`)
+- `src/service/tick.rs:13` — `use crate::transport::Transport` (gate this import + transport usage)
 
-2. Feature-gate daemon-only deps:
-   ```toml
-   [features]
-   default = ["daemon"]
-   daemon = ["dep:rusb", "dep:memmap2"]
-   ```
-   Change `rusb = "0.9"` to `rusb = { version = "0.9", optional = true }` and same for `memmap2`.
+**Step 2: Add workspace and feature flags to Cargo.toml**
 
-3. Gate modules in `src/lib.rs`:
-   ```rust
-   #[cfg(feature = "daemon")]
-   pub mod transport;
-   ```
-   Gate `xvfb` module similarly under the `daemon` feature.
+```toml
+[workspace]
+members = [".", "gui/src-tauri"]
+default-members = ["."]
 
-4. Verify: `cargo build` (with default features) still works. `cargo build --no-default-features` compiles without rusb/memmap2.
+[features]
+default = ["daemon"]
+daemon = ["dep:rusb", "dep:memmap2"]
+```
 
-**Confirm checklist:**
-- [ ] `cargo build` (default features) succeeds — daemon binary unchanged
-- [ ] `cargo build --no-default-features` succeeds — no rusb/memmap2 link errors
-- [ ] `cargo test` passes with default features
-- [ ] `cargo test --no-default-features` passes (tests that need USB/mmap are gated or skipped)
-- [ ] `default-members = ["."]` means `cargo build` from root only builds daemon
-- [ ] Workspace `Cargo.toml` is valid (even though `gui/src-tauri` doesn't exist yet — use `exclude` temporarily)
+Change `rusb = "0.9"` to `rusb = { version = "0.9", optional = true }`. Change `memmap2 = "0.9.10"` to `memmap2 = { version = "0.9.10", optional = true }`.
+
+**Step 3: Gate modules in `src/lib.rs`**
+
+```rust
+#[cfg(feature = "daemon")]
+pub mod transport;
+```
+
+**Step 4: Gate `xvfb` in `src/render/mod.rs`**
+
+Change line 10 from `pub mod xvfb;` to:
+```rust
+#[cfg(feature = "daemon")]
+pub mod xvfb;
+```
+
+**Step 5: Gate transport usage in `src/cli.rs`**
+
+Wrap the transport imports (lines 7-9) and the `run_bench` function with `#[cfg(feature = "daemon")]`. The `Command::Bench` variant in the enum also needs gating.
+
+**Step 6: Gate transport usage in `src/service/tick.rs`**
+
+The `use crate::transport::Transport` import at line 13 and any functions that take `&mut dyn Transport` need `#[cfg(feature = "daemon")]`. Since the tick module's `run_tick_loop` is the core daemon function, gate the entire function or just the transport parameter behind the feature.
+
+**Step 7: Verify both feature configurations compile**
+
+```bash
+cargo build                         # default features (daemon) — must succeed
+cargo build --no-default-features   # GUI mode — must succeed
+cargo test                          # all tests with daemon features
+cargo test --no-default-features    # render/config/frontmatter tests only
+```
+
+**Step 8: Commit**
+
+```bash
+git commit -m "feat: feature-gate rusb/memmap2 behind daemon feature, add workspace"
+```
+
+**Note:** Temporarily use `exclude = ["gui/src-tauri"]` in the workspace until Task 8 creates the directory.
 
 ### Task 8: Scaffold Tauri app with Svelte 5 [READ-DO]
 
@@ -490,38 +538,66 @@ use tauri::ipc::Response;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::FrameSource;
 use thermalwriter::theme::ThemePalette;
+use thermalwriter::render::frontmatter::LayoutFrontmatter;
+
+use crate::error::AppError;
 
 #[tauri::command]
 pub fn render_preview(
-    renderer: tauri::State<'_, Mutex<Option<SvgRenderer<'static>>>>,
+    renderer: tauri::State<'_, Mutex<RendererState>>,
+    layout: String,
     vars: HashMap<String, String>,
-) -> Result<Response, String> {
-    let mut guard = renderer.lock().map_err(|e| e.to_string())?;
-    let renderer = guard.as_mut().ok_or("No layout loaded")?;
+) -> Result<Response, AppError> {
+    let mut state = renderer.lock().map_err(|e| AppError::Render(e.to_string()))?;
 
-    // Merge vars into sensor data (vars override defaults)
+    // If layout changed, create a fresh SvgRenderer
+    if state.current_layout.as_deref() != Some(&layout) {
+        let content = state.read_layout_file(&layout)?;
+        let mut new_renderer = SvgRenderer::new(&content, 480, 480)?;
+        new_renderer.set_theme(ThemePalette::default());
+        state.renderer = Some(new_renderer);
+        state.current_layout = Some(layout.clone());
+    }
+
+    let renderer = state.renderer.as_mut()
+        .ok_or_else(|| AppError::Render("Renderer not initialized".into()))?;
+
+    // Merge mock sensors + user vars into the template context
     let mut sensor_data = mock_sensors();
     sensor_data.extend(vars);
 
-    // Render to pixmap — call the internal pipeline, not FrameSource::render
-    // which would do the RawFrame conversion. We want raw RGBA.
-    // For now, use FrameSource::render and convert back. Optimize later.
-    let frame = renderer.render(&sensor_data).map_err(|e| e.to_string())?;
+    // Render via FrameSource::render() which returns RawFrame (straight RGB)
+    let frame = renderer.render(&sensor_data)?;
 
-    // Return premultiplied RGBA bytes (480*480*4 = 921,600 bytes)
-    // Note: RawFrame is straight RGB. We need RGBA for putImageData.
-    // TODO: Add a render_rgba method to SvgRenderer that returns pixmap.data() directly.
-    // For now, convert RGB to RGBA.
+    // Convert straight RGB → straight RGBA for putImageData
+    // putImageData expects un-premultiplied RGBA; RawFrame is already un-premultiplied RGB
     let mut rgba = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
     for chunk in frame.data.chunks(3) {
         rgba.extend_from_slice(chunk);
-        rgba.push(255); // alpha
+        rgba.push(255); // fully opaque
     }
     Ok(Response::new(rgba))
 }
-```
 
-Note: The above is the initial version. A follow-up optimization should add a `render_pixmap()` method to `SvgRenderer` that returns `pixmap.data()` directly (premultiplied RGBA), avoiding the `from_pixmap()` unpremultiply + RGB→RGBA re-conversion. For now, correctness first.
+/// Holds the cached SvgRenderer and the currently loaded layout name.
+pub struct RendererState {
+    pub renderer: Option<SvgRenderer<'static>>,
+    pub current_layout: Option<String>,
+    pub layouts_dir: std::path::PathBuf,
+}
+
+impl RendererState {
+    fn read_layout_file(&self, name: &str) -> Result<String, AppError> {
+        let path = self.layouts_dir.join(name);
+        let canonical = path.canonicalize()
+            .map_err(|_| AppError::Render(format!("Layout not found: {}", name)))?;
+        if !canonical.starts_with(&self.layouts_dir) {
+            return Err(AppError::Render("Invalid layout path".into()));
+        }
+        Ok(std::fs::read_to_string(&canonical)?)
+    }
+}
+```
 
 **Step 3: Implement `list_layouts` and `get_layout_vars` commands**
 
@@ -580,13 +656,46 @@ pub fn get_layout_vars(
 }
 ```
 
-**Step 4: Implement `save_config` and `apply_to_daemon` commands**
+**Step 4: Implement `list_sensors` command**
 
-These handle config persistence and D-Bus communication. `apply_to_daemon` connects to D-Bus and calls the existing `set_layout` method.
+```rust
+#[tauri::command]
+pub async fn list_sensors() -> Result<Vec<HashMap<String, String>>, AppError> {
+    // Try D-Bus first (daemon may expose richer sensor info)
+    match try_dbus_list_sensors().await {
+        Ok(sensors) => Ok(sensors),
+        Err(_) => {
+            // Fallback: return an empty list when daemon is not running
+            // The sensor dropdown will show only the layout's default value
+            Ok(Vec::new())
+        }
+    }
+}
 
-**Step 5: Wire up `lib.rs` with state and commands**
+async fn try_dbus_list_sensors() -> Result<Vec<HashMap<String, String>>, AppError> {
+    let conn = zbus::Connection::session().await?;
+    let proxy = DisplayProxy::new(&conn).await?;
+    let descriptors = proxy.list_sensors().await?;
+    // Convert Vec<(String, String, String)> to Vec<HashMap> for frontend
+    Ok(descriptors.into_iter().map(|(key, name, unit)| {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), key);
+        m.insert("name".to_string(), name);
+        m.insert("unit".to_string(), unit);
+        m
+    }).collect())
+}
+```
 
-Register all commands, manage `Mutex<Option<SvgRenderer>>`, config dir path, and optionally a D-Bus proxy.
+**Step 5: Implement `save_config` and `apply_to_daemon` commands**
+
+`save_config` uses `toml_edit::DocumentMut` to update `[layout_vars."name"]` while preserving comments. `apply_to_daemon` connects to D-Bus and calls `set_layout`. Handle "daemon not running" gracefully.
+
+Also implement `get_saved_vars(layout: String)` to load previously saved variable overrides from config.toml — the frontend needs this when selecting a layout to merge saved values over frontmatter defaults.
+
+**Step 6: Wire up `lib.rs` with state and commands**
+
+Register all commands, manage `Mutex<RendererState>`, config dir path. Use the `#[zbus::proxy]` macro from `cli.rs` for D-Bus client (or re-export it from the library).
 
 **Step 6: Verify builds**
 
@@ -603,12 +712,14 @@ Expected: App launches. Commands registered (not yet called from frontend).
 **Trigger:** Both reviewers start when Task 10 completes.
 
 **Killer items (blocking):**
-- [ ] `render_preview` returns exactly `480*480*4 = 921600` bytes of RGBA data
+- [ ] `render_preview` accepts `layout: String` param — creates/swaps `SvgRenderer` when layout changes
+- [ ] `render_preview` returns exactly `480*480*4 = 921600` bytes of straight RGBA data (NOT premultiplied)
+- [ ] `list_sensors` Tauri command is implemented and registered in `generate_handler!`
+- [ ] `get_saved_vars` loads previously saved overrides from config.toml's `[layout_vars]` section
 - [ ] Path traversal check in `get_layout_vars` uses `canonicalize()` + `starts_with()`, not just `..` check
 - [ ] `SvgRenderer` stored in `std::sync::Mutex`, not `tokio::sync::Mutex`
-- [ ] `AppError` implements `serde::Serialize` manually (not derived)
+- [ ] All Tauri commands return `Result<T, AppError>` consistently (not `Result<T, String>`)
 - [ ] `apply_to_daemon` handles "daemon not running" gracefully — returns descriptive error, doesn't panic
-- [ ] Mock sensor data includes all keys used by neon-dash-v2 (cpu_temp, gpu_temp, cpu_util, gpu_power, ram_used, etc.)
 
 **Quality items (non-blocking):**
 - [ ] Commands in a separate `commands.rs` module, not all in `lib.rs`
@@ -766,14 +877,17 @@ Fetches variable declarations for the selected layout, generates form controls:
     const currentLayout = layout;
     if (!currentLayout) return;
 
-    invoke('get_layout_vars', { name: currentLayout }).then((result) => {
-      declarations = result as VarDecl[];
-      // Initialize vars with defaults for any missing keys
-      const newVars = { ...vars };
+    // Load both variable declarations AND saved overrides
+    Promise.all([
+      invoke('get_layout_vars', { name: currentLayout }),
+      invoke('get_saved_vars', { layout: currentLayout }),
+    ]).then(([declResult, savedResult]) => {
+      declarations = declResult as VarDecl[];
+      const saved = savedResult as Record<string, string>;
+      // Merge: frontmatter defaults → saved config overrides
+      const newVars: Record<string, string> = {};
       for (const decl of declarations) {
-        if (!(decl.name in newVars)) {
-          newVars[decl.name] = decl.default;
-        }
+        newVars[decl.name] = saved[decl.name] ?? decl.default;
       }
       onChange(newVars);
     });
