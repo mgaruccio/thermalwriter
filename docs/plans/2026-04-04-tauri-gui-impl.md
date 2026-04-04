@@ -345,15 +345,38 @@ Change line 10 from `pub mod xvfb;` to:
 pub mod xvfb;
 ```
 
-**Step 5: Gate transport usage in `src/cli.rs`**
+**Step 5: Extract D-Bus proxy trait before gating `cli.rs`**
+
+The `#[zbus::proxy]` trait at `cli.rs:61-74` defines `DisplayProxy` — needed by both the CLI and the GUI. Before gating `cli`, either:
+- (a) Move the proxy trait to a shared module (e.g., `src/dbus_types.rs`) that is NOT gated, or
+- (b) Accept that the GUI crate will duplicate the 13-line proxy trait definition.
+
+Option (a) is cleaner. Create `src/dbus_types.rs` with the proxy definition, re-export from `lib.rs` unconditionally, and have `cli.rs` import from there.
+
+**Step 6: Gate transport usage in `src/cli.rs`**
 
 Wrap the transport imports (lines 7-9) and the `run_bench` function with `#[cfg(feature = "daemon")]`. The `Command::Bench` variant in the enum also needs gating.
 
-**Step 6: Gate transport usage in `src/service/tick.rs`**
+**Step 7: Gate entire `service` module behind `daemon`**
 
-The `use crate::transport::Transport` import at line 13 and any functions that take `&mut dyn Transport` need `#[cfg(feature = "daemon")]`. Since the tick module's `run_tick_loop` is the core daemon function, gate the entire function or just the transport parameter behind the feature.
+The `service` module (`tick`, `dbus`, `xvfb`) is entirely daemon-side. Gate `pub mod service` in `lib.rs`:
+```rust
+#[cfg(feature = "daemon")]
+pub mod service;
+```
 
-**Step 7: Verify both feature configurations compile**
+This also gates `service/tick.rs` (which imports `transport::Transport`) and `service/xvfb.rs`.
+
+**Step 8: Gate `cli` module behind `daemon`**
+
+```rust
+#[cfg(feature = "daemon")]
+pub mod cli;
+```
+
+The GUI has its own entry point and doesn't use the CLI module.
+
+**Step 9: Verify both feature configurations compile**
 
 ```bash
 cargo build                         # default features (daemon) — must succeed
@@ -362,7 +385,9 @@ cargo test                          # all tests with daemon features
 cargo test --no-default-features    # render/config/frontmatter tests only
 ```
 
-**Step 8: Commit**
+The GUI-mode build should compile: `render` (minus xvfb), `config`, `theme`, `sensor` (for `SensorDescriptor`), `render::frontmatter`, and the new `dbus_types` module (for `DisplayProxy`).
+
+**Step 10: Commit**
 
 ```bash
 git commit -m "feat: feature-gate rusb/memmap2 behind daemon feature, add workspace"
