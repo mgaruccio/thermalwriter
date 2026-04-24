@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crate::config::Config;
+use crate::dbus_types::DisplayProxy;
 use crate::render::RawFrame;
 use crate::service::tick::encode_jpeg;
 use crate::transport::Transport;
@@ -55,30 +55,6 @@ pub enum CtlCommand {
         /// Shell command to run inside the virtual display.
         command: String,
     },
-}
-
-/// zbus proxy for the com.thermalwriter.Display D-Bus interface.
-#[zbus::proxy(
-    interface = "com.thermalwriter.Display",
-    default_service = "com.thermalwriter.Service",
-    default_path = "/com/thermalwriter/display"
-)]
-trait Display {
-    async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
-    async fn set_layout(&self, name: &str) -> zbus::Result<String>;
-    async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;
-    async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
-    /// Returns (key, name, unit) tuples for each available sensor.
-    async fn list_sensors(&self) -> zbus::Result<Vec<(String, String, String)>>;
-    async fn get_layout_vars(&self, name: &str)
-        -> zbus::Result<Vec<HashMap<String, String>>>;
-    async fn set_layout_vars(
-        &self,
-        name: &str,
-        vars: HashMap<String, String>,
-    ) -> zbus::Result<()>;
-    async fn stop(&self) -> zbus::Result<()>;
-    async fn reload(&self) -> zbus::Result<()>;
 }
 
 /// Execute a `ctl` subcommand against the running daemon over D-Bus.

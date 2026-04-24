@@ -5,6 +5,8 @@
 // — they do NOT bind com.thermalwriter.Service on the session bus (the real
 // daemon owns that name on the developer's machine).
 
+#![cfg(feature = "daemon")]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

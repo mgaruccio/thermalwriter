@@ -1,3 +1,5 @@
+#![cfg(feature = "daemon")]
+
 use thermalwriter::render::{SensorData, FrameSource, RawFrame};
 use thermalwriter::transport::{DeviceInfo, Transport};
 use anyhow::Result;
