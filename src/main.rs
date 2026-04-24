@@ -74,6 +74,16 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
     sensor_hub.add_provider(Box::new(RaplProvider::new()));
 
+    // Prime providers so they discover devices, then snapshot descriptors for
+    // the D-Bus list_sensors method. Must happen before the D-Bus service
+    // starts so the first client call sees real data.
+    let _ = sensor_hub.poll();
+    let sensor_descriptors: Vec<(String, String, String)> = sensor_hub
+        .available_sensors()
+        .into_iter()
+        .map(|d| (d.key, d.name, d.unit))
+        .collect();
+
     // Channel for hot-swapping the frame source from the mode change listener
     let (source_tx, mut source_rx) = mpsc::channel::<Box<dyn FrameSource>>(1);
     // Shared shutdown + template channels
@@ -147,6 +157,9 @@ async fn main() -> Result<()> {
         jpeg_quality: config.display.jpeg_quality,
         shutdown_tx,
         layout_dir: layout_dir.clone(),
+        config_path: config_path.clone(),
+        sensor_descriptors,
+        config: config.clone(),
         mode_change_tx: mode_tx,
     }));
 

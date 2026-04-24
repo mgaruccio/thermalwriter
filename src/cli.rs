@@ -68,7 +68,15 @@ trait Display {
     async fn set_layout(&self, name: &str) -> zbus::Result<String>;
     async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;
     async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
-    async fn list_sensors(&self) -> zbus::Result<Vec<String>>;
+    /// Returns (key, name, unit) tuples for each available sensor.
+    async fn list_sensors(&self) -> zbus::Result<Vec<(String, String, String)>>;
+    async fn get_layout_vars(&self, name: &str)
+        -> zbus::Result<Vec<HashMap<String, String>>>;
+    async fn set_layout_vars(
+        &self,
+        name: &str,
+        vars: HashMap<String, String>,
+    ) -> zbus::Result<()>;
     async fn stop(&self) -> zbus::Result<()>;
     async fn reload(&self) -> zbus::Result<()>;
 }
@@ -107,8 +115,12 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
         CtlCommand::Sensors => {
             let sensors = proxy.list_sensors().await
                 .context("Failed to list sensors")?;
-            for sensor in sensors {
-                println!("{}", sensor);
+            for (key, name, unit) in sensors {
+                if unit.is_empty() {
+                    println!("{}  {}", key, name);
+                } else {
+                    println!("{}  {} ({})", key, name, unit);
+                }
             }
         }
         CtlCommand::Stop => {
