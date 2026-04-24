@@ -3,6 +3,8 @@
 // Missing file → defaults. Invalid TOML → error with path.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use crate::theme::ThemePalette;
@@ -87,6 +89,9 @@ pub struct Config {
     pub sensors: SensorsConfig,
     pub theme: ThemeConfig,
     pub xvfb: XvfbConfig,
+    /// Per-layout variable overrides keyed by layout filename.
+    /// The outer map is `{layout_name: {var_name: value}}`.
+    pub layout_vars: HashMap<String, HashMap<String, String>>,
 }
 
 impl Config {
@@ -110,6 +115,84 @@ impl Config {
             ))
             .join("thermalwriter")
             .join("config.toml")
+    }
+
+    /// Persist the variable overrides for `layout_name` to the on-disk config,
+    /// preserving user comments and formatting via `toml_edit`. Writes a
+    /// sibling temp file in the same directory as `path` and atomically renames
+    /// it on success.
+    ///
+    /// Any existing `[layout_vars."<layout_name>"]` section is replaced
+    /// wholesale; other sections are left untouched.
+    pub fn save_layout_vars(
+        path: &Path,
+        layout_name: &str,
+        vars: &HashMap<String, String>,
+    ) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Table, value};
+
+        // Load existing document (or start empty).
+        let existing = if path.exists() {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config: {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut doc: DocumentMut = existing
+            .parse()
+            .with_context(|| format!("Invalid TOML in config: {}", path.display()))?;
+
+        // Ensure top-level [layout_vars] exists as a table.
+        if doc.get("layout_vars").is_none() {
+            doc["layout_vars"] = Item::Table(Table::new());
+        }
+        let layout_vars = doc["layout_vars"]
+            .as_table_mut()
+            .context("layout_vars section is not a table")?;
+
+        // Replace the target layout's section with fresh contents. We sort keys
+        // for stable on-disk ordering; toml_edit keeps comments elsewhere intact.
+        let mut new_section = Table::new();
+        let mut sorted: Vec<(&String, &String)> = vars.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sorted {
+            new_section.insert(k, value(v.clone()));
+        }
+        layout_vars.insert(layout_name, Item::Table(new_section));
+
+        // Atomic write: temp file in the same directory (so rename is atomic on
+        // the same filesystem), then rename over the target.
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
+        let tmp_name = format!(
+            "{}.tmp.{}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        );
+        let tmp_path = parent.join(tmp_name);
+
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            tmp.write_all(doc.to_string().as_bytes())
+                .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+            tmp.sync_all()
+                .with_context(|| format!("Failed to fsync temp file: {}", tmp_path.display()))?;
+        }
+
+        std::fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+
+        Ok(())
     }
 }
 
