@@ -40,6 +40,9 @@ async fn main() -> Result<()> {
         Command::Ctl { subcommand } => {
             return thermalwriter::cli::run_ctl(subcommand).await;
         }
+        Command::SetupUdev => {
+            return thermalwriter::cli::run_setup_udev();
+        }
         Command::Daemon => {} // fall through to daemon startup below
     }
 

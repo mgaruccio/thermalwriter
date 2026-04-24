@@ -15,6 +15,7 @@ pub struct RaplProvider {
     base_path: PathBuf,
     last_energy_uj: Option<u64>,
     last_poll: Option<Instant>,
+    access_warned: bool,
 }
 
 impl RaplProvider {
@@ -23,6 +24,7 @@ impl RaplProvider {
             base_path: PathBuf::from(DEFAULT_POWERCAP_PATH),
             last_energy_uj: None,
             last_poll: None,
+            access_warned: false,
         }
     }
 
@@ -31,6 +33,7 @@ impl RaplProvider {
             base_path: base,
             last_energy_uj: None,
             last_poll: None,
+            access_warned: false,
         }
     }
 
@@ -59,6 +62,18 @@ impl SensorProvider for RaplProvider {
         let mut readings = Vec::new();
 
         let Some(energy_uj) = self.read_energy_uj() else {
+            // Distinguish "no RAPL hardware" (silent) from "exists but unreadable" (actionable warn).
+            if !self.access_warned {
+                let path = self.base_path.join("intel-rapl:0/energy_uj");
+                if path.exists() {
+                    log::warn!(
+                        "Cannot read {} — CPU power will display as \"--\". \
+                         Run `thermalwriter setup-udev` to install the udev rule that grants non-root access.",
+                        path.display()
+                    );
+                    self.access_warned = true;
+                }
+            }
             return Ok(readings);
         };
 

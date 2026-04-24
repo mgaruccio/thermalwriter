@@ -2984,6 +2984,7 @@ dependencies = [
  "env_logger",
  "fontdue",
  "image",
+ "libc",
  "log",
  "memmap2",
  "notify",

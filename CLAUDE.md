@@ -42,6 +42,7 @@ cargo run -- bench                       # USB throughput benchmark (~750 FPS)
 systemctl --user status thermalwriter    # check daemon status
 thermalwriter ctl status                 # query daemon via D-Bus
 thermalwriter ctl mirror "command"       # xvfb capture mode (any X11 app)
+thermalwriter setup-udev                 # one-shot: install udev rule for RAPL cpu_power access (re-execs under sudo)
 ```
 
 ### Layout Development

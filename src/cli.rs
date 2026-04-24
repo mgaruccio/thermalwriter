@@ -31,6 +31,9 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         duration: u64,
     },
+    /// Install the udev rule that grants the daemon read access to CPU power (RAPL) counters.
+    /// Re-execs under sudo if run as non-root.
+    SetupUdev,
 }
 
 #[derive(Subcommand, Debug)]
@@ -196,6 +199,59 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     Ok(())
 }
 
+const UDEV_RULE: &str = include_str!("../packaging/udev/99-thermalwriter-rapl.rules");
+const UDEV_RULE_DEST: &str = "/etc/udev/rules.d/99-thermalwriter-rapl.rules";
+const STALE_TRCC_TMPFILE: &str = "/etc/tmpfiles.d/trcc-rapl.conf";
+
+/// Install the udev rule that makes `/sys/class/powercap/intel-rapl:*/energy_uj` readable
+/// by non-root processes. Re-execs under sudo when not already root.
+pub fn run_setup_udev() -> Result<()> {
+    // SAFETY: geteuid() is always safe — it takes no arguments and can't fail.
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        eprintln!("Root required to write {UDEV_RULE_DEST}; re-running under sudo...");
+        let exe = std::env::current_exe()
+            .context("Could not determine current executable path")?;
+        let status = std::process::Command::new("sudo")
+            .arg(exe)
+            .arg("setup-udev")
+            .status()
+            .context("Failed to invoke sudo")?;
+        if !status.success() {
+            anyhow::bail!("sudo thermalwriter setup-udev exited with {status}");
+        }
+        return Ok(());
+    }
+
+    std::fs::write(UDEV_RULE_DEST, UDEV_RULE)
+        .with_context(|| format!("Failed to write {UDEV_RULE_DEST}"))?;
+    println!("Installed {UDEV_RULE_DEST}");
+
+    if std::path::Path::new(STALE_TRCC_TMPFILE).exists() {
+        std::fs::remove_file(STALE_TRCC_TMPFILE)
+            .with_context(|| format!("Failed to remove {STALE_TRCC_TMPFILE}"))?;
+        println!("Removed stale {STALE_TRCC_TMPFILE} (left over from trcc)");
+    }
+
+    let reload = std::process::Command::new("udevadm")
+        .args(["control", "--reload-rules"])
+        .status()
+        .context("Failed to invoke `udevadm control --reload-rules`")?;
+    if !reload.success() {
+        anyhow::bail!("`udevadm control --reload-rules` exited with {reload}");
+    }
+    let trigger = std::process::Command::new("udevadm")
+        .args(["trigger", "--subsystem-match=powercap"])
+        .status()
+        .context("Failed to invoke `udevadm trigger --subsystem-match=powercap`")?;
+    if !trigger.success() {
+        anyhow::bail!("`udevadm trigger --subsystem-match=powercap` exited with {trigger}");
+    }
+
+    println!("udev rules reloaded; CPU power sensor should now be readable.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +325,19 @@ mod tests {
         // CommandFactory::command() builds the command — verifies clap config is correct
         let cmd = Cli::command();
         assert_eq!(cmd.get_name(), "thermalwriter");
+    }
+
+    #[test]
+    fn cli_parses_setup_udev() {
+        let cli = Cli::try_parse_from(["thermalwriter", "setup-udev"]).unwrap();
+        assert!(matches!(cli.command, Command::SetupUdev));
+    }
+
+    #[test]
+    fn udev_rule_content_embedded() {
+        // Sanity-check that include_str! picked up the rule file and it contains our selector.
+        assert!(UDEV_RULE.contains("SUBSYSTEM==\"powercap\""));
+        assert!(UDEV_RULE.contains("energy_uj"));
     }
 
     #[test]
