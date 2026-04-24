@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["."]
+members = [".", "gui/src-tauri"]
 default-members = ["."]
-exclude = ["gui/src-tauri"]
 
 [[bin]]
 name = "thermalwriter"
