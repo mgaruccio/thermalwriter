@@ -18,7 +18,10 @@ use crate::render::frontmatter::LayoutFrontmatter;
 #[derive(Debug, Clone)]
 pub enum ModeChange {
     /// Switch to an SVG or HTML layout by name.
-    Layout(String),
+    Layout {
+        name: String,
+        vars: HashMap<String, String>,
+    },
     /// Switch to xvfb capture mode with the given shell command.
     Xvfb { command: String },
 }
@@ -235,7 +238,8 @@ impl DisplayInterface {
         let mut state = self.state.lock().await;
         // Path-traversal + existence check.
         validate_layout_path(&state.layout_dir, &name)?;
-        state.mode_change_tx.send(ModeChange::Layout(name.clone())).await
+        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
+        state.mode_change_tx.send(ModeChange::Layout { name: name.clone(), vars }).await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.active_layout = name.clone();
         state.mode = if name.ends_with(".html") { "html" } else { "svg" }.to_string();
@@ -260,7 +264,8 @@ impl DisplayInterface {
             "svg" | "html" => {
                 // Path-traversal + existence check on the layout name.
                 validate_layout_path(&state.layout_dir, &command)?;
-                ModeChange::Layout(command.clone())
+                let vars = state.config.layout_vars.get(&command).cloned().unwrap_or_default();
+                ModeChange::Layout { name: command.clone(), vars }
             }
             _ => return Err(zbus::fdo::Error::InvalidArgs(
                 format!("Unknown mode: {} (expected svg, html, or xvfb)", mode)
@@ -328,9 +333,10 @@ impl DisplayInterface {
         apply_layout_vars(&layout_dir, &config_path, &mut state.config, &name, vars)?;
 
         // Step (c): tell the tick loop to reload with fresh context.
+        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
         state
             .mode_change_tx
-            .send(ModeChange::Layout(name.clone()))
+            .send(ModeChange::Layout { name: name.clone(), vars })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 

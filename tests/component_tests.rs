@@ -82,6 +82,31 @@ fn svg_renderer_uses_persistent_tera_with_components() {
     assert!(frame.is_ok(), "Renderer with component function should render: {:?}", frame.err());
 }
 
+#[test]
+fn svg_renderer_injects_layout_vars_after_theme() {
+    use thermalwriter::render::svg::SvgRenderer;
+    use thermalwriter::render::FrameSource;
+    use thermalwriter::theme::ThemePalette;
+    use std::collections::HashMap;
+
+    let template = r##"{# vars:
+theme_background: color = "#010203" "Background"
+#}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">
+  <rect width="4" height="4" fill="{{ theme_background }}"/>
+</svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 4, 4).unwrap();
+    renderer.set_theme(ThemePalette::default());
+    renderer.set_layout_vars(HashMap::from([(
+        "theme_background".to_string(),
+        "#112233".to_string(),
+    )]));
+
+    let frame = renderer.render(&HashMap::new()).unwrap();
+    assert_eq!(&frame.data[0..3], &[0x11, 0x22, 0x33]);
+}
+
 // ─── btop-style visualization component tests ─────────────────────────────────
 
 #[test]

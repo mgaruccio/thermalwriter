@@ -1,3 +1,14 @@
+{# vars:
+cpu_color: color = "#ff5577" "CPU accent color"
+gpu_color: color = "#55aaff" "GPU accent color"
+fps_color: color = "#00ffaa" "FPS accent color"
+dim_color: color = "#666680" "Dim label color"
+cpu_label: text = "CPU" "CPU section label"
+gpu_label: text = "GPU" "GPU section label"
+temp_label: text = "TEMP" "Temperature label"
+ram_label: text = "RAM" "Memory label"
+vram_label: text = "VRAM" "Video memory label"
+#}
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
   <defs>
     <linearGradient id="bgG" x1="0" y1="0" x2="1" y2="1">
@@ -5,15 +16,15 @@
       <stop offset="100%" stop-color="#050510"/>
     </linearGradient>
     <linearGradient id="hotGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#ff3366"/>
+      <stop offset="0%" stop-color="{{ cpu_color }}"/>
       <stop offset="100%" stop-color="#ff6633"/>
     </linearGradient>
     <linearGradient id="coldGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#33ccff"/>
+      <stop offset="0%" stop-color="{{ gpu_color }}"/>
       <stop offset="100%" stop-color="#6633ff"/>
     </linearGradient>
     <linearGradient id="greenGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#00ffaa"/>
+      <stop offset="0%" stop-color="{{ fps_color }}"/>
       <stop offset="100%" stop-color="#00cc88"/>
     </linearGradient>
     <linearGradient id="barBg" x1="0" y1="0" x2="1" y2="0">
@@ -43,12 +54,12 @@
   <line x1="0" y1="340" x2="480" y2="340" stroke="#111122" stroke-width="1"/>
 
   <!-- ===== CPU Section ===== -->
-  <text x="32" y="40" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="#ff5577" letter-spacing="4">CPU</text>
+  <text x="32" y="40" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="{{ cpu_color }}" letter-spacing="4">{{ cpu_label }}</text>
   <line x1="32" y1="50" x2="200" y2="50" stroke="#ff336644" stroke-width="1"/>
 
   <!-- CPU Temp — large hero number -->
   <text x="32" y="116" font-family="DejaVu Sans Mono, monospace" font-size="72" fill="url(#hotGrad)" font-weight="bold">{{ cpu_temp | default(value="--") }}°</text>
-  <text x="320" y="100" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#666680" text-anchor="end">TEMP</text>
+  <text x="320" y="100" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
 
   <!-- CPU Utilization bar -->
   <rect x="32" y="140" width="416" height="18" rx="4" fill="url(#barBg)"/>
@@ -56,12 +67,12 @@
   <text x="448" y="155" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#ff8899" text-anchor="end">{{ cpu_util | default(value="--") }}%</text>
 
   <!-- ===== GPU Section ===== -->
-  <text x="32" y="210" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="#55aaff" letter-spacing="4">GPU</text>
+  <text x="32" y="210" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="{{ gpu_color }}" letter-spacing="4">{{ gpu_label }}</text>
   <line x1="32" y1="220" x2="200" y2="220" stroke="#3366ff44" stroke-width="1"/>
 
   <!-- GPU Temp — large hero number -->
   <text x="32" y="286" font-family="DejaVu Sans Mono, monospace" font-size="72" fill="url(#coldGrad)" font-weight="bold">{{ gpu_temp | default(value="--") }}°</text>
-  <text x="320" y="270" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#666680" text-anchor="end">TEMP</text>
+  <text x="320" y="270" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
   <text x="448" y="270" font-family="DejaVu Sans Mono, monospace" font-size="18" fill="#9966cc" text-anchor="end">{{ gpu_power | default(value="--") }}W</text>
 
   <!-- GPU Utilization bar -->
@@ -79,14 +90,14 @@
   <!-- RAM — left -->
   <text x="56" y="400" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
         text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
-  <text x="56" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9" fill="#666680"
-        text-anchor="middle">RAM / {{ ram_total | default(value="--") }}G</text>
+  <text x="56" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9" fill="{{ dim_color }}"
+        text-anchor="middle">{{ ram_label }} / {{ ram_total | default(value="--") }}G</text>
 
   <!-- VRAM — right -->
   <text x="424" y="400" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
         text-anchor="middle">{{ vram_used | default(value="--") }}G</text>
-  <text x="424" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9" fill="#666680"
-        text-anchor="middle">VRAM / {{ vram_total | default(value="--") }}G</text>
+  <text x="424" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9" fill="{{ dim_color }}"
+        text-anchor="middle">{{ vram_label }} / {{ vram_total | default(value="--") }}G</text>
 
   <!-- Corner accents -->
   <path d="M 0 20 L 0 0 L 20 0" stroke="#ff336644" fill="none" stroke-width="2"/>

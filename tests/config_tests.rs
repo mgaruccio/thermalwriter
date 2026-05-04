@@ -105,6 +105,30 @@ fn save_layout_vars_creates_section_in_new_file() {
 }
 
 #[test]
+fn save_display_layout_updates_layout_and_mode() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"# keep this comment
+[display]
+tick_rate = 2
+default_layout = "old.html"
+mode = "html"
+"#,
+    ).unwrap();
+
+    Config::save_display_layout(&path, "svg/neon-dash-v2.svg", "svg").unwrap();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("# keep this comment"));
+    let reloaded: toml::Value = toml::from_str(&contents).unwrap();
+    assert_eq!(reloaded["display"]["default_layout"].as_str().unwrap(), "svg/neon-dash-v2.svg");
+    assert_eq!(reloaded["display"]["mode"].as_str().unwrap(), "svg");
+    assert_eq!(reloaded["display"]["tick_rate"].as_integer().unwrap(), 2);
+}
+
+#[test]
 fn save_layout_vars_preserves_user_comments() {
     // Killer test: verbatim user comments must survive a save round-trip.
     // This only works with toml_edit::DocumentMut — toml::to_string drops them.

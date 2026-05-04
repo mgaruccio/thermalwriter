@@ -1,64 +1,220 @@
 <script lang="ts">
-  // Svelte 5 runes — this scaffold uses $state and $derived intentionally so
-  // the rest of the GUI can assume the runes runtime. Task 13 builds on this.
+  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
 
-  let name = $state("Mike");
-  let greeting = $state("");
-  let error = $state("");
+  type LayoutSummary = {
+    name: string;
+    kind: string;
+    configurable: boolean;
+  };
 
-  async function greet() {
-    error = "";
+  type VariableDecl = {
+    name: string;
+    type: "color" | "text" | "sensor";
+    default: string;
+    help: string;
+    value: string;
+  };
+
+  type SensorDescriptor = {
+    key: string;
+    name: string;
+    unit: string;
+  };
+
+  type ApplyResult = {
+    saved: boolean;
+    applied: boolean;
+    message: string;
+  };
+
+  let layouts = $state<LayoutSummary[]>([]);
+  let variables = $state<VariableDecl[]>([]);
+  let sensors = $state<SensorDescriptor[]>([]);
+  let values = $state<Record<string, string>>({});
+  let selectedLayout = $state("");
+  let loading = $state(true);
+  let previewing = $state(false);
+  let applying = $state(false);
+  let status = $state("");
+  let error = $state("");
+  let canvas = $state<HTMLCanvasElement | undefined>();
+  let previewTimer: number | undefined;
+
+  const selected = $derived(layouts.find((layout) => layout.name === selectedLayout));
+
+  onMount(async () => {
     try {
-      greeting = await invoke<string>("greet", { name });
+      const [layoutList, sensorList] = await Promise.all([
+        invoke<LayoutSummary[]>("list_layouts"),
+        invoke<SensorDescriptor[]>("list_sensors"),
+      ]);
+      layouts = layoutList;
+      sensors = sensorList;
+      const firstConfigurable = layouts.find((layout) => layout.configurable) ?? layouts[0];
+      if (firstConfigurable) {
+        await selectLayout(firstConfigurable.name);
+      }
     } catch (e) {
       error = String(e);
+    } finally {
+      loading = false;
+    }
+  });
+
+  $effect(() => {
+    selectedLayout;
+    JSON.stringify(values);
+    schedulePreview();
+  });
+
+  async function selectLayout(name: string) {
+    selectedLayout = name;
+    status = "";
+    error = "";
+    variables = await invoke<VariableDecl[]>("get_layout_vars", { layout: name });
+    values = Object.fromEntries(variables.map((variable) => [variable.name, variable.value]));
+    schedulePreview();
+  }
+
+  function setValue(name: string, value: string) {
+    values = { ...values, [name]: value };
+  }
+
+  function schedulePreview() {
+    if (!selectedLayout || !canvas) return;
+    if (previewTimer) window.clearTimeout(previewTimer);
+    previewTimer = window.setTimeout(renderPreview, 120);
+  }
+
+  async function renderPreview() {
+    if (!selectedLayout || !canvas) return;
+    previewing = true;
+    error = "";
+    try {
+      const buffer = await invoke<ArrayBuffer>("render_preview", {
+        layout: selectedLayout,
+        vars: values,
+      });
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas context unavailable");
+      const image = new ImageData(new Uint8ClampedArray(buffer), 480, 480);
+      ctx.putImageData(image, 0, 0);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      previewing = false;
+    }
+  }
+
+  async function apply() {
+    if (!selectedLayout) return;
+    applying = true;
+    status = "";
+    error = "";
+    try {
+      const result = await invoke<ApplyResult>("apply_layout", {
+        layout: selectedLayout,
+        vars: values,
+      });
+      status = result.message;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      applying = false;
     }
   }
 </script>
 
-<main>
-  <h1>Thermalwriter</h1>
-  <p>Configuration GUI scaffold.</p>
+<main class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>Thermalwriter</h1>
+      <p>Layout Config</p>
+    </div>
 
-  <section class="greet">
-    <label>
-      Your name:
-      <input type="text" bind:value={name} />
-    </label>
-    <button type="button" onclick={greet}>Greet</button>
+    <div class="layout-list">
+      {#if loading}
+        <div class="empty">Loading layouts...</div>
+      {:else}
+        {#each layouts as layout}
+          <button
+            type="button"
+            class:active={layout.name === selectedLayout}
+            class:muted={!layout.configurable}
+            onclick={() => selectLayout(layout.name)}
+          >
+            <span>{layout.name}</span>
+            <small>{layout.kind}{layout.configurable ? "" : " · no vars"}</small>
+          </button>
+        {/each}
+      {/if}
+    </div>
+  </aside>
+
+  <section class="preview-pane">
+    <div class="preview-header">
+      <div>
+        <h2>{selectedLayout || "No layout selected"}</h2>
+        <p>{selected?.configurable ? "Editable SVG layout" : "Preview only"}</p>
+      </div>
+      <span class:busy={previewing}>{previewing ? "Rendering" : "Ready"}</span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas bind:this={canvas} width="480" height="480"></canvas>
+    </div>
   </section>
 
-  {#if greeting}
-    <p class="result">{greeting}</p>
-  {/if}
-  {#if error}
-    <p class="error">Error: {error}</p>
-  {/if}
-</main>
+  <aside class="config-pane">
+    <div class="config-header">
+      <h2>Variables</h2>
+      <button type="button" onclick={apply} disabled={applying || !selectedLayout}>
+        {applying ? "Applying..." : "Apply"}
+      </button>
+    </div>
 
-<style>
-  main {
-    max-width: 42rem;
-    margin: 0 auto;
-    padding: 2rem;
-  }
-  h1 {
-    font-size: 1.6rem;
-    margin-bottom: 0.25rem;
-  }
-  .greet {
-    display: flex;
-    gap: 0.75rem;
-    align-items: center;
-    margin-top: 1.25rem;
-  }
-  .result {
-    margin-top: 1rem;
-    color: #8ef5c0;
-  }
-  .error {
-    margin-top: 1rem;
-    color: #ff8080;
-  }
-</style>
+    {#if variables.length === 0}
+      <div class="empty">This layout does not declare editable variables.</div>
+    {:else}
+      <form class="var-list" onsubmit={(event) => event.preventDefault()}>
+        {#each variables as variable}
+          <label class="var-row">
+            <span>
+              <strong>{variable.name}</strong>
+              <small>{variable.help}</small>
+            </span>
+            {#if variable.type === "color"}
+              <input
+                type="color"
+                value={values[variable.name] ?? variable.default}
+                oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+              />
+            {:else if variable.type === "sensor"}
+              <select
+                value={values[variable.name] ?? variable.default}
+                onchange={(event) => setValue(variable.name, event.currentTarget.value)}
+              >
+                {#each sensors as sensor}
+                  <option value={sensor.key}>{sensor.name} ({sensor.unit})</option>
+                {/each}
+              </select>
+            {:else}
+              <input
+                type="text"
+                value={values[variable.name] ?? variable.default}
+                oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+              />
+            {/if}
+          </label>
+        {/each}
+      </form>
+    {/if}
+
+    {#if status}
+      <p class="status">{status}</p>
+    {/if}
+    {#if error}
+      <p class="error">{error}</p>
+    {/if}
+  </aside>
+</main>

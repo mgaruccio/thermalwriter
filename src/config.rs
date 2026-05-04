@@ -194,6 +194,62 @@ impl Config {
 
         Ok(())
     }
+
+    /// Persist the active display layout and mode while preserving user comments.
+    pub fn save_display_layout(path: &Path, layout_name: &str, mode: &str) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Table, value};
+
+        let existing = if path.exists() {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config: {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut doc: DocumentMut = existing
+            .parse()
+            .with_context(|| format!("Invalid TOML in config: {}", path.display()))?;
+
+        if doc.get("display").is_none() {
+            doc["display"] = Item::Table(Table::new());
+        }
+        let display = doc["display"]
+            .as_table_mut()
+            .context("display section is not a table")?;
+        display.insert("default_layout", value(layout_name));
+        display.insert("mode", value(mode));
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
+        let tmp_name = format!(
+            "{}.tmp.{}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        );
+        let tmp_path = parent.join(tmp_name);
+
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            tmp.write_all(doc.to_string().as_bytes())
+                .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+            tmp.sync_all()
+                .with_context(|| format!("Failed to fsync temp file: {}", tmp_path.display()))?;
+        }
+
+        std::fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+
+        Ok(())
+    }
 }
 
 /// Built-in layout HTML content, embedded at compile time.
@@ -235,4 +291,3 @@ pub mod builtin_layouts {
         Ok(())
     }
 }
-
