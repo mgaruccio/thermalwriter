@@ -1,7 +1,11 @@
+#[cfg(feature = "daemon")]
 pub mod transport;
 pub mod sensor;
 pub mod render;
+#[cfg(feature = "daemon")]
 pub mod service;
 pub mod config;
+#[cfg(feature = "daemon")]
 pub mod cli;
 pub mod theme;
+pub mod dbus_types;

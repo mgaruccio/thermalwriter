@@ -1,3 +1,5 @@
+#![cfg(feature = "daemon")]
+
 use thermalwriter::transport::bulk_usb;
 
 #[test]

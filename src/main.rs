@@ -77,6 +77,16 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
     sensor_hub.add_provider(Box::new(RaplProvider::new()));
 
+    // Prime providers so they discover devices, then snapshot descriptors for
+    // the D-Bus list_sensors method. Must happen before the D-Bus service
+    // starts so the first client call sees real data.
+    let _ = sensor_hub.poll();
+    let sensor_descriptors: Vec<(String, String, String)> = sensor_hub
+        .available_sensors()
+        .into_iter()
+        .map(|d| (d.key, d.name, d.unit))
+        .collect();
+
     // Channel for hot-swapping the frame source from the mode change listener
     let (source_tx, mut source_rx) = mpsc::channel::<Box<dyn FrameSource>>(1);
     // Shared shutdown + template channels
@@ -131,6 +141,12 @@ async fn main() -> Result<()> {
                     renderer.set_history(hist.clone());
                 }
                 renderer.set_theme(theme_palette);
+                renderer.set_layout_vars(
+                    config.layout_vars
+                        .get(&config.display.default_layout)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 Box::new(renderer)
             } else {
                 Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
@@ -150,6 +166,9 @@ async fn main() -> Result<()> {
         jpeg_quality: config.display.jpeg_quality,
         shutdown_tx,
         layout_dir: layout_dir.clone(),
+        config_path: config_path.clone(),
+        sensor_descriptors,
+        config: config.clone(),
         mode_change_tx: mode_tx,
     }));
 
@@ -166,7 +185,7 @@ async fn main() -> Result<()> {
 
         while let Some(change) = mode_rx.recv().await {
             match change {
-                ModeChange::Layout(name) => {
+                ModeChange::Layout { name, vars } => {
                     // Drop any running xvfb before switching back to layout mode
                     if let Some(h) = xvfb_handle.take() { drop(h); }
                     let path = layout_dir_clone.join(&name);
@@ -177,6 +196,7 @@ async fn main() -> Result<()> {
                                 match SvgRenderer::new(&template, 480, 480) {
                                     Ok(mut r) => {
                                         r.set_theme(ThemePalette::default());
+                                        r.set_layout_vars(vars);
                                         Box::new(r)
                                     }
                                     Err(e) => {

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crate::config::Config;
+use crate::dbus_types::DisplayProxy;
 use crate::render::RawFrame;
 use crate::service::tick::encode_jpeg;
 use crate::transport::Transport;
@@ -60,22 +60,6 @@ pub enum CtlCommand {
     },
 }
 
-/// zbus proxy for the com.thermalwriter.Display D-Bus interface.
-#[zbus::proxy(
-    interface = "com.thermalwriter.Display",
-    default_service = "com.thermalwriter.Service",
-    default_path = "/com/thermalwriter/display"
-)]
-trait Display {
-    async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
-    async fn set_layout(&self, name: &str) -> zbus::Result<String>;
-    async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;
-    async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
-    async fn list_sensors(&self) -> zbus::Result<Vec<String>>;
-    async fn stop(&self) -> zbus::Result<()>;
-    async fn reload(&self) -> zbus::Result<()>;
-}
-
 /// Execute a `ctl` subcommand against the running daemon over D-Bus.
 pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
     let connection = zbus::Connection::session().await
@@ -110,8 +94,12 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
         CtlCommand::Sensors => {
             let sensors = proxy.list_sensors().await
                 .context("Failed to list sensors")?;
-            for sensor in sensors {
-                println!("{}", sensor);
+            for (key, name, unit) in sensors {
+                if unit.is_empty() {
+                    println!("{}  {}", key, name);
+                } else {
+                    println!("{}  {} ({})", key, name, unit);
+                }
             }
         }
         CtlCommand::Stop => {

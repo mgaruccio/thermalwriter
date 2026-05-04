@@ -1,6 +1,7 @@
 // SVG rendering: uses Tera for template substitution and resvg for rasterization.
 // Renders SVG templates with sensor data into 480x480 pixmaps for the cooler LCD.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -8,9 +9,10 @@ use resvg::usvg;
 use tera::Tera;
 use tiny_skia::{Pixmap, Transform};
 
+use super::frontmatter::LayoutFrontmatter;
+use super::{FrameSource, RawFrame, SensorData};
 use crate::sensor::history::SensorHistory;
 use crate::theme::ThemePalette;
-use super::{FrameSource, RawFrame, SensorData};
 
 // Font file is named JetBrainsMono but is actually DejaVu Sans Mono
 const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
@@ -28,6 +30,8 @@ pub struct SvgRenderer<'a> {
     options: usvg::Options<'a>,
     history: Option<Arc<Mutex<SensorHistory>>>,
     theme: Option<ThemePalette>,
+    variable_defaults: HashMap<String, String>,
+    variable_overrides: HashMap<String, String>,
 }
 
 impl<'a> SvgRenderer<'a> {
@@ -39,13 +43,22 @@ impl<'a> SvgRenderer<'a> {
         options.fontdb_mut().load_font_data(EMBEDDED_FONT.to_vec());
         options.fontdb_mut().load_system_fonts();
         // Map the CSS "monospace" generic family to our embedded font
-        options.fontdb_mut().set_monospace_family(EMBEDDED_FONT_FAMILY);
+        options
+            .fontdb_mut()
+            .set_monospace_family(EMBEDDED_FONT_FAMILY);
 
         let mut tera = Tera::default();
         tera.autoescape_on(vec![]); // Disable autoescaping for SVG
         super::components::register_all(&mut tera);
         tera.add_raw_template("layout", template)
             .context("Failed to add template to Tera")?;
+
+        let frontmatter = LayoutFrontmatter::parse(template);
+        let variable_defaults = frontmatter
+            .variables
+            .iter()
+            .map(|(name, decl)| (name.clone(), decl.default.clone()))
+            .collect();
 
         Ok(Self {
             tera,
@@ -55,6 +68,8 @@ impl<'a> SvgRenderer<'a> {
             options,
             history: None,
             theme: None,
+            variable_defaults,
+            variable_overrides: HashMap::new(),
         })
     }
 
@@ -67,6 +82,12 @@ impl<'a> SvgRenderer<'a> {
     pub fn set_theme(&mut self, theme: ThemePalette) {
         self.theme = Some(theme);
     }
+
+    /// Set per-layout variable overrides. These are injected after frontmatter
+    /// defaults and theme values, so user overrides win.
+    pub fn set_layout_vars(&mut self, vars: HashMap<String, String>) {
+        self.variable_overrides = vars;
+    }
 }
 
 impl FrameSource for SvgRenderer<'static> {
@@ -77,9 +98,19 @@ impl FrameSource for SvgRenderer<'static> {
             context.insert(key, value);
         }
 
+        // Inject variable defaults declared by the layout frontmatter.
+        for (key, value) in &self.variable_defaults {
+            context.insert(key, value);
+        }
+
         // Inject theme colors if configured
         if let Some(ref theme) = self.theme {
             theme.inject_into_context(&mut context);
+        }
+
+        // Inject user overrides last so saved GUI choices win.
+        for (key, value) in &self.variable_overrides {
+            context.insert(key, value);
         }
 
         // Inject history arrays if configured
@@ -90,16 +121,17 @@ impl FrameSource for SvgRenderer<'static> {
         }
 
         // Step 2: Tera template substitution
-        let svg_string = self.tera.render(&self.template_name, &context)
+        let svg_string = self
+            .tera
+            .render(&self.template_name, &context)
             .context("Tera template substitution failed")?;
 
         // Step 3: Parse SVG with usvg
-        let tree = usvg::Tree::from_str(&svg_string, &self.options)
-            .context("Failed to parse SVG")?;
+        let tree =
+            usvg::Tree::from_str(&svg_string, &self.options).context("Failed to parse SVG")?;
 
         // Step 4: Render to pixmap at target size
-        let mut pixmap = Pixmap::new(self.width, self.height)
-            .context("Failed to create pixmap")?;
+        let mut pixmap = Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
 
         // Scale the SVG to fit the target canvas
         let svg_size = tree.size();
@@ -121,5 +153,11 @@ impl FrameSource for SvgRenderer<'static> {
         if let Err(e) = self.tera.add_raw_template(&self.template_name, template) {
             log::warn!("Failed to update template: {}", e);
         }
+        let frontmatter = LayoutFrontmatter::parse(template);
+        self.variable_defaults = frontmatter
+            .variables
+            .iter()
+            .map(|(name, decl)| (name.clone(), decl.default.clone()))
+            .collect();
     }
 }

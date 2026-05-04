@@ -1,19 +1,27 @@
 // D-Bus interface: exposes service control via com.thermalwriter.Display.
-// Methods: set_layout, get_status, list_layouts, list_sensors, stop, reload.
+// Methods: set_layout, get_status, list_layouts, list_sensors, stop, reload,
+//          get_layout_vars, set_layout_vars.
 // Properties: active_layout, connected, resolution, tick_rate.
 // Signals: layout_changed, device_connected, device_disconnected, error.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use zbus::{interface, object_server::SignalEmitter};
 use log::info;
 
+use crate::config::Config;
+use crate::render::frontmatter::LayoutFrontmatter;
+
 /// Message sent through the mode change channel to switch display modes.
 #[derive(Debug, Clone)]
 pub enum ModeChange {
     /// Switch to an SVG or HTML layout by name.
-    Layout(String),
+    Layout {
+        name: String,
+        vars: HashMap<String, String>,
+    },
     /// Switch to xvfb capture mode with the given shell command.
     Xvfb { command: String },
 }
@@ -28,6 +36,15 @@ pub struct ServiceState {
     pub jpeg_quality: u8,
     pub shutdown_tx: watch::Sender<bool>,
     pub layout_dir: std::path::PathBuf,
+    /// Path to the on-disk config.toml (used by set_layout_vars for persistence).
+    pub config_path: std::path::PathBuf,
+    /// Snapshot of sensor descriptors (key, name, unit). Populated in main.rs
+    /// after the first sensor_hub.poll() so list_sensors() returns real data.
+    pub sensor_descriptors: Vec<(String, String, String)>,
+    /// In-memory mirror of the running daemon's Config. set_layout_vars mutates
+    /// this alongside the on-disk file so the tick loop sees fresh values
+    /// without a restart.
+    pub config: Config,
     /// Notify the daemon to switch display mode or layout.
     pub mode_change_tx: tokio::sync::mpsc::Sender<ModeChange>,
 }
@@ -42,9 +59,175 @@ impl DisplayInterface {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Free-function helpers: path validation + layout listing + vars read.
+// Factored out so tests can call them without binding a D-Bus service name.
+// ---------------------------------------------------------------------------
+
+/// Resolve `name` against `layout_dir` and return the canonical path if and
+/// only if it stays within the layout directory. Rejects:
+///   - absolute paths (`/etc/passwd`),
+///   - any name containing a `..` parent-traversal component,
+///   - symlink targets that point outside `layout_dir`,
+///   - names that do not resolve to an existing file.
+///
+/// Canonicalizing both sides before `starts_with` defeats symlink escapes.
+pub fn validate_layout_path(
+    layout_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, zbus::fdo::Error> {
+    // Structural rejects before touching the filesystem.
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "Layout name must be relative: {}",
+            name
+        )));
+    }
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "Layout name may not contain '..': {}",
+            name
+        )));
+    }
+
+    let base = layout_dir.canonicalize().map_err(|e| {
+        zbus::fdo::Error::Failed(format!(
+            "Layout directory not accessible ({}): {}",
+            layout_dir.display(),
+            e
+        ))
+    })?;
+    let resolved = base.join(name).canonicalize().map_err(|_| {
+        zbus::fdo::Error::InvalidArgs(format!("Layout not found: {}", name))
+    })?;
+    if !resolved.starts_with(&base) {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "Layout path escapes layout directory: {}",
+            name
+        )));
+    }
+    Ok(resolved)
+}
+
+/// List layout files (`.html` and `.svg`) under `layout_dir`, recursing one
+/// level into subdirectories so `svg/neon-dash.svg` is returned with the
+/// `svg/` prefix. Output is sorted for stable client rendering.
+pub fn list_layouts_impl(layout_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+
+    let Ok(top) = std::fs::read_dir(layout_dir) else {
+        return out;
+    };
+    for entry in top.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if has_layout_ext(&path) {
+                if let Some(name) = path.file_name() {
+                    out.push(name.to_string_lossy().to_string());
+                }
+            }
+        } else if path.is_dir() {
+            let Ok(sub) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for sub_entry in sub.flatten() {
+                let sub_path = sub_entry.path();
+                if sub_path.is_file() && has_layout_ext(&sub_path) {
+                    if let Ok(rel) = sub_path.strip_prefix(layout_dir) {
+                        // Normalize to forward slashes; the LCD repo is unix-only.
+                        let s = rel
+                            .components()
+                            .filter_map(|c| match c {
+                                std::path::Component::Normal(os) => {
+                                    Some(os.to_string_lossy().into_owned())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        if !s.is_empty() {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn has_layout_ext(p: &Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()),
+        Some("html") | Some("svg")
+    )
+}
+
+/// Read the layout file under `layout_dir` (validated against traversal) and
+/// return its declared variables as a list of dicts with keys `name`, `type`,
+/// `default`, `help`. Empty list if the layout declares no vars.
+pub fn get_layout_vars_impl(
+    layout_dir: &Path,
+    name: &str,
+) -> Result<Vec<HashMap<String, String>>, zbus::fdo::Error> {
+    let path = validate_layout_path(layout_dir, name)?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        zbus::fdo::Error::Failed(format!(
+            "Failed to read layout {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let fm = LayoutFrontmatter::parse(&content);
+
+    let mut out = Vec::with_capacity(fm.variables.len());
+    for (var_name, decl) in &fm.variables {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), var_name.clone());
+        m.insert("type".to_string(), decl.var_type.clone());
+        m.insert("default".to_string(), decl.default.clone());
+        m.insert("help".to_string(), decl.help.clone());
+        out.push(m);
+    }
+    Ok(out)
+}
+
+/// Apply variable overrides for `name`:
+///   1. Validate the layout path against traversal.
+///   2. Persist vars to `config_path` via `Config::save_layout_vars`.
+///   3. Mirror the values into the in-memory `Config::layout_vars` so the
+///      running tick loop can see them without a restart.
+///
+/// This is the non-D-Bus core of `DisplayInterface::set_layout_vars` so tests
+/// can exercise the disk+in-memory contract without binding a session-bus
+/// service name. Callers are responsible for signalling the tick loop to
+/// reload the template after this returns Ok.
+pub fn apply_layout_vars(
+    layout_dir: &Path,
+    config_path: &Path,
+    config: &mut Config,
+    name: &str,
+    vars: HashMap<String, String>,
+) -> Result<(), zbus::fdo::Error> {
+    validate_layout_path(layout_dir, name)?;
+    Config::save_layout_vars(config_path, name, &vars).map_err(|e| {
+        zbus::fdo::Error::Failed(format!("Failed to persist layout vars: {}", e))
+    })?;
+    config.layout_vars.insert(name.to_string(), vars);
+    Ok(())
+}
+
 #[interface(name = "com.thermalwriter.Display")]
 impl DisplayInterface {
-    /// Switch the active layout. Returns an error if the layout file doesn't exist.
+    /// Switch the active layout. Returns an error if the layout file doesn't exist
+    /// or resolves outside the layout directory.
     async fn set_layout(
         &self,
         name: String,
@@ -53,13 +236,10 @@ impl DisplayInterface {
         // Hold the lock through both the channel send and state update — no TOCTOU window.
         // tokio::sync::Mutex is safe to hold across .await.
         let mut state = self.state.lock().await;
-        let layout_path = state.layout_dir.join(&name);
-        if !layout_path.exists() {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                format!("Layout not found: {}", name)
-            ));
-        }
-        state.mode_change_tx.send(ModeChange::Layout(name.clone())).await
+        // Path-traversal + existence check.
+        validate_layout_path(&state.layout_dir, &name)?;
+        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
+        state.mode_change_tx.send(ModeChange::Layout { name: name.clone(), vars }).await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.active_layout = name.clone();
         state.mode = if name.ends_with(".html") { "html" } else { "svg" }.to_string();
@@ -82,13 +262,10 @@ impl DisplayInterface {
                 ModeChange::Xvfb { command: command.clone() }
             }
             "svg" | "html" => {
-                let layout_path = state.layout_dir.join(&command);
-                if !layout_path.exists() {
-                    return Err(zbus::fdo::Error::InvalidArgs(
-                        format!("Layout not found: {}", command)
-                    ));
-                }
-                ModeChange::Layout(command.clone())
+                // Path-traversal + existence check on the layout name.
+                validate_layout_path(&state.layout_dir, &command)?;
+                let vars = state.config.layout_vars.get(&command).cloned().unwrap_or_default();
+                ModeChange::Layout { name: command.clone(), vars }
             }
             _ => return Err(zbus::fdo::Error::InvalidArgs(
                 format!("Unknown mode: {} (expected svg, html, or xvfb)", mode)
@@ -115,27 +292,55 @@ impl DisplayInterface {
         status
     }
 
-    /// Return sorted list of available layout filenames from the layout directory.
+    /// Return sorted list of available layout filenames (`.html` and `.svg`),
+    /// including `svg/*.svg` under the `svg/` subdirectory.
     async fn list_layouts(&self) -> Vec<String> {
         let state = self.state.lock().await;
-        let mut layouts = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&state.layout_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "html") {
-                    if let Some(name) = path.file_name() {
-                        layouts.push(name.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-        layouts.sort();
-        layouts
+        list_layouts_impl(&state.layout_dir)
     }
 
-    /// Return available sensor keys. Placeholder — wired up in tick loop integration.
-    async fn list_sensors(&self) -> Vec<String> {
-        Vec::new()
+    /// Return available sensor descriptors as `(key, name, unit)` tuples.
+    /// Populated from the sensor hub at startup — D-Bus does not support
+    /// custom structs, so we expose a tuple shape.
+    async fn list_sensors(&self) -> Vec<(String, String, String)> {
+        self.state.lock().await.sensor_descriptors.clone()
+    }
+
+    /// Return the declared variables for `name` as a list of dicts with keys
+    /// `name`, `type`, `default`, `help`.
+    async fn get_layout_vars(
+        &self,
+        name: String,
+    ) -> zbus::fdo::Result<Vec<HashMap<String, String>>> {
+        let state = self.state.lock().await;
+        get_layout_vars_impl(&state.layout_dir, &name)
+    }
+
+    /// Apply variable overrides to `name`: (a) persist to config.toml via
+    /// `Config::save_layout_vars`, (b) update the daemon's in-memory Config so
+    /// the tick loop sees fresh values without a restart, (c) signal the tick
+    /// loop to reload the layout.
+    async fn set_layout_vars(
+        &self,
+        name: String,
+        vars: HashMap<String, String>,
+    ) -> zbus::fdo::Result<()> {
+        let mut state = self.state.lock().await;
+
+        // Steps (a) + (b): validate + persist + update in-memory config.
+        let layout_dir = state.layout_dir.clone();
+        let config_path = state.config_path.clone();
+        apply_layout_vars(&layout_dir, &config_path, &mut state.config, &name, vars)?;
+
+        // Step (c): tell the tick loop to reload with fresh context.
+        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
+        state
+            .mode_change_tx
+            .send(ModeChange::Layout { name: name.clone(), vars })
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+
+        Ok(())
     }
 
     /// Signal the daemon to shut down cleanly.
