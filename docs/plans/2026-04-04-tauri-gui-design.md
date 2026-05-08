@@ -163,7 +163,7 @@ ctx.putImageData(imageData, 0, 0);
 
 Preview re-renders on variable change with ~100ms debounce. No encode/decode overhead.
 
-**Note on pixel format**: `SvgRenderer` produces a `tiny_skia::Pixmap` (premultiplied RGBA). For the GUI, use `pixmap.data()` directly — `putImageData` expects premultiplied RGBA, which is what tiny_skia provides. Skip the `RawFrame::from_pixmap()` unpremultiply conversion entirely.
+**Note on pixel format**: `SvgRenderer` produces a `tiny_skia::Pixmap` whose `.data()` returns **premultiplied** RGBA. `putImageData` expects **straight (un-premultiplied)** RGBA, so feeding `pixmap.data()` directly produces washed-out colors. The correct path is to call `FrameSource::render()` (which returns a `RawFrame` with straight RGB via the unpremultiply step in `RawFrame::from_pixmap`) and then expand each pixel to RGBA by appending alpha=255. Output is exactly `480 * 480 * 4 = 921600` bytes.
 
 ### SvgRenderer State
 

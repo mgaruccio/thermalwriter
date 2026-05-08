@@ -5309,6 +5309,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "thermalwriter",
  "thiserror 2.0.18",
  "tokio",
