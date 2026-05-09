@@ -112,6 +112,8 @@ async fn main() -> Result<()> {
     // Shared shutdown + template channels
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (template_tx, template_rx) = watch::channel(String::new());
+    // Background watch channel: mode-change listener → tick loop (immediate apply)
+    let (background_tx, background_rx) = watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
@@ -264,11 +266,9 @@ async fn main() -> Result<()> {
                 }
                 ModeChange::Background { image } => {
                     current_background = image.clone();
-                    // The source_tx hot-swap path isn't used here — we call set_background
-                    // on the next layout rebuild. For the currently running renderer, we
-                    // send a layout reload with the same name to apply the new background.
-                    // This keeps the background update simple: state.current_background is
-                    // already updated by the D-Bus method before sending this message.
+                    // Push to tick loop immediately so the running renderer updates
+                    // without waiting for a layout switch.
+                    let _ = background_tx.send(image.clone());
                     info!("Background updated ({})", if image.is_some() { "set" } else { "cleared" });
                 }
                 ModeChange::Xvfb { command } => {
@@ -307,6 +307,7 @@ async fn main() -> Result<()> {
         jpeg_quality,
         rotation,
         template_rx,
+        background_rx,
         shutdown_rx,
         initial_sensor_history,
         sensor_poll_interval,

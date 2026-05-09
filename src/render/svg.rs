@@ -185,4 +185,8 @@ impl FrameSource for SvgRenderer<'static> {
             .map(|(name, decl)| (name.clone(), decl.default.clone()))
             .collect();
     }
+
+    fn set_background(&mut self, bg: Option<Pixmap>) {
+        self.background = bg;
+    }
 }

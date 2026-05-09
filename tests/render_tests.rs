@@ -283,3 +283,42 @@ fn svg_renderer_renders_normally_without_background() {
     assert_eq!(frame.data[0], 0,   "R should be 0");
     assert_eq!(frame.data[1], 0,   "G should be 0");
 }
+
+/// Simulates the tick loop's `frame_source.set_background(bg)` call on a live
+/// Box<dyn FrameSource>. Verifies that calling set_background on the trait object
+/// immediately changes the rendered output — the fix for the cf2fd97 blocker.
+#[test]
+fn frame_source_set_background_applies_to_running_renderer() {
+    use thermalwriter::render::FrameSource;
+
+    // Transparent layout — no canvas fill, so background shows through at (0,0)
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <text x="240" y="240" fill="#ffffff" text-anchor="middle">live</text>
+    </svg>"##;
+
+    let mut source: Box<dyn FrameSource> = Box::new(SvgRenderer::new(template, 480, 480).unwrap());
+
+    // Before: no background — pixel (0,0) should be black (transparent canvas)
+    let frame_before = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_before.data[0], 0, "R before: should be 0 (no bg)");
+    assert_eq!(frame_before.data[1], 0, "G before: should be 0 (no bg)");
+    assert_eq!(frame_before.data[2], 0, "B before: should be 0 (no bg)");
+
+    // Apply background via trait method — same path the tick loop uses
+    let bg_bytes = make_solid_color_png(480, 480, 0, 255, 0); // solid green
+    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+    source.set_background(Some(bg));
+
+    // After: green background shows through transparent canvas at (0,0)
+    let frame_after = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_after.data[0], 0,   "R after: should be 0 (green bg)");
+    assert_eq!(frame_after.data[1], 255, "G after: should be 255 (green bg)");
+    assert_eq!(frame_after.data[2], 0,   "B after: should be 0 (green bg)");
+
+    // Clear background — pixel (0,0) returns to black
+    source.set_background(None);
+    let frame_cleared = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_cleared.data[0], 0, "R cleared: should be 0 (no bg)");
+    assert_eq!(frame_cleared.data[1], 0, "G cleared: should be 0 (no bg)");
+    assert_eq!(frame_cleared.data[2], 0, "B cleared: should be 0 (no bg)");
+}

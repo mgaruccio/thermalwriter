@@ -85,6 +85,7 @@ pub async fn run_tick_loop(
     jpeg_quality: u8,
     rotation: u16,
     mut template_rx: tokio::sync::watch::Receiver<String>,
+    mut background_rx: tokio::sync::watch::Receiver<Option<tiny_skia::Pixmap>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
@@ -117,6 +118,12 @@ pub async fn run_tick_loop(
                 info!("Applying template update ({} bytes)", new_template.len());
                 frame_source.set_template(&new_template);
             }
+        }
+
+        // Apply background update if one arrived since last tick
+        if background_rx.has_changed().unwrap_or(false) {
+            let bg = background_rx.borrow_and_update().clone();
+            frame_source.set_background(bg);
         }
 
         // Poll sensors if interval has elapsed (decoupled from render rate)
