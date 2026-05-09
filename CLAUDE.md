@@ -18,7 +18,8 @@ Rust daemon with:
   - `TemplateRenderer` (legacy) — custom HTML subset, taffy + fontdue
   - `BlitzRenderer` (experimental) — behind `--features blitz`, alpha quality
 - **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics
-- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`)
+- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`); methods include `SetLayout`/`SetLayoutVars`/`SetBackground`/`ClearBackground`/`ListBackgrounds`
+- **Global background images** — daemon-level bg compositing under any layout. PNG/JPEG files in `~/.config/thermalwriter/backgrounds/` (decoded once, cached as 480×480 premultiplied Pixmap, blitted under each rendered frame)
 - **CLI** (clap) — `thermalwriter daemon` / `thermalwriter ctl ...`
 - **systemd user service** — auto-starts on login
 
@@ -34,7 +35,7 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (107 tests)
+cargo test                               # run tests (187 tests)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
@@ -70,7 +71,7 @@ Key gotchas:
 - HTML layouts: every text element needs explicit `height` (taffy can't measure text)
 - HTML layouts: comments (`<!-- -->`) break the custom parser
 - Seeded layouts in ~/.config/thermalwriter/layouts/ don't auto-update — copy manually after changes
-- Built-in SVG layouts: svg/neon-dash-v2 (default), svg/neon-dash, svg/arc-gauge, svg/cyber-grid
+- Built-in SVG layouts: svg/neon-dash-v2 (default), svg/neon-dash, svg/arc-gauge, svg/cyber-grid — all use transparent canvases so the global bg shows through. Per-panel rects survive. cyber-grid keeps its scanlines overlay (intentional cosmetic on top of any bg).
 - Built-in HTML layouts: system-stats, gpu-focus, minimal, neon-dash, dual-gauge, fps-hero
 
 ## Config
@@ -87,12 +88,16 @@ mode = "svg"    # "svg", "html", or "xvfb"
 [sensors]
 poll_interval_ms = 1000
 
+[background]
+image = "skyline.png"  # filename only, lives under ~/.config/thermalwriter/backgrounds/. Omit or unset for no bg.
+
 [xvfb]
 command = "conky -c ~/.config/conky/lcd.conf"
 tick_rate = 15  # 1-60 FPS for xvfb capture mode
 ```
 
 Layouts in `~/.config/thermalwriter/layouts/` — built-in layouts seeded on first run.
+Backgrounds in `~/.config/thermalwriter/backgrounds/` — placeholder PNGs seeded on first run; drop your own 480×480 PNG/JPEG and select via `busctl call ... SetBackground` or the Tauri GUI's BgGallery.
 
 ## Key Dependencies
 
