@@ -140,14 +140,12 @@ async fn main() -> Result<()> {
             };
 
             let frontmatter = LayoutFrontmatter::parse(&template);
-            let sensor_history = if !frontmatter.history_configs.is_empty() {
+            let sensor_history = {
                 let mut history = SensorHistory::new();
                 for (metric, cfg) in &frontmatter.history_configs {
                     history.configure_metric(metric, cfg.duration);
                 }
                 Some(Arc::new(std::sync::Mutex::new(history)))
-            } else {
-                None
             };
 
             let theme_palette = if let Some(manual) = config.theme.manual.clone() {
@@ -227,6 +225,16 @@ async fn main() -> Result<()> {
                     let path = layout_dir_clone.join(&name);
                     match std::fs::read_to_string(&path) {
                         Ok(template) => {
+                            // Parse frontmatter and register any new history metrics.
+                            // configure_metric is idempotent — existing buffers are preserved.
+                            let new_fm = LayoutFrontmatter::parse(&template);
+                            if let Some(ref hist) = reload_history {
+                                if let Ok(mut h) = hist.lock() {
+                                    for (metric, cfg) in &new_fm.history_configs {
+                                        h.configure_metric(metric, cfg.duration);
+                                    }
+                                }
+                            }
                             let is_svg = name.ends_with(".svg");
                             let new_source: Box<dyn FrameSource> = if is_svg {
                                 match SvgRenderer::new(&template, 480, 480) {

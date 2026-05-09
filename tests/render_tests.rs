@@ -322,3 +322,40 @@ fn frame_source_set_background_applies_to_running_renderer() {
     assert_eq!(frame_cleared.data[1], 0, "G cleared: should be 0 (no bg)");
     assert_eq!(frame_cleared.data[2], 0, "B cleared: should be 0 (no bg)");
 }
+
+// Regression test: daemon starts with a no-history layout (e.g., arc-gauge), then
+// switches to a history layout (e.g., neon-dash-v2). The shared SensorHistory must
+// have the new metrics configured before set_history is called, otherwise graph()
+// finds cpu_temp_history undefined and the render fails every tick.
+#[test]
+fn layout_switch_from_no_history_to_history_layout_renders_without_error() {
+    // Simulate startup: create a shared history with no metrics configured
+    // (matches daemon startup when initial layout has empty frontmatter.history_configs).
+    let shared_history = Arc::new(Mutex::new(SensorHistory::new()));
+
+    // Layout that uses graph() — requires cpu_temp_history to be in context.
+    let history_template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
+    </svg>"##;
+
+    // Simulate the fixed reload path: parse frontmatter, configure new metrics,
+    // then pass the shared history to the new renderer.
+    // (configure_metric is idempotent — safe to call even if already present.)
+    {
+        let mut h = shared_history.lock().unwrap();
+        h.configure_metric("cpu_temp", std::time::Duration::from_secs(30));
+    }
+
+    let mut renderer = SvgRenderer::new(history_template, 480, 480).unwrap();
+    renderer.set_history(shared_history.clone());
+
+    // Even with an empty history buffer (no recorded samples yet), the render
+    // must succeed — graph() receives an empty series, not a missing variable.
+    let result = renderer.render(&HashMap::new());
+    assert!(
+        result.is_ok(),
+        "Render should succeed after configure_metric on shared history; got: {:#}",
+        result.unwrap_err()
+    );
+}
