@@ -95,7 +95,7 @@ pub async fn run_tick_loop(
 
     let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
-    let mut cached_background: Option<tiny_skia::Pixmap> = None;
+    let mut cached_background: Option<tiny_skia::Pixmap> = background_rx.borrow().clone();
 
     loop {
         let tick_start = Instant::now();
@@ -160,7 +160,7 @@ pub async fn run_tick_loop(
                     Err(e) => warn!("JPEG encode failed: {}", e),
                 }
             }
-            Err(e) => warn!("Render failed: {}", e),
+            Err(e) => warn!("Render failed: {:#}", e),
         }
 
         // Sleep until next tick
