@@ -99,44 +99,71 @@ fn template_renderer_produces_480x480_frame() {
 }
 
 // Regression tests for the ModeChange::Layout reload path bug:
-// The bug was that new SvgRenderer was built with ThemePalette::default() and
-// set_history() was never called, causing Tera substitution failures.
+// The bug was that the new SvgRenderer was built with ThemePalette::default() and
+// set_history() was never called. Tera is not strict-mode, so undefined variables
+// render silently as empty. The real symptom: wrong theme colors on the LCD and
+// blank sparkline charts after clicking Apply in the GUI.
 
-/// A layout using `{{ cpu_temp_history }}` FAILS to render without history attached,
-/// because the variable is never injected into the Tera context.
+/// Without history attached, passing `cpu_temp_history` to the graph() Tera function
+/// causes a hard error: "Variable `cpu_temp_history` not found in context". This is
+/// the actual "Tera template substitution failed" symptom the plan describes.
+/// Plain `{{ cpu_temp_history }}` in text is lenient (empty string), but Tera Function
+/// calls error on undefined arguments. All production layouts use graph(), so the
+/// plan's symptom description is correct for real layout files.
 #[test]
-fn svg_renderer_without_history_fails_on_history_template() {
+fn svg_renderer_without_history_errors_on_graph_component() {
+    // graph() is a Tera Function — it errors when cpu_temp_history is undefined.
     let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
-        <text x="10" y="20" fill="#fff">{{ cpu_temp_history | join(sep=",") }}</text>
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
     </svg>"##;
 
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
     // Deliberately do NOT call set_history() — simulates the buggy reload path
 
     let result = renderer.render(&HashMap::new());
-    assert!(result.is_err(), "Expected Tera error for undefined cpu_temp_history variable, got Ok");
+    assert!(result.is_err(), "Expected Tera error when graph() receives undefined cpu_temp_history");
+    let err_str = format!("{:#}", result.unwrap_err());
+    assert!(
+        err_str.contains("cpu_temp_history") || err_str.contains("not found"),
+        "Expected error mentioning cpu_temp_history, got: {err_str}"
+    );
 }
 
-/// A layout using `{{ cpu_temp_history }}` renders successfully when history is attached.
-/// This is what the fixed reload path must do.
+/// With history attached, the graph() component receives data and renders a visible
+/// stroke in the chart area. At least one pixel in the chart region should be non-black.
+/// This is what the fixed reload path (with set_history) must produce.
 #[test]
-fn svg_renderer_with_history_renders_history_template() {
+fn svg_renderer_with_history_renders_visible_chart() {
     let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
-        <text x="10" y="20" fill="#fff">{{ cpu_temp_history | join(sep=",") }}</text>
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
     </svg>"##;
 
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
 
-    // Attach history — simulates what the fixed reload path must do
+    // Attach history with actual data — simulates what the fixed reload path must do
     let mut history = SensorHistory::new();
     history.configure_metric("cpu_temp", std::time::Duration::from_secs(30));
-    let history = Arc::new(Mutex::new(history));
-    renderer.set_history(history);
+    // Record several samples so the graph has data to draw
+    let mut data = HashMap::new();
+    for val in ["65", "68", "70", "72", "69", "67"] {
+        data.insert("cpu_temp".to_string(), val.to_string());
+        history.record(&data);
+    }
+    renderer.set_history(Arc::new(Mutex::new(history)));
 
     let frame = renderer.render(&HashMap::new()).unwrap();
-    assert_eq!(frame.width, 480);
-    assert_eq!(frame.height, 480);
     assert_eq!(frame.data.len(), 480 * 480 * 3);
+
+    // With history, the red stroke line is rendered — at least one pixel in the
+    // top-half chart area should have R > 0 (red stroke).
+    let has_red_pixel = (0..240usize).flat_map(|row| (0..480usize).map(move |col| (row, col)))
+        .any(|(row, col)| {
+            let idx = (row * 480 + col) * 3;
+            frame.data[idx] > 0 // R channel: red stroke
+        });
+    assert!(has_red_pixel, "Expected a visible red chart stroke when history data is present");
 }
 
 /// Rendering with a configured (non-default) theme palette injects the configured
