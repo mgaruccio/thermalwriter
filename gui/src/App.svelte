@@ -22,12 +22,6 @@
     unit: string;
   };
 
-  type ApplyResult = {
-    saved: boolean;
-    applied: boolean;
-    message: string;
-  };
-
   let layouts = $state<LayoutSummary[]>([]);
   let variables = $state<VariableDecl[]>([]);
   let sensors = $state<SensorDescriptor[]>([]);
@@ -113,11 +107,30 @@
     status = "";
     error = "";
     try {
-      const result = await invoke<ApplyResult>("apply_layout", {
+      // Always persist first: save_config writes both [layout_vars."<name>"]
+      // and [display].default_layout, so the choice survives a daemon
+      // restart even though the daemon's in-memory set_layout doesn't
+      // touch default_layout on its own.
+      await invoke<void>("save_config", {
         layout: selectedLayout,
         vars: values,
       });
-      status = result.message;
+      // Then ask the running daemon to switch live. If the daemon isn't
+      // running we still kept the user's edits via save_config above.
+      try {
+        await invoke<void>("apply_to_daemon", {
+          layout: selectedLayout,
+          vars: values,
+        });
+        status = `Applied ${selectedLayout} to daemon.`;
+      } catch (e) {
+        const message = String(e);
+        if (message.includes("daemon is not running")) {
+          status = `Saved ${selectedLayout}. Daemon is not running; changes will apply on next start.`;
+        } else {
+          error = `Saved, but daemon apply failed: ${message}`;
+        }
+      }
     } catch (e) {
       error = String(e);
     } finally {
