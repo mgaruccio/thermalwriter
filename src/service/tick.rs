@@ -95,6 +95,7 @@ pub async fn run_tick_loop(
 
     let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
+    let mut cached_background: Option<tiny_skia::Pixmap> = None;
 
     loop {
         let tick_start = Instant::now();
@@ -105,10 +106,19 @@ pub async fn run_tick_loop(
             break;
         }
 
-        // Check for a new frame source (non-blocking)
+        // Apply background update before source swap so the cache is current
+        // when a new source arrives in the same tick.
+        if background_rx.has_changed().unwrap_or(false) {
+            cached_background = background_rx.borrow_and_update().clone();
+            frame_source.set_background(cached_background.clone());
+        }
+
+        // Check for a new frame source (non-blocking). Re-apply cached background
+        // so a source arriving after the watch was already drained still gets the bg.
         if let Ok(new_source) = source_rx.try_recv() {
             info!("Frame source swapped to: {}", new_source.name());
             frame_source = new_source;
+            frame_source.set_background(cached_background.clone());
         }
 
         // Apply template update if one arrived since last tick
@@ -118,12 +128,6 @@ pub async fn run_tick_loop(
                 info!("Applying template update ({} bytes)", new_template.len());
                 frame_source.set_template(&new_template);
             }
-        }
-
-        // Apply background update if one arrived since last tick
-        if background_rx.has_changed().unwrap_or(false) {
-            let bg = background_rx.borrow_and_update().clone();
-            frame_source.set_background(bg);
         }
 
         // Poll sensors if interval has elapsed (decoupled from render rate)

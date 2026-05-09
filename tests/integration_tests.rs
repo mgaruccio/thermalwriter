@@ -146,3 +146,86 @@ async fn tick_loop_applies_template_update() {
     assert!(!calls.is_empty(), "set_template should have been called after template_tx update");
     assert_eq!(calls[0], "new-template");
 }
+
+// Regression test for the watch-channel-consumption race:
+// GUI apply() sends Layout (x2 via set_layout_vars + set_layout) then Background.
+// The watch fires once for background; tick 1 consumes it via borrow_and_update.
+// Tick 2 receives a new source (built without bg) — has_changed() is false so bg was lost.
+// Fix: cache the latest background and re-apply it whenever a new source arrives.
+#[tokio::test]
+async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
+    use thermalwriter::service::tick::run_tick_loop;
+    use thermalwriter::sensor::SensorHub;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+
+    // Track set_background calls per-source via a shared log: (source_name, had_bg)
+    let bg_log = Arc::new(StdMutex::new(Vec::<(String, bool)>::new()));
+    let bg_log_clone = Arc::clone(&bg_log);
+
+    struct TrackingSource {
+        name: String,
+        log: Arc<StdMutex<Vec<(String, bool)>>>,
+    }
+    impl FrameSource for TrackingSource {
+        fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+            Ok(RawFrame { data: vec![0u8; 480 * 480 * 3], width: 480, height: 480 })
+        }
+        fn name(&self) -> &str { &self.name }
+        fn set_background(&mut self, bg: Option<tiny_skia::Pixmap>) {
+            self.log.lock().unwrap().push((self.name.clone(), bg.is_some()));
+        }
+    }
+
+    let bg_log_inner = Arc::clone(&bg_log_clone);
+    let handle = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut t = MockTransport { frames_sent: AtomicU32::new(0) };
+            let initial_fs: Box<dyn FrameSource> = Box::new(TrackingSource {
+                name: "source-0".to_string(),
+                log: Arc::clone(&bg_log_inner),
+            });
+            let (source_tx, mut source_rx) = tokio::sync::mpsc::channel::<Box<dyn FrameSource>>(4);
+            let (bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Pixmap>>(None);
+            let mut hub = SensorHub::new();
+
+            // Send a 1x1 green Pixmap as background
+            let mut px = Pixmap::new(1, 1).unwrap();
+            px.fill(tiny_skia::Color::from_rgba8(0, 255, 0, 255));
+            bg_tx.send(Some(px)).unwrap();
+
+            // Send two new sources (simulating Layout x2 from the GUI apply flow).
+            // These sources are built without any background — they rely on the tick
+            // loop's cache to receive the bg.
+            source_tx.send(Box::new(TrackingSource {
+                name: "source-1".to_string(),
+                log: Arc::clone(&bg_log_inner),
+            }) as Box<dyn FrameSource>).await.unwrap();
+            source_tx.send(Box::new(TrackingSource {
+                name: "source-2".to_string(),
+                log: Arc::clone(&bg_log_inner),
+            }) as Box<dyn FrameSource>).await.unwrap();
+
+            run_tick_loop(&mut t, initial_fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+        })
+    });
+
+    // Give the tick loop enough time to process both sources (2 ticks at 30fps ≈ 67ms)
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    shutdown_tx.send(true).unwrap();
+    handle.await.unwrap();
+
+    let log = bg_log.lock().unwrap();
+
+    // source-1 and source-2 must both have received the background.
+    let source1_got_bg = log.iter().any(|(n, had_bg)| n == "source-1" && *had_bg);
+    let source2_got_bg = log.iter().any(|(n, had_bg)| n == "source-2" && *had_bg);
+    assert!(source1_got_bg, "source-1 never received bg; log: {:?}", *log);
+    assert!(source2_got_bg, "source-2 never received bg; log: {:?}", *log);
+}
