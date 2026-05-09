@@ -71,24 +71,19 @@ impl DisplayInterface {
 // Factored out so tests can call them without binding a D-Bus service name.
 // ---------------------------------------------------------------------------
 
-/// Resolve `name` against `layout_dir` and return the canonical path if and
-/// only if it stays within the layout directory. Rejects:
-///   - absolute paths (`/etc/passwd`),
-///   - any name containing a `..` parent-traversal component,
-///   - symlink targets that point outside `layout_dir`,
-///   - names that do not resolve to an existing file.
-///
-/// Canonicalizing both sides before `starts_with` defeats symlink escapes.
-pub fn validate_layout_path(
-    layout_dir: &Path,
+/// Shared traversal guard: resolve `name` against `base_dir` and return the
+/// canonical path only if it stays within the directory. Rejects absolute paths,
+/// `..` components, symlink escapes, and non-existent names.
+/// `kind` labels error messages ("Layout", "Background").
+fn validate_path_within_dir(
+    base_dir: &Path,
     name: &str,
+    kind: &str,
 ) -> Result<PathBuf, zbus::fdo::Error> {
-    // Structural rejects before touching the filesystem.
     let candidate = Path::new(name);
     if candidate.is_absolute() {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout name must be relative: {}",
-            name
+            "{kind} name must be relative: {name}"
         )));
     }
     if candidate
@@ -96,28 +91,32 @@ pub fn validate_layout_path(
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout name may not contain '..': {}",
-            name
+            "{kind} name may not contain '..': {name}"
         )));
     }
-
-    let base = layout_dir.canonicalize().map_err(|e| {
+    let base = base_dir.canonicalize().map_err(|e| {
         zbus::fdo::Error::Failed(format!(
-            "Layout directory not accessible ({}): {}",
-            layout_dir.display(),
-            e
+            "{kind} directory not accessible ({}): {e}",
+            base_dir.display()
         ))
     })?;
     let resolved = base.join(name).canonicalize().map_err(|_| {
-        zbus::fdo::Error::InvalidArgs(format!("Layout not found: {}", name))
+        zbus::fdo::Error::InvalidArgs(format!("{kind} not found: {name}"))
     })?;
     if !resolved.starts_with(&base) {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout path escapes layout directory: {}",
-            name
+            "{kind} path escapes directory: {name}"
         )));
     }
     Ok(resolved)
+}
+
+/// Resolve `name` against `layout_dir`, rejecting traversal and symlink escapes.
+pub fn validate_layout_path(
+    layout_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, zbus::fdo::Error> {
+    validate_path_within_dir(layout_dir, name, "Layout")
 }
 
 /// List layout files (`.html` and `.svg`) under `layout_dir`, recursing one
@@ -184,47 +183,12 @@ fn has_image_ext(p: &Path) -> bool {
     )
 }
 
-/// Validate `name` against `bg_dir` using the same canonicalize+starts_with
-/// logic as `validate_layout_path`. Shared so there is no third copy of the
-/// traversal-guard pattern.
+/// Resolve `name` against `bg_dir`, rejecting traversal and symlink escapes.
 pub fn validate_background_path(
     bg_dir: &Path,
     name: &str,
 ) -> Result<PathBuf, zbus::fdo::Error> {
-    let candidate = Path::new(name);
-    if candidate.is_absolute() {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Background name must be relative: {}",
-            name
-        )));
-    }
-    if candidate
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Background name may not contain '..': {}",
-            name
-        )));
-    }
-
-    let base = bg_dir.canonicalize().map_err(|e| {
-        zbus::fdo::Error::Failed(format!(
-            "Background directory not accessible ({}): {}",
-            bg_dir.display(),
-            e
-        ))
-    })?;
-    let resolved = base.join(name).canonicalize().map_err(|_| {
-        zbus::fdo::Error::InvalidArgs(format!("Background not found: {}", name))
-    })?;
-    if !resolved.starts_with(&base) {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Background path escapes background directory: {}",
-            name
-        )));
-    }
-    Ok(resolved)
+    validate_path_within_dir(bg_dir, name, "Background")
 }
 
 /// List background image files (PNG/JPEG) under `bg_dir`. Flat listing only.
