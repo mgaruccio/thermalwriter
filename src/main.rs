@@ -176,9 +176,18 @@ async fn main() -> Result<()> {
     let _connection = dbus::serve(state.clone()).await?;
     info!("D-Bus service started");
 
+    // Theme palette for the mode-change handler to use on layout reload.
+    // Computed here (outside the if/else block) so it can be moved into the spawn closure.
+    let reload_theme = if let Some(manual) = config.theme.manual.clone() {
+        manual
+    } else {
+        ThemePalette::default()
+    };
+
     // Mode change listener: handles both layout switches and xvfb mode activation
     let layout_dir_clone = layout_dir.clone();
     let xvfb_tick_rate_cfg = xvfb_tick_rate;
+    let reload_history = initial_sensor_history.clone();
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
@@ -195,7 +204,10 @@ async fn main() -> Result<()> {
                             let new_source: Box<dyn FrameSource> = if is_svg {
                                 match SvgRenderer::new(&template, 480, 480) {
                                     Ok(mut r) => {
-                                        r.set_theme(ThemePalette::default());
+                                        r.set_theme(reload_theme.clone());
+                                        if let Some(ref hist) = reload_history {
+                                            r.set_history(hist.clone());
+                                        }
                                         r.set_layout_vars(vars);
                                         Box::new(r)
                                     }
