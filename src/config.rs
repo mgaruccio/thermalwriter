@@ -78,8 +78,16 @@ impl Default for XvfbConfig {
 #[serde(default)]
 pub struct ThemeConfig {
     pub source: String,
-    pub background_image: Option<String>,
     pub manual: Option<ThemePalette>,
+}
+
+/// Background image configuration. The image file lives under
+/// `~/.config/thermalwriter/backgrounds/`. Empty/None = no background.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Filename (no path) of the active background. None = no background.
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -89,6 +97,7 @@ pub struct Config {
     pub sensors: SensorsConfig,
     pub theme: ThemeConfig,
     pub xvfb: XvfbConfig,
+    pub background: BackgroundConfig,
     /// Per-layout variable overrides keyed by layout filename.
     /// The outer map is `{layout_name: {var_name: value}}`.
     pub layout_vars: HashMap<String, HashMap<String, String>>,
@@ -250,6 +259,66 @@ impl Config {
 
         Ok(())
     }
+
+    /// Persist the active background image filename (or None to clear) to the
+    /// on-disk config, preserving user comments via `toml_edit`. Atomic write.
+    pub fn save_background_image(path: &Path, image: Option<&str>) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Table, value};
+
+        let existing = if path.exists() {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config: {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut doc: DocumentMut = existing
+            .parse()
+            .with_context(|| format!("Invalid TOML in config: {}", path.display()))?;
+
+        if doc.get("background").is_none() {
+            doc["background"] = Item::Table(Table::new());
+        }
+        let bg = doc["background"]
+            .as_table_mut()
+            .context("background section is not a table")?;
+
+        match image {
+            Some(name) => { bg.insert("image", value(name)); }
+            None => { bg.remove("image"); }
+        }
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
+        let tmp_name = format!(
+            "{}.tmp.{}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        );
+        let tmp_path = parent.join(tmp_name);
+
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            tmp.write_all(doc.to_string().as_bytes())
+                .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+            tmp.sync_all()
+                .with_context(|| format!("Failed to fsync temp file: {}", tmp_path.display()))?;
+        }
+
+        std::fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+
+        Ok(())
+    }
 }
 
 /// Built-in layout HTML content, embedded at compile time.
@@ -263,6 +332,30 @@ pub mod builtin_layouts {
     pub const SVG_ARC_GAUGE: &str = include_str!("../layouts/svg/arc-gauge.svg");
     pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
     pub const SVG_NEON_DASH_V2: &str = include_str!("../layouts/svg/neon-dash-v2.svg");
+
+    // Seed background images (tiny PNGs, decoded + resized to 480×480 at runtime)
+    pub const BG_DARK_SOLID: &[u8] = include_bytes!("../assets/backgrounds/dark-solid.png");
+    pub const BG_DARK_GRADIENT: &[u8] = include_bytes!("../assets/backgrounds/dark-gradient.png");
+
+    /// Copy built-in background images to the backgrounds directory if they don't
+    /// already exist. Mirrors `seed_layout_dir` — only writes if `!dest.exists()`.
+    pub fn seed_background_dir(bg_dir: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let backgrounds: &[(&str, &[u8])] = &[
+            ("dark-solid.png", BG_DARK_SOLID),
+            ("dark-gradient.png", BG_DARK_GRADIENT),
+        ];
+        std::fs::create_dir_all(bg_dir)
+            .with_context(|| format!("Failed to create backgrounds dir: {}", bg_dir.display()))?;
+        for (name, content) in backgrounds {
+            let dest = bg_dir.join(name);
+            if !dest.exists() {
+                std::fs::write(&dest, content)
+                    .with_context(|| format!("Failed to write built-in background: {}", dest.display()))?;
+            }
+        }
+        Ok(())
+    }
 
     /// Copy built-in layouts to the layouts directory if they don't already exist.
     /// This lets users edit the layouts without losing the originals on first run.

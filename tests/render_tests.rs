@@ -1,7 +1,20 @@
 use thermalwriter::render::parser::*;
 use thermalwriter::render::layout::*;
 use thermalwriter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::render::svg::SvgRenderer;
+use thermalwriter::sensor::history::SensorHistory;
+use thermalwriter::theme::ThemePalette;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+fn make_solid_color_png(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+    use image::{ImageBuffer, Rgb, ImageFormat};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, ImageFormat::Png).unwrap();
+    buf.into_inner()
+}
 
 #[test]
 fn parse_style_extracts_flex_properties() {
@@ -92,4 +105,257 @@ fn template_renderer_produces_480x480_frame() {
     assert_eq!(pixel[0], 0x1a, "R channel should be 0x1a");
     assert_eq!(pixel[1], 0x1a, "G channel should be 0x1a");
     assert_eq!(pixel[2], 0x2e, "B channel should be 0x2e");
+}
+
+// Regression tests for the ModeChange::Layout reload path bug:
+// The bug was that the new SvgRenderer was built with ThemePalette::default() and
+// set_history() was never called. Tera is not strict-mode, so undefined variables
+// render silently as empty. The real symptom: wrong theme colors on the LCD and
+// blank sparkline charts after clicking Apply in the GUI.
+
+/// Without history attached, passing `cpu_temp_history` to the graph() Tera function
+/// causes a hard error: "Variable `cpu_temp_history` not found in context". This is
+/// the actual "Tera template substitution failed" symptom the plan describes.
+/// Plain `{{ cpu_temp_history }}` in text is lenient (empty string), but Tera Function
+/// calls error on undefined arguments. All production layouts use graph(), so the
+/// plan's symptom description is correct for real layout files.
+#[test]
+fn svg_renderer_without_history_errors_on_graph_component() {
+    // graph() is a Tera Function — it errors when cpu_temp_history is undefined.
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    // Deliberately do NOT call set_history() — simulates the buggy reload path
+
+    let result = renderer.render(&HashMap::new());
+    assert!(result.is_err(), "Expected Tera error when graph() receives undefined cpu_temp_history");
+    let err_str = format!("{:#}", result.unwrap_err());
+    assert!(
+        err_str.contains("cpu_temp_history") || err_str.contains("not found"),
+        "Expected error mentioning cpu_temp_history, got: {err_str}"
+    );
+}
+
+/// With history attached, the graph() component receives data and renders a visible
+/// stroke in the chart area. At least one pixel in the chart region should be non-black.
+/// This is what the fixed reload path (with set_history) must produce.
+#[test]
+fn svg_renderer_with_history_renders_visible_chart() {
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+
+    // Attach history with actual data — simulates what the fixed reload path must do
+    let mut history = SensorHistory::new();
+    history.configure_metric("cpu_temp", std::time::Duration::from_secs(30));
+    // Record several samples so the graph has data to draw
+    let mut data = HashMap::new();
+    for val in ["65", "68", "70", "72", "69", "67"] {
+        data.insert("cpu_temp".to_string(), val.to_string());
+        history.record(&data);
+    }
+    renderer.set_history(Arc::new(Mutex::new(history)));
+
+    let frame = renderer.render(&HashMap::new()).unwrap();
+    assert_eq!(frame.data.len(), 480 * 480 * 3);
+
+    // With history, the red stroke line is rendered — at least one pixel in the
+    // top-half chart area should have R > 0 (red stroke).
+    let has_red_pixel = (0..240usize).flat_map(|row| (0..480usize).map(move |col| (row, col)))
+        .any(|(row, col)| {
+            let idx = (row * 480 + col) * 3;
+            frame.data[idx] > 0 // R channel: red stroke
+        });
+    assert!(has_red_pixel, "Expected a visible red chart stroke when history data is present");
+}
+
+/// Rendering with a configured (non-default) theme palette injects the configured
+/// color into `{{ theme_primary }}`, not the default `#e94560`.
+/// The fixed reload path must pass the configured theme, not ThemePalette::default().
+#[test]
+fn svg_renderer_uses_configured_theme_not_default() {
+    // Full-canvas rect filled with {{ theme_primary }} — easy to assert on pixel color
+    let template = r#"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="{{ theme_primary }}"/>
+    </svg>"#;
+
+    let custom_theme = ThemePalette {
+        primary: "#7aa2f7".to_string(), // Tokyo Night blue — NOT the default #e94560
+        secondary: "#bb9af7".to_string(),
+        accent: "#7dcfff".to_string(),
+        background: "#1a1b26".to_string(),
+        surface: "#16161e".to_string(),
+        text: "#c0caf5".to_string(),
+        text_dim: "#565f89".to_string(),
+        success: "#9ece6a".to_string(),
+        warning: "#e0af68".to_string(),
+        critical: "#f7768e".to_string(),
+    };
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    renderer.set_theme(custom_theme);
+
+    let frame = renderer.render(&HashMap::new()).unwrap();
+
+    // Top-left pixel should be #7aa2f7 (R=0x7a, G=0xa2, B=0xf7)
+    // NOT the default primary #e94560 (R=0xe9, G=0x45, B=0x60)
+    assert_eq!(frame.data[0], 0x7a, "R: expected Tokyo Night blue #7aa2f7, not default #e94560");
+    assert_eq!(frame.data[1], 0xa2, "G: expected Tokyo Night blue #7aa2f7, not default #e94560");
+    assert_eq!(frame.data[2], 0xf7, "B: expected Tokyo Night blue #7aa2f7, not default #e94560");
+
+    // Verify it's NOT the default color
+    assert_ne!(frame.data[0], 0xe9, "Should not be the default theme primary R=0xe9");
+}
+
+// ---------------------------------------------------------------------------
+// Background decode module tests (plan Task 5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decode_png_to_pixmap_roundtrips_dimensions_and_pixel_values() {
+    let bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
+    let pixmap = thermalwriter::render::background::decode_to_pixmap(&bytes)
+        .expect("decode_to_pixmap must succeed on valid PNG");
+
+    assert_eq!(pixmap.width(), 480, "decoded pixmap must be 480 wide");
+    assert_eq!(pixmap.height(), 480, "decoded pixmap must be 480 tall");
+
+    // Center pixel (240, 240): premultiplied RGBA. For a fully opaque red pixel,
+    // premultiplied == straight: R=255, G=0, B=0, A=255.
+    let idx = (240 * 480 + 240) * 4;
+    let data = pixmap.data();
+    assert_eq!(data[idx],     255, "center pixel R should be 255 (red)");
+    assert_eq!(data[idx + 1],   0, "center pixel G should be 0");
+    assert_eq!(data[idx + 2],   0, "center pixel B should be 0");
+    assert_eq!(data[idx + 3], 255, "center pixel A should be 255 (fully opaque)");
+}
+
+#[test]
+fn decode_resizes_non_480_input_to_480() {
+    let bytes = make_solid_color_png(800, 600, 0, 255, 0); // solid green, non-LCD size
+    let pixmap = thermalwriter::render::background::decode_to_pixmap(&bytes)
+        .expect("decode_to_pixmap must resize and succeed");
+
+    assert_eq!(pixmap.width(), 480, "output must be resized to 480 wide");
+    assert_eq!(pixmap.height(), 480, "output must be resized to 480 tall");
+}
+
+// ---------------------------------------------------------------------------
+// SvgRenderer compositing tests (plan Task 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_renderer_composites_background_under_transparent_layout() {
+    let bg_bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
+    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+
+    // No canvas-fill rect — layout canvas is transparent except for text
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <text x="240" y="240" fill="#ffffff" text-anchor="middle">hi</text>
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    renderer.set_background(Some(bg));
+
+    let frame = renderer.render(&Default::default()).unwrap();
+    // Top-left pixel (0,0): no text there, so bg red shows through
+    assert_eq!(frame.data[0], 255, "R should be 255 (bg red)");
+    assert_eq!(frame.data[1], 0,   "G should be 0");
+    assert_eq!(frame.data[2], 0,   "B should be 0");
+}
+
+#[test]
+fn svg_renderer_renders_normally_without_background() {
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#0000ff"/>
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    // No set_background call — should still render fine
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[2], 255, "B should be 255 (the rect's blue)");
+    assert_eq!(frame.data[0], 0,   "R should be 0");
+    assert_eq!(frame.data[1], 0,   "G should be 0");
+}
+
+/// Simulates the tick loop's `frame_source.set_background(bg)` call on a live
+/// Box<dyn FrameSource>. Verifies that calling set_background on the trait object
+/// immediately changes the rendered output — the fix for the cf2fd97 blocker.
+#[test]
+fn frame_source_set_background_applies_to_running_renderer() {
+    use thermalwriter::render::FrameSource;
+
+    // Transparent layout — no canvas fill, so background shows through at (0,0)
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <text x="240" y="240" fill="#ffffff" text-anchor="middle">live</text>
+    </svg>"##;
+
+    let mut source: Box<dyn FrameSource> = Box::new(SvgRenderer::new(template, 480, 480).unwrap());
+
+    // Before: no background — pixel (0,0) should be black (transparent canvas)
+    let frame_before = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_before.data[0], 0, "R before: should be 0 (no bg)");
+    assert_eq!(frame_before.data[1], 0, "G before: should be 0 (no bg)");
+    assert_eq!(frame_before.data[2], 0, "B before: should be 0 (no bg)");
+
+    // Apply background via trait method — same path the tick loop uses
+    let bg_bytes = make_solid_color_png(480, 480, 0, 255, 0); // solid green
+    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+    source.set_background(Some(bg));
+
+    // After: green background shows through transparent canvas at (0,0)
+    let frame_after = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_after.data[0], 0,   "R after: should be 0 (green bg)");
+    assert_eq!(frame_after.data[1], 255, "G after: should be 255 (green bg)");
+    assert_eq!(frame_after.data[2], 0,   "B after: should be 0 (green bg)");
+
+    // Clear background — pixel (0,0) returns to black
+    source.set_background(None);
+    let frame_cleared = source.render(&Default::default()).unwrap();
+    assert_eq!(frame_cleared.data[0], 0, "R cleared: should be 0 (no bg)");
+    assert_eq!(frame_cleared.data[1], 0, "G cleared: should be 0 (no bg)");
+    assert_eq!(frame_cleared.data[2], 0, "B cleared: should be 0 (no bg)");
+}
+
+// Regression test: daemon starts with a no-history layout (e.g., arc-gauge), then
+// switches to a history layout (e.g., neon-dash-v2). The shared SensorHistory must
+// have the new metrics configured before set_history is called, otherwise graph()
+// finds cpu_temp_history undefined and the render fails every tick.
+#[test]
+fn layout_switch_from_no_history_to_history_layout_renders_without_error() {
+    // Simulate startup: create a shared history with no metrics configured
+    // (matches daemon startup when initial layout has empty frontmatter.history_configs).
+    let shared_history = Arc::new(Mutex::new(SensorHistory::new()));
+
+    // Layout that uses graph() — requires cpu_temp_history to be in context.
+    let history_template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#000000"/>
+        {{ graph(data=cpu_temp_history, x=0, y=0, w=480, h=240, stroke="#ff0000", style="line") }}
+    </svg>"##;
+
+    // Simulate the fixed reload path: parse frontmatter, configure new metrics,
+    // then pass the shared history to the new renderer.
+    // (configure_metric is idempotent — safe to call even if already present.)
+    {
+        let mut h = shared_history.lock().unwrap();
+        h.configure_metric("cpu_temp", std::time::Duration::from_secs(30));
+    }
+
+    let mut renderer = SvgRenderer::new(history_template, 480, 480).unwrap();
+    renderer.set_history(shared_history.clone());
+
+    // Even with an empty history buffer (no recorded samples yet), the render
+    // must succeed — graph() receives an empty series, not a missing variable.
+    let result = renderer.render(&HashMap::new());
+    assert!(
+        result.is_ok(),
+        "Render should succeed after configure_metric on shared history; got: {:#}",
+        result.unwrap_err()
+    );
 }

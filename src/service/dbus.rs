@@ -1,6 +1,7 @@
 // D-Bus interface: exposes service control via com.thermalwriter.Display.
 // Methods: set_layout, get_status, list_layouts, list_sensors, stop, reload,
-//          get_layout_vars, set_layout_vars.
+//          get_layout_vars, set_layout_vars, set_background, clear_background,
+//          list_backgrounds.
 // Properties: active_layout, connected, resolution, tick_rate.
 // Signals: layout_changed, device_connected, device_disconnected, error.
 
@@ -24,6 +25,8 @@ pub enum ModeChange {
     },
     /// Switch to xvfb capture mode with the given shell command.
     Xvfb { command: String },
+    /// Set or clear the global background image.
+    Background { image: Option<tiny_skia::Pixmap> },
 }
 
 /// Shared state between the D-Bus interface and the tick loop.
@@ -47,6 +50,10 @@ pub struct ServiceState {
     pub config: Config,
     /// Notify the daemon to switch display mode or layout.
     pub mode_change_tx: tokio::sync::mpsc::Sender<ModeChange>,
+    /// Directory containing background image files.
+    pub background_dir: PathBuf,
+    /// Currently active decoded background pixmap (premultiplied RGBA 480x480).
+    pub current_background: Option<tiny_skia::Pixmap>,
 }
 
 pub struct DisplayInterface {
@@ -64,24 +71,19 @@ impl DisplayInterface {
 // Factored out so tests can call them without binding a D-Bus service name.
 // ---------------------------------------------------------------------------
 
-/// Resolve `name` against `layout_dir` and return the canonical path if and
-/// only if it stays within the layout directory. Rejects:
-///   - absolute paths (`/etc/passwd`),
-///   - any name containing a `..` parent-traversal component,
-///   - symlink targets that point outside `layout_dir`,
-///   - names that do not resolve to an existing file.
-///
-/// Canonicalizing both sides before `starts_with` defeats symlink escapes.
-pub fn validate_layout_path(
-    layout_dir: &Path,
+/// Shared traversal guard: resolve `name` against `base_dir` and return the
+/// canonical path only if it stays within the directory. Rejects absolute paths,
+/// `..` components, symlink escapes, and non-existent names.
+/// `kind` labels error messages ("Layout", "Background").
+fn validate_path_within_dir(
+    base_dir: &Path,
     name: &str,
+    kind: &str,
 ) -> Result<PathBuf, zbus::fdo::Error> {
-    // Structural rejects before touching the filesystem.
     let candidate = Path::new(name);
     if candidate.is_absolute() {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout name must be relative: {}",
-            name
+            "{kind} name must be relative: {name}"
         )));
     }
     if candidate
@@ -89,28 +91,32 @@ pub fn validate_layout_path(
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout name may not contain '..': {}",
-            name
+            "{kind} name may not contain '..': {name}"
         )));
     }
-
-    let base = layout_dir.canonicalize().map_err(|e| {
+    let base = base_dir.canonicalize().map_err(|e| {
         zbus::fdo::Error::Failed(format!(
-            "Layout directory not accessible ({}): {}",
-            layout_dir.display(),
-            e
+            "{kind} directory not accessible ({}): {e}",
+            base_dir.display()
         ))
     })?;
     let resolved = base.join(name).canonicalize().map_err(|_| {
-        zbus::fdo::Error::InvalidArgs(format!("Layout not found: {}", name))
+        zbus::fdo::Error::InvalidArgs(format!("{kind} not found: {name}"))
     })?;
     if !resolved.starts_with(&base) {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "Layout path escapes layout directory: {}",
-            name
+            "{kind} path escapes directory: {name}"
         )));
     }
     Ok(resolved)
+}
+
+/// Resolve `name` against `layout_dir`, rejecting traversal and symlink escapes.
+pub fn validate_layout_path(
+    layout_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, zbus::fdo::Error> {
+    validate_path_within_dir(layout_dir, name, "Layout")
 }
 
 /// List layout files (`.html` and `.svg`) under `layout_dir`, recursing one
@@ -168,6 +174,62 @@ fn has_layout_ext(p: &Path) -> bool {
         p.extension().and_then(|e| e.to_str()),
         Some("html") | Some("svg")
     )
+}
+
+fn has_image_ext(p: &Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()),
+        Some("png") | Some("jpg") | Some("jpeg")
+    )
+}
+
+/// Resolve `name` against `bg_dir`, rejecting traversal and symlink escapes.
+pub fn validate_background_path(
+    bg_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, zbus::fdo::Error> {
+    validate_path_within_dir(bg_dir, name, "Background")
+}
+
+/// List background image files (PNG/JPEG) under `bg_dir`. Flat listing only.
+pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(bg_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name() else { continue; };
+        if path.is_file() && has_image_ext(&path) {
+            out.push(name.to_string_lossy().to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Apply a background change — the non-D-Bus core of `set_background`/`clear_background`:
+///   1. Persist `image` to `config_path` via `Config::save_background_image`.
+///   2. Mirror into in-memory `config.background.image`.
+///   3. Send `ModeChange::Background { image: pixmap }` over `tx`.
+///
+/// `name` is the filename string (for persistence); `pixmap` is the decoded
+/// Pixmap (for the tick loop). Passing `None` for both clears the background.
+pub async fn apply_background(
+    config_path: &Path,
+    config: &mut Config,
+    name: Option<&str>,
+    pixmap: Option<tiny_skia::Pixmap>,
+    tx: &tokio::sync::mpsc::Sender<ModeChange>,
+) -> Result<(), zbus::fdo::Error> {
+    Config::save_background_image(config_path, name).map_err(|e| {
+        zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
+    })?;
+    config.background.image = name.map(|s| s.to_string());
+    tx.send(ModeChange::Background { image: pixmap })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+    Ok(())
 }
 
 /// Read the layout file under `layout_dir` (validated against traversal) and
@@ -341,6 +403,37 @@ impl DisplayInterface {
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Set the global background image by filename (must exist in background_dir).
+    async fn set_background(&self, name: String) -> zbus::fdo::Result<()> {
+        let mut state = self.state.lock().await;
+        let bg_path = validate_background_path(&state.background_dir, &name)?;
+        let pixmap = crate::render::background::decode_from_file(&bg_path).map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e))
+        })?;
+        let config_path = state.config_path.clone();
+        let tx = state.mode_change_tx.clone();
+        apply_background(&config_path, &mut state.config, Some(&name), Some(pixmap.clone()), &tx)
+            .await?;
+        state.current_background = Some(pixmap);
+        Ok(())
+    }
+
+    /// Clear the global background image.
+    async fn clear_background(&self) -> zbus::fdo::Result<()> {
+        let mut state = self.state.lock().await;
+        let config_path = state.config_path.clone();
+        let tx = state.mode_change_tx.clone();
+        apply_background(&config_path, &mut state.config, None, None, &tx).await?;
+        state.current_background = None;
+        Ok(())
+    }
+
+    /// List available background image filenames in the background directory.
+    async fn list_backgrounds(&self) -> Vec<String> {
+        let state = self.state.lock().await;
+        list_backgrounds_impl(&state.background_dir)
     }
 
     /// Signal the daemon to shut down cleanly.

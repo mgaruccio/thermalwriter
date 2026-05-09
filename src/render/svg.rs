@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use resvg::usvg;
 use tera::Tera;
-use tiny_skia::{Pixmap, Transform};
+use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
 use super::frontmatter::LayoutFrontmatter;
 use super::{FrameSource, RawFrame, SensorData};
@@ -32,6 +32,7 @@ pub struct SvgRenderer<'a> {
     theme: Option<ThemePalette>,
     variable_defaults: HashMap<String, String>,
     variable_overrides: HashMap<String, String>,
+    background: Option<Pixmap>,
 }
 
 impl<'a> SvgRenderer<'a> {
@@ -70,6 +71,7 @@ impl<'a> SvgRenderer<'a> {
             theme: None,
             variable_defaults,
             variable_overrides: HashMap::new(),
+            background: None,
         })
     }
 
@@ -87,6 +89,13 @@ impl<'a> SvgRenderer<'a> {
     /// defaults and theme values, so user overrides win.
     pub fn set_layout_vars(&mut self, vars: HashMap<String, String>) {
         self.variable_overrides = vars;
+    }
+
+    /// Set or clear the background image. Must be 480×480 premultiplied-RGBA —
+    /// typically produced via `crate::render::background::decode_to_pixmap`.
+    /// bg.clone() per tick is ~900 KB memcpy; at 2 FPS that's ~2 MB/s — negligible.
+    pub fn set_background(&mut self, bg: Option<Pixmap>) {
+        self.background = bg;
     }
 }
 
@@ -130,8 +139,8 @@ impl FrameSource for SvgRenderer<'static> {
         let tree =
             usvg::Tree::from_str(&svg_string, &self.options).context("Failed to parse SVG")?;
 
-        // Step 4: Render to pixmap at target size
-        let mut pixmap = Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
+        // Step 4: Render layout to its own transparent pixmap
+        let mut layout_pixmap = Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
 
         // Scale the SVG to fit the target canvas
         let svg_size = tree.size();
@@ -139,9 +148,25 @@ impl FrameSource for SvgRenderer<'static> {
         let sy = self.height as f32 / svg_size.height();
         let transform = Transform::from_scale(sx, sy);
 
-        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        resvg::render(&tree, transform, &mut layout_pixmap.as_mut());
 
-        Ok(RawFrame::from_pixmap(&pixmap))
+        // Step 5: Composite — if a background is set, blit it as base then draw layout on top.
+        let final_pixmap = if let Some(ref bg) = self.background {
+            let mut composed = bg.clone();
+            composed.draw_pixmap(
+                0,
+                0,
+                layout_pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            composed
+        } else {
+            layout_pixmap
+        };
+
+        Ok(RawFrame::from_pixmap(&final_pixmap))
     }
 
     fn name(&self) -> &str {
@@ -159,5 +184,9 @@ impl FrameSource for SvgRenderer<'static> {
             .iter()
             .map(|(name, decl)| (name.clone(), decl.default.clone()))
             .collect();
+    }
+
+    fn set_background(&mut self, bg: Option<Pixmap>) {
+        self.background = bg;
     }
 }

@@ -1,5 +1,5 @@
 // Tests for daemon D-Bus helper logic: path validation, layout listing,
-// layout-vars read/write, sensor descriptor exposure.
+// layout-vars read/write, background path validation and apply, sensor descriptors.
 //
 // These tests invoke the helper free-functions and associated-fn impls directly
 // — they do NOT bind com.thermalwriter.Service on the session bus (the real
@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use thermalwriter::config::Config;
 use thermalwriter::service::dbus::{
-    apply_layout_vars, get_layout_vars_impl, list_layouts_impl, validate_layout_path,
+    apply_background, apply_layout_vars, get_layout_vars_impl, list_backgrounds_impl,
+    list_layouts_impl, validate_background_path, validate_layout_path, ModeChange,
 };
 
 // ---------------------------------------------------------------------------
@@ -330,4 +331,164 @@ fn apply_layout_vars_rejects_traversal_before_touching_disk() {
         config.layout_vars.is_empty(),
         "in-memory config.layout_vars must be untouched on traversal reject"
     );
+}
+
+// ---------------------------------------------------------------------------
+// validate_background_path: rejects traversal, absolute paths, symlink escapes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_background_path_rejects_parent_traversal() {
+    let tmp = tempdir().unwrap();
+    let bg_dir = tmp.path().join("backgrounds");
+    fs::create_dir_all(&bg_dir).unwrap();
+    let outside = tmp.path().join("secret.txt");
+    fs::write(&outside, "PWNED").unwrap();
+
+    let result = validate_background_path(&bg_dir, "../secret.txt");
+    assert!(
+        result.is_err(),
+        "parent-traversal name must be rejected, got Ok({:?})",
+        result.ok()
+    );
+}
+
+#[test]
+fn validate_background_path_rejects_absolute_path() {
+    let tmp = tempdir().unwrap();
+    let bg_dir = tmp.path();
+    let result = validate_background_path(bg_dir, "/etc/passwd");
+    assert!(
+        result.is_err(),
+        "absolute path must be rejected, got Ok({:?})",
+        result.ok()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_background_path_rejects_symlink_escape() {
+    let tmp = tempdir().unwrap();
+    let bg_dir = tmp.path().join("backgrounds");
+    fs::create_dir_all(&bg_dir).unwrap();
+    let outside = tmp.path().join("secret.png");
+    fs::write(&outside, b"\x89PNG").unwrap();
+    let link = bg_dir.join("pwn.png");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let result = validate_background_path(&bg_dir, "pwn.png");
+    assert!(
+        result.is_err(),
+        "symlink escape must be rejected, got Ok({:?})",
+        result.ok()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// list_backgrounds_impl: returns PNG/JPEG files only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_backgrounds_returns_png_and_jpeg_only() {
+    let tmp = tempdir().unwrap();
+    let bg_dir = tmp.path();
+    fs::write(bg_dir.join("dark.png"), b"fake").unwrap();
+    fs::write(bg_dir.join("city.jpg"), b"fake").unwrap();
+    fs::write(bg_dir.join("readme.txt"), b"docs").unwrap();
+    fs::write(bg_dir.join("config.toml"), b"[x]").unwrap();
+
+    let bgs = list_backgrounds_impl(bg_dir);
+    assert!(bgs.contains(&"dark.png".to_string()), "must include .png");
+    assert!(bgs.contains(&"city.jpg".to_string()), "must include .jpg");
+    assert!(!bgs.contains(&"readme.txt".to_string()), "must exclude .txt");
+    assert!(!bgs.contains(&"config.toml".to_string()), "must exclude .toml");
+}
+
+// ---------------------------------------------------------------------------
+// apply_background: triple-effect — persists to disk, updates in-memory
+// config.background.image, sends ModeChange::Background over channel
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_background_sets_all_three_effects() {
+    let tmp = tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+    let mut config = Config::default();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+
+        apply_background(&config_path, &mut config, Some("dark.png"), None, &tx)
+            .await
+            .expect("apply_background must succeed");
+
+        // Effect 1: in-memory config updated
+        assert_eq!(
+            config.background.image.as_deref(),
+            Some("dark.png"),
+            "in-memory config.background.image must be set"
+        );
+
+        // Effect 2: on-disk config updated
+        let on_disk = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+        assert_eq!(
+            parsed["background"]["image"].as_str().unwrap(),
+            "dark.png"
+        );
+
+        // Effect 3: ModeChange::Background sent over channel
+        let msg = rx.try_recv().expect("ModeChange::Background must be sent");
+        assert!(
+            matches!(msg, ModeChange::Background { .. }),
+            "expected ModeChange::Background, got {:?}",
+            msg
+        );
+    });
+}
+
+#[test]
+fn apply_background_none_clears_all_three_effects() {
+    let tmp = tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(
+        &config_path,
+        "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.background.image = Some("old.png".to_string());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+
+        apply_background(&config_path, &mut config, None, None, &tx)
+            .await
+            .expect("apply_background(None) must succeed");
+
+        // Effect 1: in-memory config cleared
+        assert_eq!(
+            config.background.image, None,
+            "in-memory config.background.image must be None"
+        );
+
+        // Effect 2: on-disk key removed
+        let on_disk = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+        assert!(
+            parsed.get("background").and_then(|b| b.get("image")).is_none(),
+            "image key must be absent on disk after clear"
+        );
+
+        // Effect 3: ModeChange::Background { image: None } sent
+        let msg = rx.try_recv().expect("ModeChange::Background must be sent");
+        assert!(
+            matches!(msg, ModeChange::Background { image: None }),
+            "expected ModeChange::Background {{image: None}}, got {:?}",
+            msg
+        );
+    });
 }

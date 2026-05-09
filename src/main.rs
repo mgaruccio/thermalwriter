@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, watch, mpsc};
 
 use thermalwriter::cli::{Cli, Command};
 use thermalwriter::config::{Config, builtin_layouts};
-use thermalwriter::render::FrameSource;
+use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::render::TemplateRenderer;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
@@ -62,6 +62,26 @@ async fn main() -> Result<()> {
     // Seed built-in layouts on first run (only if files don't exist)
     builtin_layouts::seed_layout_dir(&layout_dir)?;
 
+    // Seed built-in background images on first run
+    let background_dir = config_dir.join("backgrounds");
+    std::fs::create_dir_all(&background_dir)?;
+    builtin_layouts::seed_background_dir(&background_dir)?;
+
+    // Decode the configured background image at startup (if set)
+    let initial_background: Option<tiny_skia::Pixmap> =
+        if let Some(ref image_name) = config.background.image {
+            let bg_path = background_dir.join(image_name);
+            match bg_decode::decode_from_file(&bg_path) {
+                Ok(pixmap) => Some(pixmap),
+                Err(e) => {
+                    log::warn!("Failed to decode background '{}': {}", image_name, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // Setup USB transport
     let mut transport = BulkUsb::new()?;
     let device_info = transport.handshake()?;
@@ -92,6 +112,8 @@ async fn main() -> Result<()> {
     // Shared shutdown + template channels
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (template_tx, template_rx) = watch::channel(String::new());
+    // Background watch channel: mode-change listener → tick loop (immediate apply)
+    let (background_tx, background_rx) = watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
@@ -118,14 +140,12 @@ async fn main() -> Result<()> {
             };
 
             let frontmatter = LayoutFrontmatter::parse(&template);
-            let sensor_history = if !frontmatter.history_configs.is_empty() {
+            let sensor_history = {
                 let mut history = SensorHistory::new();
                 for (metric, cfg) in &frontmatter.history_configs {
                     history.configure_metric(metric, cfg.duration);
                 }
                 Some(Arc::new(std::sync::Mutex::new(history)))
-            } else {
-                None
             };
 
             let theme_palette = if let Some(manual) = config.theme.manual.clone() {
@@ -147,6 +167,7 @@ async fn main() -> Result<()> {
                         .cloned()
                         .unwrap_or_default(),
                 );
+                renderer.set_background(initial_background.clone());
                 Box::new(renderer)
             } else {
                 Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
@@ -170,18 +191,31 @@ async fn main() -> Result<()> {
         sensor_descriptors,
         config: config.clone(),
         mode_change_tx: mode_tx,
+        background_dir: background_dir.clone(),
+        current_background: initial_background.clone(),
     }));
 
     // Start D-Bus service (connection must stay alive)
     let _connection = dbus::serve(state.clone()).await?;
     info!("D-Bus service started");
 
-    // Mode change listener: handles both layout switches and xvfb mode activation
+    // Theme palette for the mode-change handler to use on layout reload.
+    // Computed here (outside the if/else block) so it can be moved into the spawn closure.
+    let reload_theme = if let Some(manual) = config.theme.manual.clone() {
+        manual
+    } else {
+        ThemePalette::default()
+    };
+
+    // Mode change listener: handles layout switches, xvfb mode, and background changes.
     let layout_dir_clone = layout_dir.clone();
     let xvfb_tick_rate_cfg = xvfb_tick_rate;
+    let reload_history = initial_sensor_history.clone();
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
+        // Tracks the active background so layout switches preserve it.
+        let mut current_background: Option<tiny_skia::Pixmap> = initial_background;
 
         while let Some(change) = mode_rx.recv().await {
             match change {
@@ -191,12 +225,27 @@ async fn main() -> Result<()> {
                     let path = layout_dir_clone.join(&name);
                     match std::fs::read_to_string(&path) {
                         Ok(template) => {
+                            // Parse frontmatter and register any new history metrics.
+                            // configure_metric is idempotent — existing buffers are preserved.
+                            let new_fm = LayoutFrontmatter::parse(&template);
+                            if let Some(ref hist) = reload_history {
+                                if let Ok(mut h) = hist.lock() {
+                                    for (metric, cfg) in &new_fm.history_configs {
+                                        h.configure_metric(metric, cfg.duration);
+                                    }
+                                }
+                            }
                             let is_svg = name.ends_with(".svg");
                             let new_source: Box<dyn FrameSource> = if is_svg {
                                 match SvgRenderer::new(&template, 480, 480) {
                                     Ok(mut r) => {
-                                        r.set_theme(ThemePalette::default());
+                                        r.set_theme(reload_theme.clone());
+                                        if let Some(ref hist) = reload_history {
+                                            r.set_history(hist.clone());
+                                        }
                                         r.set_layout_vars(vars);
+                                        // Preserve background across layout switches
+                                        r.set_background(current_background.clone());
                                         Box::new(r)
                                     }
                                     Err(e) => {
@@ -222,6 +271,13 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
                     }
+                }
+                ModeChange::Background { image } => {
+                    current_background = image.clone();
+                    // Push to tick loop immediately so the running renderer updates
+                    // without waiting for a layout switch.
+                    let _ = background_tx.send(image.clone());
+                    info!("Background updated ({})", if image.is_some() { "set" } else { "cleared" });
                 }
                 ModeChange::Xvfb { command } => {
                     // Drop previous xvfb handle before starting a new one
@@ -259,6 +315,7 @@ async fn main() -> Result<()> {
         jpeg_quality,
         rotation,
         template_rx,
+        background_rx,
         shutdown_rx,
         initial_sensor_history,
         sensor_poll_interval,

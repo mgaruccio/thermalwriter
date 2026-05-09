@@ -25,9 +25,6 @@ fps_label: text = "FPS" "Frame rate label"
     </linearGradient>
   </defs>
 
-  <!-- Background -->
-  <rect width="480" height="480" rx="0" fill="{{ theme_background }}"/>
-
   <!-- CPU Panel -->
   <rect x="16" y="16" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
   <rect x="16" y="16" width="4" height="172" rx="2" fill="{{ theme_primary }}"/>

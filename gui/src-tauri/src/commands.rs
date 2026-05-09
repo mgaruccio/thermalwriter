@@ -20,6 +20,7 @@ use crate::error::AppError;
 /// since rendering is CPU-bound and not held across `.await`).
 pub struct RendererState {
     pub layout_dir: PathBuf,
+    pub background_dir: PathBuf,
     pub config_path: PathBuf,
     cache: Mutex<RendererCache>,
 }
@@ -32,9 +33,10 @@ struct RendererCache {
 }
 
 impl RendererState {
-    pub fn new(layout_dir: PathBuf, config_path: PathBuf) -> Self {
+    pub fn new(layout_dir: PathBuf, background_dir: PathBuf, config_path: PathBuf) -> Self {
         Self {
             layout_dir,
+            background_dir,
             config_path,
             cache: Mutex::new(RendererCache {
                 current_layout: None,
@@ -237,6 +239,69 @@ pub async fn apply_to_daemon(
     Ok(())
 }
 
+// ---- background commands ----
+
+#[tauri::command]
+pub fn list_backgrounds(
+    state: tauri::State<'_, RendererState>,
+) -> Result<Vec<String>, AppError> {
+    Ok(list_background_names(&state.background_dir))
+}
+
+#[tauri::command]
+pub async fn set_background(
+    name: Option<String>,
+    state: tauri::State<'_, RendererState>,
+) -> Result<(), AppError> {
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+
+    match name {
+        None => proxy
+            .clear_background()
+            .await
+            .map_err(|e| AppError::DaemonCall(format!("clear_background failed: {e}")))?,
+        Some(ref n) => {
+            // Validate path before touching D-Bus — prevents traversal even if
+            // the daemon also validates, since the GUI is a trust boundary.
+            validate_background_path(&state.background_dir, n)?;
+            proxy
+                .set_background(n)
+                .await
+                .map_err(|e| AppError::DaemonCall(format!("set_background failed: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_background(
+    name: Option<String>,
+    state: tauri::State<'_, RendererState>,
+) -> Result<(), AppError> {
+    if let Some(ref n) = name {
+        validate_background_path(&state.background_dir, n)?;
+    }
+    Config::save_background_image(&state.config_path, name.as_deref())
+        .map_err(|e| AppError::BackgroundIo(e.to_string()))
+}
+
+#[tauri::command]
+pub fn get_active_background(
+    state: tauri::State<'_, RendererState>,
+) -> Result<Option<String>, AppError> {
+    let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
+    Ok(config.background.image)
+}
+
 // ---- helpers ----
 
 fn list_layout_names(layout_dir: &Path) -> Vec<String> {
@@ -286,6 +351,59 @@ fn has_layout_ext(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("html") | Some("svg")
     )
+}
+
+fn list_background_names(bg_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(bg_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.is_file() && has_background_ext(&p) {
+                p.file_name().map(|n| n.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn has_background_ext(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("png") | Some("jpg") | Some("jpeg")
+    )
+}
+
+/// Resolve a background filename relative to the background directory, rejecting
+/// any path that escapes via `..`, absolute paths, or symlinks pointing outside.
+fn validate_background_path(bg_dir: &Path, name: &str) -> Result<PathBuf, AppError> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AppError::InvalidBackground(name.to_string()));
+    }
+
+    let base = bg_dir
+        .canonicalize()
+        .map_err(|e| AppError::InvalidBackground(format!("background dir not accessible: {e}")))?;
+    let resolved = base
+        .join(name)
+        .canonicalize()
+        .map_err(|_| AppError::BackgroundNotFound(name.to_string()))?;
+    if !resolved.starts_with(&base) {
+        return Err(AppError::InvalidBackground(format!(
+            "{name} escapes background directory"
+        )));
+    }
+    Ok(resolved)
 }
 
 /// Resolve a layout name relative to the layout directory, rejecting any path
@@ -466,8 +584,10 @@ mod tests {
         let svg_dir = layout_dir.join("svg");
         fs::create_dir_all(&svg_dir).unwrap();
         fs::write(svg_dir.join("simple.svg"), SIMPLE_SVG).unwrap();
+        let background_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&background_dir).unwrap();
         let config_path = tmp.path().join("config.toml");
-        RendererState::new(layout_dir, config_path)
+        RendererState::new(layout_dir, background_dir, config_path)
     }
 
     // ---- pixel format / byte count ----
@@ -639,6 +759,121 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(saved.get("accent").map(String::as_str), Some("#ff00aa"));
+    }
+
+    // ---- background path validation ----
+
+    fn make_bg_dir(tmp: &TempDir) -> PathBuf {
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        // Seed two valid background files
+        fs::write(bg_dir.join("dark-solid.png"), b"PNG").unwrap();
+        fs::write(bg_dir.join("hex-grid.png"), b"PNG").unwrap();
+        bg_dir
+    }
+
+    #[test]
+    fn validate_background_path_rejects_parent_dir_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = make_bg_dir(&tmp);
+        let outside = tmp.path().join("outside.png");
+        fs::write(&outside, b"PNG").unwrap();
+        let err = validate_background_path(&bg_dir, "../outside.png")
+            .expect_err("must reject ..");
+        assert!(matches!(err, AppError::InvalidBackground(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validate_background_path_rejects_absolute_paths() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = make_bg_dir(&tmp);
+        let err = validate_background_path(&bg_dir, "/etc/passwd")
+            .expect_err("must reject absolute path");
+        assert!(matches!(err, AppError::InvalidBackground(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validate_background_path_rejects_symlink_escape() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = make_bg_dir(&tmp);
+        let outside = tmp.path().join("outside.png");
+        fs::write(&outside, b"PNG").unwrap();
+        let link = bg_dir.join("escape.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = validate_background_path(&bg_dir, "escape.png")
+            .expect_err("symlink escape must be rejected");
+        assert!(matches!(err, AppError::InvalidBackground(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validate_background_path_accepts_legit_file() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = make_bg_dir(&tmp);
+        let resolved = validate_background_path(&bg_dir, "dark-solid.png")
+            .expect("legit file must resolve");
+        assert!(resolved.ends_with("dark-solid.png"));
+    }
+
+    // ---- list_backgrounds semantics ----
+
+    #[test]
+    fn list_background_names_returns_sorted_png_jpeg_only() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        fs::write(bg_dir.join("zebra.png"), b"PNG").unwrap();
+        fs::write(bg_dir.join("alpha.jpg"), b"JPG").unwrap();
+        fs::write(bg_dir.join("middle.jpeg"), b"JPEG").unwrap();
+        fs::write(bg_dir.join("ignored.txt"), b"txt").unwrap();
+        fs::write(bg_dir.join("ignored.svg"), b"svg").unwrap();
+
+        let names = list_background_names(&bg_dir);
+        assert_eq!(names, vec!["alpha.jpg", "middle.jpeg", "zebra.png"],
+            "must be sorted, PNG/JPEG only, no .txt or .svg");
+    }
+
+    #[test]
+    fn list_background_names_returns_empty_for_missing_dir() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds_nonexistent");
+        let names = list_background_names(&bg_dir);
+        assert!(names.is_empty(), "missing dir must yield empty list, not panic");
+    }
+
+    // ---- get_active_background semantics ----
+
+    #[test]
+    fn get_active_background_returns_none_when_no_config() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        // Config file doesn't exist yet — should load defaults cleanly
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.background.image, None,
+            "fresh config must have no active background");
+    }
+
+    #[test]
+    fn get_active_background_returns_saved_image_name() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        Config::save_background_image(&config_path, Some("dark-solid.png")).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(
+            config.background.image.as_deref(),
+            Some("dark-solid.png"),
+            "must round-trip the saved image name"
+        );
+    }
+
+    #[test]
+    fn get_active_background_returns_none_after_clear() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        Config::save_background_image(&config_path, Some("dark-solid.png")).unwrap();
+        Config::save_background_image(&config_path, None).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.background.image, None,
+            "clearing image must persist as None");
     }
 
     // ---- variable validation ----

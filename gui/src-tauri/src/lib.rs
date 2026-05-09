@@ -17,15 +17,20 @@ pub fn run() {
     }
 
     let config_path = Config::default_path();
-    let layout_dir = config_path
+    let config_dir = config_path
         .parent()
-        .map(|p| p.join("layouts"))
-        .unwrap_or_else(|| PathBuf::from("layouts"));
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let layout_dir = config_dir.join("layouts");
+    let background_dir = config_dir.join("backgrounds");
     std::fs::create_dir_all(&layout_dir).expect("failed to create layout directory");
+    std::fs::create_dir_all(&background_dir).expect("failed to create background directory");
     builtin_layouts::seed_layout_dir(&layout_dir).expect("failed to seed built-in layouts");
+    builtin_layouts::seed_background_dir(&background_dir)
+        .expect("failed to seed built-in backgrounds");
 
     tauri::Builder::default()
-        .manage(commands::RendererState::new(layout_dir, config_path))
+        .manage(commands::RendererState::new(layout_dir, background_dir, config_path))
         .invoke_handler(tauri::generate_handler![
             commands::list_layouts,
             commands::get_layout_vars,
@@ -34,6 +39,10 @@ pub fn run() {
             commands::render_preview,
             commands::save_config,
             commands::apply_to_daemon,
+            commands::list_backgrounds,
+            commands::set_background,
+            commands::save_background,
+            commands::get_active_background,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

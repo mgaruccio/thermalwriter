@@ -66,7 +66,6 @@ tick_rate = 5
     // ThemeConfig should use defaults when absent
     assert_eq!(cfg.theme.source, "");
     assert!(cfg.theme.manual.is_none());
-    assert!(cfg.theme.background_image.is_none());
 }
 
 #[test]

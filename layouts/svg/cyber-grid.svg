@@ -11,10 +11,6 @@ vram_label: text = "VRAM" "Video memory label"
 #}
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
   <defs>
-    <linearGradient id="bgG" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0a0a1a"/>
-      <stop offset="100%" stop-color="#050510"/>
-    </linearGradient>
     <linearGradient id="hotGrad" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="{{ cpu_color }}"/>
       <stop offset="100%" stop-color="#ff6633"/>
@@ -44,8 +40,7 @@ vram_label: text = "VRAM" "Video memory label"
     </pattern>
   </defs>
 
-  <!-- Background -->
-  <rect width="480" height="480" fill="url(#bgG)"/>
+  <!-- Scanline overlay (intentional cosmetic, composites over any background) -->
   <rect width="480" height="480" fill="url(#scanlines)"/>
 
   <!-- Decorative grid lines -->

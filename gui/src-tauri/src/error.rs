@@ -31,6 +31,15 @@ pub enum AppError {
 
     #[error("daemon call failed: {0}")]
     DaemonCall(String),
+
+    #[error("invalid background name: {0}")]
+    InvalidBackground(String),
+
+    #[error("background not found: {0}")]
+    BackgroundNotFound(String),
+
+    #[error("failed to read/write background: {0}")]
+    BackgroundIo(String),
 }
 
 impl serde::Serialize for AppError {
