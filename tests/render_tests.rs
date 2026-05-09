@@ -245,3 +245,41 @@ fn decode_resizes_non_480_input_to_480() {
     assert_eq!(pixmap.width(), 480, "output must be resized to 480 wide");
     assert_eq!(pixmap.height(), 480, "output must be resized to 480 tall");
 }
+
+// ---------------------------------------------------------------------------
+// SvgRenderer compositing tests (plan Task 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_renderer_composites_background_under_transparent_layout() {
+    let bg_bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
+    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+
+    // No canvas-fill rect — layout canvas is transparent except for text
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <text x="240" y="240" fill="#ffffff" text-anchor="middle">hi</text>
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    renderer.set_background(Some(bg));
+
+    let frame = renderer.render(&Default::default()).unwrap();
+    // Top-left pixel (0,0): no text there, so bg red shows through
+    assert_eq!(frame.data[0], 255, "R should be 255 (bg red)");
+    assert_eq!(frame.data[1], 0,   "G should be 0");
+    assert_eq!(frame.data[2], 0,   "B should be 0");
+}
+
+#[test]
+fn svg_renderer_renders_normally_without_background() {
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <rect width="480" height="480" fill="#0000ff"/>
+    </svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    // No set_background call — should still render fine
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[2], 255, "B should be 255 (the rect's blue)");
+    assert_eq!(frame.data[0], 0,   "R should be 0");
+    assert_eq!(frame.data[1], 0,   "G should be 0");
+}
