@@ -4,6 +4,65 @@ use std::collections::HashMap;
 use std::io::Write;
 use tempfile::{NamedTempFile, tempdir};
 
+// ---------------------------------------------------------------------------
+// BackgroundConfig — [background] section parsing and backwards compat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_parses_background_image_field() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"
+[display]
+tick_rate = 2
+
+[background]
+image = "skyline.png"
+"#).unwrap();
+
+    let cfg = Config::load(f.path()).unwrap();
+    assert_eq!(
+        cfg.background.image,
+        Some("skyline.png".to_string()),
+        "background.image should be Some(\"skyline.png\")"
+    );
+}
+
+#[test]
+fn config_without_background_section_defaults_to_none() {
+    // Existing config files have no [background] section — they must load cleanly.
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"
+[display]
+tick_rate = 2
+
+[sensors]
+poll_interval_ms = 1000
+"#).unwrap();
+
+    let cfg = Config::load(f.path()).unwrap();
+    assert_eq!(
+        cfg.background.image,
+        None,
+        "background.image should be None when [background] section is absent"
+    );
+}
+
+#[test]
+fn config_without_theme_section_still_loads() {
+    // After deleting theme.background_image, configs without [theme] must still parse.
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"
+[display]
+tick_rate = 2
+"#).unwrap();
+
+    // Must not error — the theme section is entirely optional
+    let cfg = Config::load(f.path()).unwrap();
+    assert_eq!(cfg.display.tick_rate, 2);
+    assert!(cfg.theme.manual.is_none());
+    assert_eq!(cfg.background.image, None);
+}
+
 #[test]
 fn config_loads_from_valid_toml() {
     let mut f = NamedTempFile::new().unwrap();

@@ -78,8 +78,16 @@ impl Default for XvfbConfig {
 #[serde(default)]
 pub struct ThemeConfig {
     pub source: String,
-    pub background_image: Option<String>,
     pub manual: Option<ThemePalette>,
+}
+
+/// Background image configuration. The image file lives under
+/// `~/.config/thermalwriter/backgrounds/`. Empty/None = no background.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Filename (no path) of the active background. None = no background.
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -89,6 +97,7 @@ pub struct Config {
     pub sensors: SensorsConfig,
     pub theme: ThemeConfig,
     pub xvfb: XvfbConfig,
+    pub background: BackgroundConfig,
     /// Per-layout variable overrides keyed by layout filename.
     /// The outer map is `{layout_name: {var_name: value}}`.
     pub layout_vars: HashMap<String, HashMap<String, String>>,
