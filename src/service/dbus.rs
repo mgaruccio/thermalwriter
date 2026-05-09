@@ -199,10 +199,9 @@ pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let Some(name) = path.file_name() else { continue; };
         if path.is_file() && has_image_ext(&path) {
-            if let Some(name) = path.file_name() {
-                out.push(name.to_string_lossy().to_string());
-            }
+            out.push(name.to_string_lossy().to_string());
         }
     }
     out.sort();
