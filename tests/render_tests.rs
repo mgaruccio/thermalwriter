@@ -7,6 +7,15 @@ use thermalwriter::theme::ThemePalette;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+fn make_solid_color_png(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+    use image::{ImageBuffer, Rgb, ImageFormat};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, ImageFormat::Png).unwrap();
+    buf.into_inner()
+}
+
 #[test]
 fn parse_style_extracts_flex_properties() {
     let style = parse_style("display: flex; flex-direction: column; gap: 8px;");
@@ -202,4 +211,37 @@ fn svg_renderer_uses_configured_theme_not_default() {
 
     // Verify it's NOT the default color
     assert_ne!(frame.data[0], 0xe9, "Should not be the default theme primary R=0xe9");
+}
+
+// ---------------------------------------------------------------------------
+// Background decode module tests (plan Task 5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decode_png_to_pixmap_roundtrips_dimensions_and_pixel_values() {
+    let bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
+    let pixmap = thermalwriter::render::background::decode_to_pixmap(&bytes)
+        .expect("decode_to_pixmap must succeed on valid PNG");
+
+    assert_eq!(pixmap.width(), 480, "decoded pixmap must be 480 wide");
+    assert_eq!(pixmap.height(), 480, "decoded pixmap must be 480 tall");
+
+    // Center pixel (240, 240): premultiplied RGBA. For a fully opaque red pixel,
+    // premultiplied == straight: R=255, G=0, B=0, A=255.
+    let idx = (240 * 480 + 240) * 4;
+    let data = pixmap.data();
+    assert_eq!(data[idx],     255, "center pixel R should be 255 (red)");
+    assert_eq!(data[idx + 1],   0, "center pixel G should be 0");
+    assert_eq!(data[idx + 2],   0, "center pixel B should be 0");
+    assert_eq!(data[idx + 3], 255, "center pixel A should be 255 (fully opaque)");
+}
+
+#[test]
+fn decode_resizes_non_480_input_to_480() {
+    let bytes = make_solid_color_png(800, 600, 0, 255, 0); // solid green, non-LCD size
+    let pixmap = thermalwriter::render::background::decode_to_pixmap(&bytes)
+        .expect("decode_to_pixmap must resize and succeed");
+
+    assert_eq!(pixmap.width(), 480, "output must be resized to 480 wide");
+    assert_eq!(pixmap.height(), 480, "output must be resized to 480 tall");
 }

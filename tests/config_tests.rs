@@ -371,3 +371,61 @@ cpu_label = "CPU"
     assert_eq!(lv.get("theme_primary").unwrap(), "#00ff88");
     assert_eq!(lv.get("cpu_label").unwrap(), "CPU");
 }
+
+// ---------------------------------------------------------------------------
+// Config::save_background_image — toml_edit-backed persistence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn save_background_image_writes_image_field() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    std::fs::write(&path, "[display]\ntick_rate = 2\n").unwrap();
+
+    Config::save_background_image(&path, Some("skyline.png")).unwrap();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let reloaded: toml::Value = toml::from_str(&contents).unwrap();
+    assert_eq!(
+        reloaded["background"]["image"].as_str().unwrap(),
+        "skyline.png"
+    );
+}
+
+#[test]
+fn save_background_image_none_removes_image_key() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    std::fs::write(&path, "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n").unwrap();
+
+    Config::save_background_image(&path, None).unwrap();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let reloaded: toml::Value = toml::from_str(&contents).unwrap();
+    assert!(
+        reloaded.get("background").and_then(|b| b.get("image")).is_none(),
+        "image key should be absent after save_background_image(None)"
+    );
+}
+
+#[test]
+fn save_background_image_preserves_user_comments() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    let original = "\
+# my hand-edited config
+[display]
+tick_rate = 2
+";
+    std::fs::write(&path, original).unwrap();
+
+    Config::save_background_image(&path, Some("bg.png")).unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains("# my hand-edited config"),
+        "user comment must survive save_background_image; got:\n{}",
+        after
+    );
+    assert!(after.contains("bg.png"), "image value must be written");
+}
