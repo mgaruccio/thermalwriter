@@ -70,6 +70,8 @@ pub trait FrameSource: Send {
     fn name(&self) -> &str;
     /// Hot-swap the template. Default no-op for frame sources that don't use templates.
     fn set_template(&mut self, _template: &str) {}
+    /// Set or clear the global background image. Default no-op — only SvgRenderer overrides.
+    fn set_background(&mut self, _bg: Option<Pixmap>) {}
 }
 
 /// Renders HTML/CSS templates with sensor data substitution.

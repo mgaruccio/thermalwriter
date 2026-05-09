@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, watch, mpsc};
 
 use thermalwriter::cli::{Cli, Command};
 use thermalwriter::config::{Config, builtin_layouts};
-use thermalwriter::render::FrameSource;
+use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::render::TemplateRenderer;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
@@ -61,6 +61,26 @@ async fn main() -> Result<()> {
 
     // Seed built-in layouts on first run (only if files don't exist)
     builtin_layouts::seed_layout_dir(&layout_dir)?;
+
+    // Seed built-in background images on first run
+    let background_dir = config_dir.join("backgrounds");
+    std::fs::create_dir_all(&background_dir)?;
+    builtin_layouts::seed_background_dir(&background_dir)?;
+
+    // Decode the configured background image at startup (if set)
+    let initial_background: Option<tiny_skia::Pixmap> =
+        if let Some(ref image_name) = config.background.image {
+            let bg_path = background_dir.join(image_name);
+            match bg_decode::decode_from_file(&bg_path) {
+                Ok(pixmap) => Some(pixmap),
+                Err(e) => {
+                    log::warn!("Failed to decode background '{}': {}", image_name, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     // Setup USB transport
     let mut transport = BulkUsb::new()?;
@@ -147,6 +167,7 @@ async fn main() -> Result<()> {
                         .cloned()
                         .unwrap_or_default(),
                 );
+                renderer.set_background(initial_background.clone());
                 Box::new(renderer)
             } else {
                 Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
@@ -170,6 +191,8 @@ async fn main() -> Result<()> {
         sensor_descriptors,
         config: config.clone(),
         mode_change_tx: mode_tx,
+        background_dir: background_dir.clone(),
+        current_background: initial_background.clone(),
     }));
 
     // Start D-Bus service (connection must stay alive)
@@ -184,13 +207,15 @@ async fn main() -> Result<()> {
         ThemePalette::default()
     };
 
-    // Mode change listener: handles both layout switches and xvfb mode activation
+    // Mode change listener: handles layout switches, xvfb mode, and background changes.
     let layout_dir_clone = layout_dir.clone();
     let xvfb_tick_rate_cfg = xvfb_tick_rate;
     let reload_history = initial_sensor_history.clone();
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
+        // Tracks the active background so layout switches preserve it.
+        let mut current_background: Option<tiny_skia::Pixmap> = initial_background;
 
         while let Some(change) = mode_rx.recv().await {
             match change {
@@ -209,6 +234,8 @@ async fn main() -> Result<()> {
                                             r.set_history(hist.clone());
                                         }
                                         r.set_layout_vars(vars);
+                                        // Preserve background across layout switches
+                                        r.set_background(current_background.clone());
                                         Box::new(r)
                                     }
                                     Err(e) => {
@@ -234,6 +261,15 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
                     }
+                }
+                ModeChange::Background { image } => {
+                    current_background = image.clone();
+                    // The source_tx hot-swap path isn't used here — we call set_background
+                    // on the next layout rebuild. For the currently running renderer, we
+                    // send a layout reload with the same name to apply the new background.
+                    // This keeps the background update simple: state.current_background is
+                    // already updated by the D-Bus method before sending this message.
+                    info!("Background updated ({})", if image.is_some() { "set" } else { "cleared" });
                 }
                 ModeChange::Xvfb { command } => {
                     // Drop previous xvfb handle before starting a new one
