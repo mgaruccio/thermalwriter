@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import BgGallery from "./lib/BgGallery.svelte";
 
   type LayoutSummary = {
     name: string;
@@ -27,6 +28,8 @@
   let sensors = $state<SensorDescriptor[]>([]);
   let values = $state<Record<string, string>>({});
   let selectedLayout = $state("");
+  let backgrounds = $state<string[]>([]);
+  let selectedBackground = $state<string | null>(null);
   let loading = $state(true);
   let previewing = $state(false);
   let applying = $state(false);
@@ -39,12 +42,16 @@
 
   onMount(async () => {
     try {
-      const [layoutList, sensorList] = await Promise.all([
+      const [layoutList, sensorList, bgList, activeBg] = await Promise.all([
         invoke<LayoutSummary[]>("list_layouts"),
         invoke<SensorDescriptor[]>("list_sensors"),
+        invoke<string[]>("list_backgrounds"),
+        invoke<string | null>("get_active_background"),
       ]);
       layouts = layoutList;
       sensors = sensorList;
+      backgrounds = bgList;
+      selectedBackground = activeBg;
       const firstConfigurable = layouts.find((layout) => layout.configurable) ?? layouts[0];
       if (firstConfigurable) {
         await selectLayout(firstConfigurable.name);
@@ -115,6 +122,10 @@
         layout: selectedLayout,
         vars: values,
       });
+      // Persist background selection independently — survives daemon restarts
+      // even if the live apply below fails.
+      await invoke<void>("save_background", { name: selectedBackground });
+
       // Then ask the running daemon to switch live. If the daemon isn't
       // running we still kept the user's edits via save_config above.
       try {
@@ -122,6 +133,8 @@
           layout: selectedLayout,
           vars: values,
         });
+        // Apply background live — separate D-Bus call, daemon-only.
+        await invoke<void>("set_background", { name: selectedBackground });
         status = `Applied ${selectedLayout} to daemon.`;
       } catch (e) {
         const message = String(e);
@@ -163,6 +176,17 @@
         {/each}
       {/if}
     </div>
+
+    {#if !loading && backgrounds.length > 0}
+      <div class="sidebar-section">
+        <h3>Background</h3>
+        <BgGallery
+          {backgrounds}
+          selected={selectedBackground}
+          onselect={(name) => { selectedBackground = name; }}
+        />
+      </div>
+    {/if}
   </aside>
 
   <section class="preview-pane">

@@ -41,6 +41,7 @@ pub fn run() {
             commands::apply_to_daemon,
             commands::list_backgrounds,
             commands::set_background,
+            commands::save_background,
             commands::get_active_background,
         ])
         .run(tauri::generate_context!())

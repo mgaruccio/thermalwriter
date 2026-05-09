@@ -279,11 +279,19 @@ pub async fn set_background(
                 .map_err(|e| AppError::DaemonCall(format!("set_background failed: {e}")))?;
         }
     }
-
-    // Persist the change to config so the daemon restores it on next start.
-    Config::save_background_image(&state.config_path, name.as_deref())
-        .map_err(|e| AppError::BackgroundIo(e.to_string()))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn save_background(
+    name: Option<String>,
+    state: tauri::State<'_, RendererState>,
+) -> Result<(), AppError> {
+    if let Some(ref n) = name {
+        validate_background_path(&state.background_dir, n)?;
+    }
+    Config::save_background_image(&state.config_path, name.as_deref())
+        .map_err(|e| AppError::BackgroundIo(e.to_string()))
 }
 
 #[tauri::command]
