@@ -387,6 +387,34 @@ fn frame_source_set_background_applies_to_running_renderer() {
     assert_eq!(frame_cleared.data[2], 0, "B cleared: should be 0 (no bg)");
 }
 
+// ---------------------------------------------------------------------------
+// Fontdb shared cache test (plan Task 3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fontdb_is_loaded_once_across_multiple_renderers() {
+    // The shared fontdb cache should mean that constructing N SvgRenderers
+    // does not reload system fonts N times. We approximate this by timing:
+    // first construction primes the cache, second is much faster.
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"480\" height=\"480\"></svg>";
+
+    let t0 = std::time::Instant::now();
+    let _r1 = SvgRenderer::new(svg, 480, 480).unwrap();
+    let first = t0.elapsed();
+
+    let t1 = std::time::Instant::now();
+    let _r2 = SvgRenderer::new(svg, 480, 480).unwrap();
+    let second = t1.elapsed();
+
+    // System-font scan dominates first call; second should be at least 4x faster.
+    assert!(
+        second * 4 < first,
+        "second renderer construction was not noticeably faster: first={:?}, second={:?}",
+        first,
+        second
+    );
+}
+
 // Regression test: daemon starts with a no-history layout (e.g., arc-gauge), then
 // switches to a history layout (e.g., neon-dash-v2). The shared SensorHistory must
 // have the new metrics configured before set_history is called, otherwise graph()

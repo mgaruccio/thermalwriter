@@ -2,7 +2,7 @@
 // Renders SVG templates with sensor data into 480x480 pixmaps for the cooler LCD.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use resvg::usvg;
@@ -17,6 +17,20 @@ use crate::theme::ThemePalette;
 // Font file is named JetBrainsMono but is actually DejaVu Sans Mono
 const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
 const EMBEDDED_FONT_FAMILY: &str = "DejaVu Sans Mono";
+
+// Shared fontdb — system font scan runs once at startup; all SvgRenderer instances share
+// the same Arc<Database>. Construction is a pure refcount bump — no Database::clone.
+static SHARED_FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+
+fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
+    Arc::clone(SHARED_FONTDB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(EMBEDDED_FONT.to_vec());
+        db.load_system_fonts();
+        db.set_monospace_family(EMBEDDED_FONT_FAMILY);
+        Arc::new(db)
+    }))
+}
 
 /// Number of history samples to inject per metric (60 ≈ 30s at 2FPS).
 const DEFAULT_HISTORY_SAMPLE_COUNT: usize = 60;
@@ -38,15 +52,9 @@ pub struct SvgRenderer<'a> {
 impl<'a> SvgRenderer<'a> {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
         let mut options = usvg::Options::default();
-        // Set the embedded font as default for all text
         options.font_family = EMBEDDED_FONT_FAMILY.to_string();
-        // Load the embedded monospace font so SVG <text> elements render
-        options.fontdb_mut().load_font_data(EMBEDDED_FONT.to_vec());
-        options.fontdb_mut().load_system_fonts();
-        // Map the CSS "monospace" generic family to our embedded font
-        options
-            .fontdb_mut()
-            .set_monospace_family(EMBEDDED_FONT_FAMILY);
+        // Pure refcount bump — no Database::clone on layout switches.
+        options.fontdb = shared_fontdb();
 
         let mut tera = Tera::default();
         tera.autoescape_on(vec![]); // Disable autoescaping for SVG
