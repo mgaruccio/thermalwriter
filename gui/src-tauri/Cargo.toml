@@ -11,9 +11,14 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Enable the Tauri devtools inspector. Activated automatically by `cargo tauri dev`;
+# NOT included in default features so `cargo tauri build` (release) omits it.
+devtools = ["tauri/devtools"]
+
 [dependencies]
 thermalwriter = { path = "../..", default-features = false }
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
