@@ -214,6 +214,70 @@ fn svg_renderer_uses_configured_theme_not_default() {
 }
 
 // ---------------------------------------------------------------------------
+// Background decode bounds tests (plan Task 1)
+// ---------------------------------------------------------------------------
+
+/// decode_to_pixmap must reject a decompression bomb (oversized decoded output).
+/// We use a 9000x9000 image that exceeds the 8192-pixel dimension cap.
+#[test]
+fn decode_to_pixmap_rejects_oversized_image() {
+    use image::{ImageBuffer, Rgb, ImageFormat};
+    // 9000x9000 exceeds the 8192 dimension limit
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(9000, 9000, Rgb([128u8, 128u8, 128u8]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, ImageFormat::Png).unwrap();
+    let bytes = buf.into_inner();
+
+    let result = thermalwriter::render::background::decode_to_pixmap(&bytes);
+    assert!(result.is_err(), "decode_to_pixmap must reject images with dimensions > 8192");
+}
+
+/// decode_from_file must reject files larger than 8 MB BEFORE reading them via a
+/// size pre-check. Uses a sparse file so the test is fast; asserts the error
+/// message contains "too large" to prove the pre-check (not the decoder) fired.
+#[test]
+fn decode_from_file_rejects_oversized_file() {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fat.png");
+    // Sparse file > 8 MB: seek past 8 MB and write a single byte.
+    let mut f = OpenOptions::new().create(true).write(true).open(&path).unwrap();
+    let eight_mb_plus_one: u64 = 8 * 1024 * 1024 + 1;
+    f.seek(SeekFrom::Start(eight_mb_plus_one)).unwrap();
+    f.write_all(b"\x00").unwrap();
+    drop(f);
+
+    let result = thermalwriter::render::background::decode_from_file(&path);
+    assert!(result.is_err(), "decode_from_file must reject files > 8 MB");
+    let err_msg = format!("{}", result.unwrap_err());
+    // "too large" proves the pre-check fired, not the PNG decoder
+    assert!(
+        err_msg.contains("too large"),
+        "Error must mention 'too large' (pre-check path, not decoder), got: {err_msg}"
+    );
+    // Error must NOT include the file path (caller's with_context adds it)
+    assert!(
+        !err_msg.contains(path.to_str().unwrap()),
+        "Error must not include the filename (caller adds it via with_context), got: {err_msg}"
+    );
+}
+
+/// decode_to_pixmap must accept a normal 480x480 PNG successfully.
+/// This is the happy-path regression guard — bounds must not break valid images.
+#[test]
+fn decode_to_pixmap_accepts_valid_480_image() {
+    let bytes = make_solid_color_png(480, 480, 0, 128, 255);
+    let result = thermalwriter::render::background::decode_to_pixmap(&bytes);
+    assert!(result.is_ok(), "decode_to_pixmap must accept a valid 480x480 PNG; got: {:?}", result.err());
+    let pixmap = result.unwrap();
+    assert_eq!(pixmap.width(), 480);
+    assert_eq!(pixmap.height(), 480);
+}
+
+// ---------------------------------------------------------------------------
 // Background decode module tests (plan Task 5)
 // ---------------------------------------------------------------------------
 
