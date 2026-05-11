@@ -429,3 +429,51 @@ tick_rate = 2
     );
     assert!(after.contains("bg.png"), "image value must be written");
 }
+
+// ---------------------------------------------------------------------------
+// Config validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_load_rejects_zero_tick_rate() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, "[display]\ntick_rate = 0").unwrap();
+    let result = Config::load(f.path());
+    assert!(result.is_err(), "tick_rate=0 must be rejected by validate()");
+    // Use {:#} to include the full error chain including the root cause
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("tick_rate"),
+        "error message should mention the offending field; got: {}", msg
+    );
+}
+
+#[test]
+fn config_load_rejects_invalid_rotation() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, "[display]\nrotation = 45").unwrap();
+    let result = Config::load(f.path());
+    assert!(result.is_err(), "rotation=45 must be rejected by validate()");
+    // Use {:#} to include the full error chain including the root cause
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("rotation"),
+        "error message should mention the offending field; got: {}", msg
+    );
+}
+
+#[test]
+fn config_load_rejects_out_of_range_jpeg_quality() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, "[display]\njpeg_quality = 5").unwrap();
+    let result = Config::load(f.path());
+    assert!(result.is_err(), "jpeg_quality=5 must be rejected (min 10)");
+}
+
+#[test]
+fn config_load_accepts_valid_values() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, "[display]\ntick_rate = 30\nrotation = 90\njpeg_quality = 85").unwrap();
+    let cfg = Config::load(f.path());
+    assert!(cfg.is_ok(), "valid config must load without error: {:?}", cfg.err());
+}

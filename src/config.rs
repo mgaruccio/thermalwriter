@@ -105,15 +105,54 @@ pub struct Config {
 
 impl Config {
     /// Load config from the given path. Returns defaults if the file doesn't exist.
-    /// Returns an error (with the file path in the message) if the file exists but is invalid TOML.
+    /// Returns an error (with the file path in the message) if the file exists but is invalid TOML
+    /// or contains out-of-range values.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        toml::from_str(&contents)
-            .with_context(|| format!("Invalid TOML in config file: {}", path.display()))
+        let cfg: Self = toml::from_str(&contents)
+            .with_context(|| format!("Invalid TOML in config file: {}", path.display()))?;
+        cfg.validate()
+            .with_context(|| format!("Invalid values in config file: {}", path.display()))?;
+        Ok(cfg)
+    }
+
+    /// Validate all config fields are within acceptable ranges.
+    pub fn validate(&self) -> Result<()> {
+        if self.display.tick_rate == 0 || self.display.tick_rate > 60 {
+            anyhow::bail!(
+                "display.tick_rate={} out of range [1, 60]",
+                self.display.tick_rate
+            );
+        }
+        if self.display.jpeg_quality < 10 || self.display.jpeg_quality > 100 {
+            anyhow::bail!(
+                "display.jpeg_quality={} out of range [10, 100]",
+                self.display.jpeg_quality
+            );
+        }
+        if !matches!(self.display.rotation, 0 | 90 | 180 | 270) {
+            anyhow::bail!(
+                "display.rotation={} must be one of 0, 90, 180, 270",
+                self.display.rotation
+            );
+        }
+        if self.sensors.poll_interval_ms < 100 || self.sensors.poll_interval_ms > 60_000 {
+            anyhow::bail!(
+                "sensors.poll_interval_ms={} out of range [100, 60000]",
+                self.sensors.poll_interval_ms
+            );
+        }
+        if self.xvfb.tick_rate == 0 || self.xvfb.tick_rate > 60 {
+            anyhow::bail!(
+                "xvfb.tick_rate={} out of range [1, 60]",
+                self.xvfb.tick_rate
+            );
+        }
+        Ok(())
     }
 
     /// Returns the default config file path: ~/.config/thermalwriter/config.toml

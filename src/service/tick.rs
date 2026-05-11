@@ -119,12 +119,18 @@ pub async fn run_tick_loop(
             frame_source.set_background(cached_background.clone());
         }
 
-        // Check for a new frame source (non-blocking). Re-apply cached background
-        // so a source arriving after the watch was already drained still gets the bg.
-        if let Ok(new_source) = source_rx.try_recv() {
-            info!("Frame source swapped to: {}", new_source.name());
+        // Drain all pending source swaps — keep only the latest. Re-apply cached
+        // background and clear sensor cache so the new layout doesn't render with
+        // stale sensor data from the previous layout.
+        let mut latest_source: Option<Box<dyn FrameSource>> = None;
+        while let Ok(new_source) = source_rx.try_recv() {
+            latest_source = Some(new_source);
+        }
+        if let Some(new_source) = latest_source {
+            info!("Frame source swapped to: {} (queue drained)", new_source.name());
             frame_source = new_source;
             frame_source.set_background(cached_background.clone());
+            cached_sensors.clear();
         }
 
         // Apply template update if one arrived since last tick

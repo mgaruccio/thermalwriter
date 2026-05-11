@@ -558,14 +558,16 @@ impl DisplayInterface {
     }
 
     #[zbus(property)]
-    /// Set the tick rate (1–30 FPS). Returns error outside that range.
+    /// Set the tick rate (1–60 FPS). Returns error outside that range.
     async fn set_tick_rate(&mut self, rate: u32) -> zbus::fdo::Result<()> {
-        if rate == 0 || rate > 30 {
+        if rate == 0 || rate > 60 {
             return Err(zbus::fdo::Error::InvalidArgs(
-                "Tick rate must be 1-30".to_string()
+                "Tick rate must be 1-60".to_string()
             ));
         }
-        self.state.lock().await.tick_rate = rate;
+        let mut state = self.state.lock().await;
+        state.tick_rate = rate;
+        let _ = state.tick_rate_tx.send(rate);
         Ok(())
     }
 
