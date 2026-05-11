@@ -36,4 +36,5 @@ pub trait Display {
     async fn set_background(&self, name: &str) -> zbus::Result<()>;
     async fn clear_background(&self) -> zbus::Result<()>;
     async fn list_backgrounds(&self) -> zbus::Result<Vec<String>>;
+    async fn set_default_layout(&self, name: &str) -> zbus::Result<()>;
 }

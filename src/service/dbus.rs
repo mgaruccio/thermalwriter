@@ -233,6 +233,27 @@ pub async fn apply_background(
     Ok(())
 }
 
+/// Lock-free variant of `apply_background` for use in `set_background` where the
+/// decode happens outside the state lock. Does NOT take `&mut Config`; the caller
+/// must commit the in-memory change with a separate brief lock after this returns.
+///
+///   1. Persist `image` to `config_path` via `Config::save_background_image`.
+///   2. Send `ModeChange::Background { image: pixmap }` over `tx`.
+pub async fn apply_background_outside_lock(
+    config_path: &Path,
+    name: Option<&str>,
+    pixmap: Option<tiny_skia::Pixmap>,
+    tx: &tokio::sync::mpsc::Sender<ModeChange>,
+) -> Result<(), zbus::fdo::Error> {
+    Config::save_background_image(config_path, name).map_err(|e| {
+        zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
+    })?;
+    tx.send(ModeChange::Background { image: pixmap })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+    Ok(())
+}
+
 /// Read the layout file under `layout_dir` (validated against traversal) and
 /// return its declared variables as a list of dicts with keys `name`, `type`,
 /// `default`, `help`. Empty list if the layout declares no vars.
@@ -284,6 +305,24 @@ pub fn apply_layout_vars(
         zbus::fdo::Error::Failed(format!("Failed to persist layout vars: {}", e))
     })?;
     config.layout_vars.insert(name.to_string(), vars);
+    Ok(())
+}
+
+/// Validate `name` against `layout_dir`, then atomically persist it as the new
+/// `display.default_layout` (and the inferred `display.mode`) to `config_path`.
+///
+/// This is the testable core of `DisplayInterface::set_default_layout`. The
+/// in-memory Config mirror update is the caller's responsibility (brief lock).
+pub fn save_default_layout_impl(
+    layout_dir: &Path,
+    config_path: &Path,
+    name: &str,
+) -> Result<(), zbus::fdo::Error> {
+    validate_layout_path(layout_dir, name)?;
+    let mode = if name.ends_with(".html") { "html" } else { "svg" };
+    Config::save_display_layout(config_path, name, mode).map_err(|e| {
+        zbus::fdo::Error::Failed(format!("save_display_layout: {}", e))
+    })?;
     Ok(())
 }
 
@@ -388,36 +427,78 @@ impl DisplayInterface {
         name: String,
         vars: HashMap<String, String>,
     ) -> zbus::fdo::Result<()> {
-        let mut state = self.state.lock().await;
+        // Brief lock: validate + persist + update in-memory config, then drop.
+        let (tx, reload_vars) = {
+            let mut state = self.state.lock().await;
+            let layout_dir = state.layout_dir.clone();
+            let config_path = state.config_path.clone();
+            apply_layout_vars(&layout_dir, &config_path, &mut state.config, &name, vars)?;
+            let reload_vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
+            (state.mode_change_tx.clone(), reload_vars)
+        }; // lock released here
 
-        // Steps (a) + (b): validate + persist + update in-memory config.
-        let layout_dir = state.layout_dir.clone();
-        let config_path = state.config_path.clone();
-        apply_layout_vars(&layout_dir, &config_path, &mut state.config, &name, vars)?;
-
-        // Step (c): tell the tick loop to reload with fresh context.
-        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
-        state
-            .mode_change_tx
-            .send(ModeChange::Layout { name: name.clone(), vars })
+        // Channel send outside the lock — avoids holding Mutex across .await.
+        tx.send(ModeChange::Layout { name: name.clone(), vars: reload_vars })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
         Ok(())
     }
 
+    /// Persist `name` as the new default layout in config.toml and update the
+    /// in-memory Config mirror. Does NOT reload the active layout — use
+    /// `set_layout_vars` or `set_layout` for live switching.
+    async fn set_default_layout(&self, name: String) -> zbus::fdo::Result<()> {
+        // Brief lock: clone the paths we need, then drop before disk I/O.
+        let (layout_dir, config_path) = {
+            let state = self.state.lock().await;
+            (state.layout_dir.clone(), state.config_path.clone())
+        };
+
+        save_default_layout_impl(&layout_dir, &config_path, &name)?;
+
+        // Brief commit lock: update in-memory mirror.
+        {
+            let mut state = self.state.lock().await;
+            let mode = if name.ends_with(".html") { "html" } else { "svg" };
+            state.config.display.default_layout = name;
+            state.config.display.mode = mode.to_string();
+        }
+        Ok(())
+    }
+
     /// Set the global background image by filename (must exist in background_dir).
     async fn set_background(&self, name: String) -> zbus::fdo::Result<()> {
-        let mut state = self.state.lock().await;
-        let bg_path = validate_background_path(&state.background_dir, &name)?;
-        let pixmap = crate::render::background::decode_from_file(&bg_path).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e))
-        })?;
-        let config_path = state.config_path.clone();
-        let tx = state.mode_change_tx.clone();
-        apply_background(&config_path, &mut state.config, Some(&name), Some(pixmap.clone()), &tx)
-            .await?;
-        state.current_background = Some(pixmap);
+        // Brief lock: clone the paths/handles we need, then release immediately.
+        let (background_dir, config_path, tx) = {
+            let state = self.state.lock().await;
+            (
+                state.background_dir.clone(),
+                state.config_path.clone(),
+                state.mode_change_tx.clone(),
+            )
+        }; // lock released here — decode happens below with no lock held
+
+        let bg_path = validate_background_path(&background_dir, &name)?;
+
+        // CPU-bound decode + Lanczos3 resize on a blocking thread — 50-200 ms.
+        let pixmap = tokio::task::spawn_blocking(move || {
+            crate::render::background::decode_from_file(&bg_path)
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("decode task panicked: {}", e)))?
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e)))?;
+
+        // Persist to disk + signal tick loop — no lock needed (config_path and tx
+        // were cloned out above).
+        apply_background_outside_lock(&config_path, Some(&name), Some(pixmap.clone()), &tx).await?;
+
+        // Final brief lock: commit in-memory state mirror.
+        {
+            let mut state = self.state.lock().await;
+            state.current_background = Some(pixmap);
+            state.config.background.image = Some(name);
+        }
         Ok(())
     }
 

@@ -114,21 +114,10 @@
     status = "";
     error = "";
     try {
-      // Always persist first: save_config writes both [layout_vars."<name>"]
-      // and [display].default_layout, so the choice survives a daemon
-      // restart even though the daemon's in-memory set_layout doesn't
-      // touch default_layout on its own.
-      await invoke<void>("save_config", {
-        layout: selectedLayout,
-        vars: values,
-      });
-      // Persist background selection independently — survives daemon restarts
-      // even if the live apply below fails.
-      await invoke<void>("save_background", { name: selectedBackground });
-
-      // Then ask the running daemon to switch live. If the daemon isn't
-      // running we still kept the user's edits via save_config above.
       try {
+        // Daemon-up path: all writes go through D-Bus — daemon is the sole
+        // writer of config.toml. apply_to_daemon calls set_layout_vars +
+        // set_default_layout, so no direct disk write happens here.
         await invoke<void>("apply_to_daemon", {
           layout: selectedLayout,
           vars: values,
@@ -139,9 +128,16 @@
       } catch (e) {
         const message = String(e);
         if (message.includes("daemon is not running")) {
+          // Daemon-down fallback: write directly to config.toml so changes
+          // survive and are picked up on next daemon start.
+          await invoke<void>("save_config", {
+            layout: selectedLayout,
+            vars: values,
+          });
+          await invoke<void>("save_background", { name: selectedBackground });
           status = `Saved ${selectedLayout}. Daemon is not running; changes will apply on next start.`;
         } else {
-          error = `Saved, but daemon apply failed: ${message}`;
+          error = `Daemon apply failed: ${message}`;
         }
       }
     } catch (e) {

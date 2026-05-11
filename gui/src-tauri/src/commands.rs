@@ -183,6 +183,9 @@ pub fn render_preview(
     Ok(Response::new(rgb_to_rgba(&frame.data)))
 }
 
+/// Fallback config write used only when the daemon is NOT running.
+/// When the daemon is up, use `apply_to_daemon` — it routes all writes
+/// through D-Bus so the daemon remains the sole writer of config.toml.
 #[tauri::command]
 pub fn save_config(
     layout: String,
@@ -228,14 +231,18 @@ pub async fn apply_to_daemon(
         .map_err(|e| AppError::DaemonUnavailable {
             reason: format!("daemon proxy not reachable: {e}"),
         })?;
+    // Route layout vars through daemon — it owns the in-memory state and
+    // triggers ModeChange::Layout for the tick loop.
     proxy
         .set_layout_vars(&layout, vars)
         .await
         .map_err(|e| AppError::DaemonCall(format!("set_layout_vars failed: {e}")))?;
+    // Persist the new default layout through daemon so both config.toml writes
+    // go through the same atomic path (no concurrent GUI vs daemon clobber).
     proxy
-        .set_layout(&layout)
+        .set_default_layout(&layout)
         .await
-        .map_err(|e| AppError::DaemonCall(format!("set_layout failed: {e}")))?;
+        .map_err(|e| AppError::DaemonCall(format!("set_default_layout failed: {e}")))?;
     Ok(())
 }
 

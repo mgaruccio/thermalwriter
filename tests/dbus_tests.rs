@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use thermalwriter::config::Config;
 use thermalwriter::service::dbus::{
-    apply_background, apply_layout_vars, get_layout_vars_impl, list_backgrounds_impl,
-    list_layouts_impl, validate_background_path, validate_layout_path, ModeChange,
+    apply_background, apply_background_outside_lock, apply_layout_vars, get_layout_vars_impl,
+    list_backgrounds_impl, list_layouts_impl, save_default_layout_impl, validate_background_path,
+    validate_layout_path, ModeChange,
 };
 
 // ---------------------------------------------------------------------------
@@ -491,4 +492,153 @@ fn apply_background_none_clears_all_three_effects() {
             msg
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// apply_background_outside_lock (Task 16): same triple-effect as apply_background
+// but takes no &mut Config — config mutation is the caller's responsibility.
+// ---------------------------------------------------------------------------
+
+/// apply_background_outside_lock must persist to disk AND send ModeChange::Background
+/// over the channel without touching an in-memory Config (that's the caller's job).
+#[test]
+fn apply_background_outside_lock_sets_disk_and_channel() {
+    let tmp = tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+
+        apply_background_outside_lock(&config_path, Some("dark.png"), None::<tiny_skia::Pixmap>, &tx)
+            .await
+            .expect("apply_background_outside_lock must succeed");
+
+        // Effect 1: on-disk config must have image = "dark.png"
+        let on_disk = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+        assert_eq!(
+            parsed["background"]["image"].as_str().unwrap(),
+            "dark.png",
+            "disk must record the new background filename"
+        );
+
+        // Effect 2: ModeChange::Background must be sent over channel
+        let msg = rx.try_recv().expect("ModeChange::Background must be sent");
+        assert!(
+            matches!(msg, ModeChange::Background { .. }),
+            "expected ModeChange::Background, got {:?}",
+            msg
+        );
+    });
+}
+
+/// Clearing with apply_background_outside_lock (None name, None pixmap) must remove
+/// the image key from disk and send ModeChange::Background { image: None }.
+#[test]
+fn apply_background_outside_lock_none_clears_disk_and_channel() {
+    let tmp = tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(
+        &config_path,
+        "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n",
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+
+        apply_background_outside_lock(&config_path, None, None::<tiny_skia::Pixmap>, &tx)
+            .await
+            .expect("apply_background_outside_lock(None) must succeed");
+
+        // Disk: image key removed
+        let on_disk = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+        assert!(
+            parsed.get("background").and_then(|b| b.get("image")).is_none(),
+            "image key must be absent after clear, disk: {on_disk}"
+        );
+
+        // Channel: ModeChange::Background { image: None }
+        let msg = rx.try_recv().expect("ModeChange::Background must be sent");
+        assert!(
+            matches!(msg, ModeChange::Background { image: None }),
+            "expected Background{{image:None}}, got {:?}",
+            msg
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// save_default_layout_impl (Task 17): persists default_layout + mode to disk.
+// ---------------------------------------------------------------------------
+
+/// save_default_layout_impl must write display.default_layout and display.mode
+/// to config.toml for an SVG layout.
+#[test]
+fn save_default_layout_impl_writes_svg_layout_to_disk() {
+    let tmp = tempdir().unwrap();
+    let layout_dir = tmp.path().join("layouts");
+    fs::create_dir_all(layout_dir.join("svg")).unwrap();
+    fs::write(layout_dir.join("svg/neon-dash-v2.svg"), "<svg/>").unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+
+    save_default_layout_impl(&layout_dir, &config_path, "svg/neon-dash-v2.svg")
+        .expect("save_default_layout_impl must succeed for a valid SVG layout");
+
+    let on_disk = fs::read_to_string(&config_path).unwrap();
+    let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+    assert_eq!(
+        parsed["display"]["default_layout"].as_str().unwrap(),
+        "svg/neon-dash-v2.svg",
+        "default_layout must be written to disk"
+    );
+    assert_eq!(
+        parsed["display"]["mode"].as_str().unwrap(),
+        "svg",
+        "mode must be 'svg' for .svg layout"
+    );
+}
+
+/// save_default_layout_impl must write mode = "html" for an HTML layout.
+#[test]
+fn save_default_layout_impl_writes_html_mode_for_html_layout() {
+    let tmp = tempdir().unwrap();
+    let layout_dir = tmp.path().to_path_buf();
+    fs::write(layout_dir.join("system-stats.html"), "<html/>").unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+
+    save_default_layout_impl(&layout_dir, &config_path, "system-stats.html")
+        .expect("save_default_layout_impl must succeed for a valid HTML layout");
+
+    let on_disk = fs::read_to_string(&config_path).unwrap();
+    let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
+    assert_eq!(
+        parsed["display"]["mode"].as_str().unwrap(),
+        "html",
+        "mode must be 'html' for .html layout"
+    );
+}
+
+/// save_default_layout_impl must reject path traversal before touching disk.
+#[test]
+fn save_default_layout_impl_rejects_traversal() {
+    let tmp = tempdir().unwrap();
+    let layout_dir = tmp.path().join("layouts");
+    fs::create_dir_all(&layout_dir).unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let original = "[display]\ntick_rate = 2\n";
+    fs::write(&config_path, original).unwrap();
+
+    let result = save_default_layout_impl(&layout_dir, &config_path, "../outside.svg");
+    assert!(result.is_err(), "traversal must be rejected");
+
+    // Disk must be unchanged
+    let after = fs::read_to_string(&config_path).unwrap();
+    assert_eq!(after, original, "config must be untouched on traversal reject");
 }
