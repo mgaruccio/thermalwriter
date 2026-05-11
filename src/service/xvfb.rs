@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+use std::os::unix::process::CommandExt;
 use anyhow::{Context, Result, bail};
 use log::info;
 
 /// Handle to a running Xvfb instance and its child application.
-/// Dropping this handle kills both processes and cleans up the temp directory.
+/// Dropping this handle kills both process groups and cleans up the temp directory.
 pub struct XvfbHandle {
     xvfb_process: Child,
     child_process: Option<Child>,
@@ -28,16 +29,41 @@ impl XvfbHandle {
     }
 }
 
+/// Send SIGTERM to a process group, then SIGKILL after a short wait if any
+/// processes remain. Uses libc::killpg so the entire child process tree is
+/// reaped, not just the direct child shell.
+fn kill_process_group(pid: u32) {
+    let pgid = pid as i32;
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    // Give the group up to 300 ms to exit cleanly before SIGKILL.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    loop {
+        // If killpg returns ESRCH the group is gone — done.
+        let rc = unsafe { libc::killpg(pgid, 0) };
+        if rc != 0 || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
 impl Drop for XvfbHandle {
     fn drop(&mut self) {
         if let Some(ref mut child) = self.child_process {
-            let _ = child.kill();
+            let pid = child.id();
+            kill_process_group(pid);
             let _ = child.wait();
-            info!("Killed child application (pid {})", child.id());
+            info!("Killed child process group (pgid {})", pid);
         }
-        let _ = self.xvfb_process.kill();
+        let xvfb_pid = self.xvfb_process.id();
+        kill_process_group(xvfb_pid);
         let _ = self.xvfb_process.wait();
-        info!("Killed Xvfb (pid {}, display :{})", self.xvfb_process.id(), self.display_num);
+        info!("Killed Xvfb process group (pgid {}, display :{})", xvfb_pid, self.display_num);
         // Clean up temp fbdir
         let _ = std::fs::remove_dir_all(&self.fbdir);
     }
@@ -69,7 +95,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 
     let screen_spec = format!("{}x{}x24", width, height);
 
-    // Spawn Xvfb
+    // Spawn Xvfb in its own process group so Drop can killpg the whole tree.
     let xvfb_process = Command::new("Xvfb")
         .arg(&display)
         .args(["-screen", "0", &screen_spec])
@@ -77,6 +103,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         .args(["-ac", "-nolisten", "tcp"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .context("Failed to spawn Xvfb — is xvfb installed?")?;
 
@@ -105,13 +132,15 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 
     info!("Xvfb screen file ready: {}", screen_file.display());
 
-    // Spawn the child application with DISPLAY set.
-    // If spawn fails, handle drops here, killing Xvfb and cleaning up fbdir.
+    // Spawn the child application in its own process group with DISPLAY set.
+    // process_group(0) makes child.id() == child's pgid, so killpg(child.id())
+    // kills the entire subtree (sh + any grandchildren it spawns).
     let child_process = Command::new("sh")
         .args(["-c", command])
         .env("DISPLAY", &display)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .with_context(|| format!("Failed to spawn child command: {}", command))?;
 
@@ -132,5 +161,40 @@ mod tests {
         // Verify the lock file doesn't exist
         let lock = format!("/tmp/.X{}-lock", num);
         assert!(!Path::new(&lock).exists());
+    }
+
+    /// Dropping XvfbHandle must kill the entire child process group, not just the
+    /// direct sh child. Uses a unique sleep duration (sleep 9473) as a sentinel —
+    /// if the grandchild survives Drop, pgrep finds it and the test fails.
+    ///
+    /// With the old child.kill() implementation this test FAILS because the
+    /// backgrounded sleep outlives its sh parent. With killpg it passes.
+    #[test]
+    fn drop_kills_entire_process_group_not_just_direct_child() {
+        // Use a unique sleep duration as sentinel so pgrep is unambiguous.
+        let handle = start("sleep 9473 &", 480, 480)
+            .expect("start() requires Xvfb — skipping if not available");
+
+        // Give the grandchild a moment to be scheduled.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Drop the handle — this should kill the entire process group.
+        drop(handle);
+
+        // Give the OS a moment to reap processes.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Assert no process with our sentinel sleep duration remains.
+        let output = Command::new("pgrep")
+            .args(["-f", "sleep 9473"])
+            .output()
+            .expect("pgrep must be available");
+
+        assert!(
+            !output.status.success(),
+            "sleep 9473 grandchild process is still alive after XvfbHandle drop — \
+             process group was not killed (pgrep output: {})",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }
