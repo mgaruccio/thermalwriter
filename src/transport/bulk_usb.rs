@@ -1,6 +1,6 @@
 use std::time::Duration;
 use anyhow::{Context, Result, bail};
-use log::{debug, info};
+use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
 
 use super::{DeviceInfo, Transport};
@@ -56,6 +56,28 @@ fn pm_to_resolution(pm: u8) -> (u32, u32) {
         68 | 69 => (480, 480),
         _ => (480, 480), // Default for unknown PMs (including PM=4)
     }
+}
+
+/// Write all bytes in `data` by calling `write` repeatedly until the buffer is
+/// exhausted. Handles partial writes by advancing the offset and retrying.
+/// Returns `Err` immediately if `write` returns `Ok(0)` (signals disconnection)
+/// or propagates any `Err` from `write`.
+pub fn write_all<W>(data: &[u8], mut write: W) -> Result<()>
+where
+    W: FnMut(&[u8]) -> rusb::Result<usize>,
+{
+    let mut sent = 0;
+    while sent < data.len() {
+        let n = write(&data[sent..]).context("Bulk write failed")?;
+        if n == 0 {
+            bail!(
+                "device returned zero-length write — likely disconnected (after {} bytes)",
+                sent
+            );
+        }
+        sent += n;
+    }
+    Ok(())
 }
 
 pub struct BulkUsb {
@@ -118,6 +140,27 @@ impl BulkUsb {
     }
 }
 
+impl BulkUsb {
+    /// If `err` represents a fatal USB error (device gone, pipe stall, etc.),
+    /// drop the handle so is_connected() returns false and the tick loop retries.
+    /// Uses root_cause() because write_all wraps rusb::Error with anyhow::context.
+    fn mark_disconnected_if_fatal(&mut self, err: &anyhow::Error) {
+        // Any rusb error from a bulk write means the device is in a bad state.
+        // NoDevice/Io/Access/Pipe all indicate the handle is no longer usable.
+        // Timeout is excluded — a slow write is not a disconnect.
+        // Use chain() not root_cause(): write_all wraps rusb::Error with context,
+        // so the rusb::Error appears at chain[1], not as the root cause.
+        let is_fatal = err.chain()
+            .find_map(|cause| cause.downcast_ref::<rusb::Error>())
+            .map(|e| !matches!(e, rusb::Error::Timeout))
+            .unwrap_or(false);
+        if is_fatal {
+            warn!("Fatal USB error — marking device disconnected: {}", err);
+            self.handle = None;
+        }
+    }
+}
+
 impl Transport for BulkUsb {
     fn handshake(&mut self) -> Result<DeviceInfo> {
         let handle = self.handle.as_ref().context("Device not open")?;
@@ -160,33 +203,42 @@ impl Transport for BulkUsb {
     }
 
     fn send_frame(&mut self, data: &[u8]) -> Result<()> {
-        let handle = self.handle.as_ref().context("Device not open")?;
-        let info = self.info.as_ref().context("Handshake not performed")?;
+        // Build the frame (header + payload) before borrowing the handle for writes.
+        let (frame, log_info) = {
+            let info = self.info.as_ref().context("Handshake not performed")?;
+            let cmd: u32 = if info.use_jpeg { 2 } else { 3 };
+            let payload_len = u32::try_from(data.len()).context("frame too large")?;
+            let header = build_frame_header(cmd, info.width, info.height, payload_len);
+            let mut frame = Vec::with_capacity(64 + data.len());
+            frame.extend_from_slice(&header);
+            frame.extend_from_slice(data);
+            let log = (info.width, info.height, cmd, data.len());
+            (frame, log)
+        };
 
-        let cmd: u32 = if info.use_jpeg { 2 } else { 3 };
-        let payload_len = u32::try_from(data.len()).context("frame too large")?;
-        let header = build_frame_header(cmd, info.width, info.height, payload_len);
+        // All writes in a scoped block so the handle borrow ends before any
+        // mark_disconnected_if_fatal call (which needs &mut self).
+        let send_result: Result<()> = {
+            let handle = self.handle.as_ref().context("Device not open")?;
+            let ep_out = self.ep_out;
 
-        // Concatenate header + payload
-        let mut frame = Vec::with_capacity(64 + data.len());
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(data);
+            let chunk_result: Result<()> = frame.chunks(CHUNK_SIZE)
+                .try_for_each(|chunk| write_all(chunk, |buf| handle.write_bulk(ep_out, buf, WRITE_TIMEOUT)));
 
-        // Send in 16KB chunks
-        for chunk in frame.chunks(CHUNK_SIZE) {
-            handle.write_bulk(self.ep_out, chunk, WRITE_TIMEOUT)
-                .context("Bulk write failed")?;
+            if chunk_result.is_ok() && frame.len() % 512 == 0 {
+                handle.write_bulk(ep_out, &[], WRITE_TIMEOUT)
+                    .context("ZLP write failed")?;
+            }
+            chunk_result
+        };
+
+        if let Err(ref e) = send_result {
+            self.mark_disconnected_if_fatal(e);
+        } else {
+            debug!("Frame sent: {}x{}, cmd={}, {} bytes",
+                   log_info.0, log_info.1, log_info.2, log_info.3);
         }
-
-        // ZLP if total is 512-aligned
-        if frame.len() % 512 == 0 {
-            handle.write_bulk(self.ep_out, &[], WRITE_TIMEOUT)
-                .context("ZLP write failed")?;
-        }
-
-        debug!("Frame sent: {}x{}, cmd={}, {} bytes",
-               info.width, info.height, cmd, data.len());
-        Ok(())
+        send_result
     }
 
     fn close(&mut self) {
@@ -195,6 +247,21 @@ impl Transport for BulkUsb {
             info!("BulkUSB device closed");
         }
         self.info = None;
+    }
+
+    fn is_connected(&self) -> bool {
+        self.handle.is_some() && self.info.is_some()
+    }
+
+    fn try_reconnect(&mut self) -> Result<()> {
+        self.close();
+        let mut new = BulkUsb::new()?;
+        let info = new.handshake()?;
+        self.handle = new.handle.take(); // take() avoids moving out of Drop type
+        self.ep_out = new.ep_out;
+        self.ep_in = new.ep_in;
+        self.info = Some(info);
+        Ok(())
     }
 }
 

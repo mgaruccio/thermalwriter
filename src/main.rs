@@ -111,15 +111,21 @@ async fn main() -> Result<()> {
     let (source_tx, mut source_rx) = mpsc::channel::<Box<dyn FrameSource>>(1);
     // Shared shutdown + template channels
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (connected_tx, _) = watch::channel(true);
     let (template_tx, template_rx) = watch::channel(String::new());
     // Background watch channel: mode-change listener → tick loop (immediate apply)
     let (background_tx, background_rx) = watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
+    // Tick rate watch channel: D-Bus set_tick_rate → tick loop (no restart needed)
+    let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(config.display.tick_rate);
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
     // Determine initial frame source, tick rate, and sensor history based on config mode
     let xvfb_tick_rate = config.xvfb.tick_rate.min(60).max(1);
-    let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>>;
+    // Always allocate SensorHistory so a later D-Bus set_layout into a history-using layout
+    // populates correctly even when starting in xvfb mode.
+    let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> =
+        Some(Arc::new(std::sync::Mutex::new(SensorHistory::new())));
     let (initial_frame_source, initial_xvfb_handle, active_tick_rate) =
         if config.display.mode == "xvfb" {
             if config.xvfb.command.is_empty() {
@@ -128,7 +134,8 @@ async fn main() -> Result<()> {
             let handle = xvfb_manager::start(&config.xvfb.command, device_info.width, device_info.height)?;
             let source = XvfbSource::new(handle.screen_file(), device_info.width, device_info.height)?;
             let boxed: Box<dyn FrameSource> = Box::new(source);
-            initial_sensor_history = None; // xvfb apps manage their own rendering
+            // History is allocated but not seeded with layout frontmatter — metrics get configured
+            // when the user switches to a layout via D-Bus set_layout.
             (boxed, Some(handle), xvfb_tick_rate)
         } else {
             // Load configured layout — user file takes precedence over built-in
@@ -140,13 +147,15 @@ async fn main() -> Result<()> {
             };
 
             let frontmatter = LayoutFrontmatter::parse(&template);
-            let sensor_history = {
-                let mut history = SensorHistory::new();
-                for (metric, cfg) in &frontmatter.history_configs {
-                    history.configure_metric(metric, cfg.duration);
+            // Configure history metrics from the layout's frontmatter into the
+            // already-allocated shared SensorHistory.
+            if let Some(ref hist) = initial_sensor_history {
+                if let Ok(mut h) = hist.lock() {
+                    for (metric, cfg) in &frontmatter.history_configs {
+                        h.configure_metric(metric, cfg.duration);
+                    }
                 }
-                Some(Arc::new(std::sync::Mutex::new(history)))
-            };
+            }
 
             let theme_palette = if let Some(manual) = config.theme.manual.clone() {
                 manual
@@ -157,7 +166,7 @@ async fn main() -> Result<()> {
             let is_svg = config.display.default_layout.ends_with(".svg");
             let boxed: Box<dyn FrameSource> = if is_svg {
                 let mut renderer = SvgRenderer::new(&template, device_info.width, device_info.height)?;
-                if let Some(ref hist) = sensor_history {
+                if let Some(ref hist) = initial_sensor_history {
                     renderer.set_history(hist.clone());
                 }
                 renderer.set_theme(theme_palette);
@@ -173,7 +182,6 @@ async fn main() -> Result<()> {
                 Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
             };
 
-            initial_sensor_history = sensor_history;
             (boxed, None, config.display.tick_rate)
         };
 
@@ -186,6 +194,7 @@ async fn main() -> Result<()> {
         tick_rate: config.display.tick_rate,
         jpeg_quality: config.display.jpeg_quality,
         shutdown_tx,
+        tick_rate_tx,
         layout_dir: layout_dir.clone(),
         config_path: config_path.clone(),
         sensor_descriptors,
@@ -194,6 +203,17 @@ async fn main() -> Result<()> {
         background_dir: background_dir.clone(),
         current_background: initial_background.clone(),
     }));
+
+    {
+        let mut connected_rx = connected_tx.subscribe();
+        let state_for_connected = Arc::clone(&state);
+        tokio::spawn(async move {
+            while connected_rx.changed().await.is_ok() {
+                let value = *connected_rx.borrow();
+                state_for_connected.lock().await.connected = value;
+            }
+        });
+    }
 
     // Start D-Bus service (connection must stay alive)
     let _connection = dbus::serve(state.clone()).await?;
@@ -302,25 +322,43 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Run tick loop — blocks until shutdown signal
+    // Run tick loop — blocks until shutdown signal or process signal
     let jpeg_quality = state.lock().await.jpeg_quality;
     let rotation = config.display.rotation;
     let sensor_poll_interval = Duration::from_millis(config.sensors.poll_interval_ms);
-    tick::run_tick_loop(
-        &mut transport,
-        initial_frame_source,
-        &mut source_rx,
-        &mut sensor_hub,
-        active_tick_rate,
-        jpeg_quality,
-        rotation,
-        template_rx,
-        background_rx,
-        shutdown_rx,
-        initial_sensor_history,
-        sensor_poll_interval,
-    ).await?;
 
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate()
+    ).expect("install SIGTERM handler");
+
+    tokio::select! {
+        res = tick::run_tick_loop(
+            &mut transport,
+            initial_frame_source,
+            &mut source_rx,
+            &mut sensor_hub,
+            active_tick_rate,
+            jpeg_quality,
+            rotation,
+            template_rx,
+            background_rx,
+            shutdown_rx,
+            initial_sensor_history,
+            sensor_poll_interval,
+            connected_tx,
+            tick_rate_rx,
+        ) => { res?; }
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT received, shutting down");
+        }
+        _ = sigterm.recv() => {
+            info!("SIGTERM received, shutting down");
+        }
+    }
+
+    // Signal the tick loop to stop (no-op if it already exited normally)
+    let _ = state.lock().await.shutdown_tx.send(true);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     transport.close();
     info!("thermalwriter shutdown complete");
     Ok(())

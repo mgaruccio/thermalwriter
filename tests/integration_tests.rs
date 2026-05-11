@@ -55,7 +55,7 @@ fn jpeg_encode_quality_affects_size() {
     assert_eq!(&jpeg_low[0..2], &[0xFF, 0xD8]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     use thermalwriter::service::tick::run_tick_loop;
     use thermalwriter::sensor::SensorHub;
@@ -70,7 +70,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     // Run tick loop on a blocking thread — Transport/FrameSource are not Send
     // so we run synchronously inside spawn_blocking
     let handle = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time()
             .build()
             .unwrap();
@@ -80,7 +80,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
             let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<tiny_skia::Pixmap>>(None);
-            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500), tokio::sync::watch::channel(true).0, tokio::sync::watch::channel(30u32).1).await.unwrap();
             // Return frame count so outer test can verify
             t.frames_sent.load(Ordering::Relaxed)
         })
@@ -95,7 +95,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     let _ = frames_sent_clone; // suppress unused warning
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tick_loop_applies_template_update() {
     use thermalwriter::service::tick::run_tick_loop;
     use thermalwriter::sensor::SensorHub;
@@ -122,7 +122,7 @@ async fn tick_loop_applies_template_update() {
     }
 
     let handle = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time()
             .build()
             .unwrap();
@@ -132,7 +132,7 @@ async fn tick_loop_applies_template_update() {
             let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
             let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<tiny_skia::Pixmap>>(None);
-            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500), tokio::sync::watch::channel(true).0, tokio::sync::watch::channel(30u32).1).await.unwrap();
         })
     });
 
@@ -152,7 +152,7 @@ async fn tick_loop_applies_template_update() {
 // The watch fires once for background; tick 1 consumes it via borrow_and_update.
 // Tick 2 receives a new source (built without bg) — has_changed() is false so bg was lost.
 // Fix: cache the latest background and re-apply it whenever a new source arrives.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
     use thermalwriter::service::tick::run_tick_loop;
     use thermalwriter::sensor::SensorHub;
@@ -181,7 +181,7 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
 
     let bg_log_inner = Arc::clone(&bg_log_clone);
     let handle = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time()
             .build()
             .unwrap();
@@ -212,7 +212,7 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
                 log: Arc::clone(&bg_log_inner),
             }) as Box<dyn FrameSource>).await.unwrap();
 
-            run_tick_loop(&mut t, initial_fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, initial_fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500), tokio::sync::watch::channel(true).0, tokio::sync::watch::channel(30u32).1).await.unwrap();
         })
     });
 
@@ -223,10 +223,10 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
 
     let log = bg_log.lock().unwrap();
 
-    // source-1 and source-2 must both have received the background.
-    let source1_got_bg = log.iter().any(|(n, had_bg)| n == "source-1" && *had_bg);
+    // With while-let draining, source-1 is skipped and only source-2 (the latest)
+    // gets applied. This is the correct behavior: 5 rapid GUI applies shouldn't
+    // take 5 ticks to settle — only the last one matters.
     let source2_got_bg = log.iter().any(|(n, had_bg)| n == "source-2" && *had_bg);
-    assert!(source1_got_bg, "source-1 never received bg; log: {:?}", *log);
     assert!(source2_got_bg, "source-2 never received bg; log: {:?}", *log);
 }
 
@@ -234,7 +234,7 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
 // was seeded with an initial background. A source swap before any SetBackground D-Bus
 // call would call set_background(None), wiping the configured startup background.
 // Fix: initialize cached_background from background_rx.borrow() at tick loop start.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
     use thermalwriter::service::tick::run_tick_loop;
     use thermalwriter::sensor::SensorHub;
@@ -261,7 +261,7 @@ async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
 
     let bg_log_inner = Arc::clone(&bg_log);
     let handle = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time()
             .build()
             .unwrap();
@@ -287,7 +287,7 @@ async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
                 log: Arc::clone(&bg_log_inner),
             }) as Box<dyn FrameSource>).await.unwrap();
 
-            run_tick_loop(&mut t, initial_fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500)).await.unwrap();
+            run_tick_loop(&mut t, initial_fs, &mut source_rx, &mut hub, 30, 85, 0, template_rx, bg_rx, shutdown_rx, None, std::time::Duration::from_millis(500), tokio::sync::watch::channel(true).0, tokio::sync::watch::channel(30u32).1).await.unwrap();
         })
     });
 

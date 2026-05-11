@@ -38,6 +38,7 @@ pub struct ServiceState {
     pub tick_rate: u32,
     pub jpeg_quality: u8,
     pub shutdown_tx: watch::Sender<bool>,
+    pub tick_rate_tx: watch::Sender<u32>,
     pub layout_dir: std::path::PathBuf,
     /// Path to the on-disk config.toml (used by set_layout_vars for persistence).
     pub config_path: std::path::PathBuf,

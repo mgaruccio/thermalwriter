@@ -89,9 +89,10 @@ pub async fn run_tick_loop(
     shutdown: tokio::sync::watch::Receiver<bool>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
+    connected_tx: tokio::sync::watch::Sender<bool>,
+    mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<()> {
-    let tick_duration = Duration::from_secs_f64(1.0 / tick_rate_fps as f64);
-    info!("Tick loop started: {} FPS ({:?} per tick), JPEG quality={}, rotation={}°", tick_rate_fps, tick_duration, jpeg_quality, rotation);
+    info!("Tick loop started: {} FPS, JPEG quality={}, rotation={}°", tick_rate_fps, jpeg_quality, rotation);
 
     let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
@@ -99,6 +100,11 @@ pub async fn run_tick_loop(
 
     loop {
         let tick_start = Instant::now();
+
+        // Recompute tick duration from latest watch value each iteration so
+        // D-Bus set_tick_rate takes effect without a restart.
+        let current_fps = (*tick_rate_rx.borrow_and_update()).max(1);
+        let tick_duration = Duration::from_secs_f64(1.0 / current_fps as f64);
 
         // Check shutdown
         if *shutdown.borrow() {
@@ -153,8 +159,25 @@ pub async fn run_tick_loop(
                 match encode_jpeg(&frame, jpeg_quality, rotation) {
                     Ok(jpeg) => {
                         debug!("Frame rendered: {} bytes JPEG", jpeg.len());
-                        if let Err(e) = transport.send_frame(&jpeg) {
+                        // block_in_place yields the runtime thread pool during the USB
+                        // syscall so D-Bus and other async tasks remain responsive even
+                        // when a write stalls for the full WRITE_TIMEOUT (5s).
+                        if let Err(e) = tokio::task::block_in_place(|| transport.send_frame(&jpeg)) {
                             warn!("Failed to send frame: {}", e);
+                            if !transport.is_connected() {
+                                let _ = connected_tx.send(false);
+                                let reconnect_result = tokio::task::block_in_place(|| transport.try_reconnect());
+                                match reconnect_result {
+                                    Ok(()) => {
+                                        info!("USB device reconnected");
+                                        let _ = connected_tx.send(true);
+                                    }
+                                    Err(e) => {
+                                        warn!("USB reconnect failed: {} — will retry next tick", e);
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => warn!("JPEG encode failed: {}", e),

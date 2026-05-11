@@ -23,4 +23,10 @@ pub trait Transport: Send {
     fn send_frame(&mut self, data: &[u8]) -> Result<()>;
     /// Release the USB device.
     fn close(&mut self);
+    /// Whether the underlying device handle is currently usable.
+    fn is_connected(&self) -> bool { true }
+    /// Attempt to re-establish the connection (re-open + handshake).
+    fn try_reconnect(&mut self) -> Result<()> {
+        anyhow::bail!("reconnect not supported by this transport")
+    }
 }
