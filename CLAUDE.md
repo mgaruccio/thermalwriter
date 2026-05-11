@@ -18,10 +18,12 @@ Rust daemon with:
   - `TemplateRenderer` (legacy) — custom HTML subset, taffy + fontdue
   - `BlitzRenderer` (experimental) — behind `--features blitz`, alpha quality
 - **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics
-- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`); methods include `SetLayout`/`SetLayoutVars`/`SetBackground`/`ClearBackground`/`ListBackgrounds`
+- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`); methods include `SetLayout`/`SetLayoutVars`/`SetDefaultLayout`/`SetBackground`/`ClearBackground`/`ListBackgrounds`/`SetMode`. `TickRate` is a writable property — change at runtime via `busctl set-property`. Heavy work (image decode, file writes) runs outside the state lock so concurrent calls don't block each other.
 - **Global background images** — daemon-level bg compositing under any layout. PNG/JPEG files in `~/.config/thermalwriter/backgrounds/` (decoded once, cached as 480×480 premultiplied Pixmap, blitted under each rendered frame)
 - **CLI** (clap) — `thermalwriter daemon` / `thermalwriter ctl ...`
-- **systemd user service** — auto-starts on login
+- **systemd user service** — auto-starts on login. SIGTERM produces clean shutdown (drains tick loop, closes USB transport, exits in ~300ms — no SIGKILL needed).
+- **USB resilience** — partial-write loop in `bulk_usb::write_all` retries on short writes; `try_reconnect` re-establishes the device on `NoDevice`/`Pipe` errors; the D-Bus `Connected` property reflects live device state. Send/reconnect run via `tokio::task::block_in_place` so D-Bus calls stay responsive (~1ms) during USB stalls.
+- **Config validation** — `Config::load()` rejects out-of-range values (`tick_rate ∈ [1,60]`, `jpeg_quality ∈ [10,100]`, `rotation ∈ {0,90,180,270}`, `poll_interval_ms ∈ [100,60000]`) with field-named error messages.
 
 ## Device Details
 
@@ -35,7 +37,7 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (187 tests)
+cargo test                               # run tests (209 tests)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
