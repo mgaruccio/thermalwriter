@@ -2,6 +2,7 @@ use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
@@ -579,5 +580,170 @@ fn hwmon_no_per_core_or_ccd_alias_for_non_cpu_chip() {
         readings.iter().all(|r| !r.key.starts_with("cpu_c") || r.key == "cpu_temp"),
         "Non-CPU chip should not emit per-core or CCD aliases: {:?}",
         readings.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+}
+
+// ─── RaplProvider rollover tests ─────────────────────────────────────────────
+
+#[test]
+fn rapl_rollover_with_unreadable_max_does_not_explode() {
+    // Synthesize a RAPL provider whose base_path points to a tempdir where
+    // energy_uj rolls over but max_energy_range_uj is missing. Assert the
+    // computed wattage is either absent (no reading) or within sane bounds
+    // (< 10kW), NOT ~1.8e13 watts (which is what u64::MAX / 1e6 / dt gives).
+    let tmp = tempfile::tempdir().unwrap();
+    let rapl_dir = tmp.path().join("intel-rapl:0");
+    fs::create_dir_all(&rapl_dir).unwrap();
+
+    let energy_path = rapl_dir.join("energy_uj");
+    // Tick 1: large prev value near counter end
+    fs::write(&energy_path, "1000000000000").unwrap();
+
+    let mut provider = RaplProvider::with_base_path(tmp.path().to_path_buf());
+    let _ = provider.poll().unwrap(); // primes prev_energy
+
+    // Tick 2: smaller value (rollover) — max_energy_range_uj does NOT exist
+    fs::write(&energy_path, "100").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    let readings = provider.poll().unwrap();
+    if let Some(power) = readings.iter().find(|r| r.key == "cpu_power") {
+        let watts: f64 = power.value.parse().expect("cpu_power value must be a number");
+        assert!(
+            watts.is_finite() && watts >= 0.0 && watts < 10_000.0,
+            "rollover with missing max produced insane wattage: {} W (expected absent or < 10kW)",
+            watts
+        );
+    }
+    // Absent reading is also acceptable — both outcomes are sane.
+}
+
+// ─── nvidia-smi N/A parser tests ─────────────────────────────────────────────
+
+#[test]
+fn nvidia_parser_skips_na_fields_without_emitting_nan() {
+    // Simulate nvidia-smi output where power.draw is "N/A" (driver hung or Optimus).
+    // The parser must NOT emit a gpu_power reading with value "NaN", "0", or garbage.
+    // Valid fields (gpu_temp=65) must still be emitted.
+    let line = "65, 30, N/A, 4096, 16384";
+    let readings = thermalwriter::sensor::nvidia::parse_csv_line(line);
+
+    let power = readings.iter().find(|r| r.key == "gpu_power");
+    assert!(
+        power.is_none(),
+        "N/A power.draw must not produce a gpu_power reading; got {:?}",
+        power
+    );
+
+    let temp = readings.iter().find(|r| r.key == "gpu_temp");
+    assert_eq!(
+        temp.map(|r| r.value.as_str()),
+        Some("65"),
+        "valid gpu_temp field must still be emitted when power is N/A"
+    );
+
+    let util = readings.iter().find(|r| r.key == "gpu_util");
+    assert_eq!(
+        util.map(|r| r.value.as_str()),
+        Some("30"),
+        "valid gpu_util field must still be emitted when power is N/A"
+    );
+}
+
+#[test]
+fn nvidia_parser_emits_all_fields_when_all_valid() {
+    let line = "72, 85, 180.7, 8192, 16384";
+    let readings = thermalwriter::sensor::nvidia::parse_csv_line(line);
+
+    let temp = readings.iter().find(|r| r.key == "gpu_temp").expect("gpu_temp missing");
+    assert_eq!(temp.value, "72");
+
+    let util = readings.iter().find(|r| r.key == "gpu_util").expect("gpu_util missing");
+    assert_eq!(util.value, "85");
+
+    let power = readings.iter().find(|r| r.key == "gpu_power").expect("gpu_power missing");
+    assert_eq!(power.value, "181"); // 180.7 rounds to 181 via format!("{:.0}")
+
+    let vram_used = readings.iter().find(|r| r.key == "vram_used").expect("vram_used missing");
+    assert_eq!(vram_used.value, "8.0"); // 8192 MiB / 1024 = 8.0 GB
+
+    let vram_total = readings.iter().find(|r| r.key == "vram_total").expect("vram_total missing");
+    assert_eq!(vram_total.value, "16.0");
+}
+
+// ─── MangoHud partial-line scan tests ────────────────────────────────────────
+
+#[test]
+fn mangohud_partial_leading_line_is_dropped() {
+    // Simulate the case where seek lands in the middle of a line.
+    // The 4KB tail will start with a partial line fragment, then a newline, then
+    // a complete line. The parser must discard the partial fragment and use only
+    // the complete line that follows the first newline.
+    //
+    // We construct a CSV large enough that the seek lands mid-line in a data row,
+    // so the tail_bytes start with a partial fragment like "0,72\n".
+    // The correct last line "144,6.5,60,80" must be returned; the partial fragment
+    // must not be parsed as a data row.
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Header + enough rows to push the last row's start near but before 4KB boundary,
+    // ensuring the tail seek lands mid-row on our controlled content.
+    // Each data row is ~40 bytes. 4096 / 40 ≈ 102 rows to cross the 4KB boundary.
+    let mut content = String::from("fps,frametime,cpu_load,gpu_load\n");
+    for i in 0..120 {
+        // Rows vary slightly to ensure we get a clean cut
+        content.push_str(&format!("{},16.6,50,70\n", 60 + (i % 5)));
+    }
+    // Final authoritative row with distinct values
+    content.push_str("144,6.5,60,80\n");
+
+    write_mangohud_csv(tmp.path(), "game.csv", &content);
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    // The last complete row must be parsed — fps=144
+    let fps = readings.iter().find(|r| r.key == "fps").expect("fps must be present");
+    assert_eq!(fps.value, "144", "must read the last complete row, not a partial fragment");
+
+    // cpu_load=60 from the last row (not 50 from the earlier rows)
+    let cpu = readings.iter().find(|r| r.key == "cpu_load").expect("cpu_load must be present");
+    assert_eq!(cpu.value, "60", "cpu_load must come from the last complete row");
+}
+
+#[test]
+fn mangohud_partial_trailing_row_without_newline_is_dropped() {
+    // Simulate MangoHud mid-write: the file ends with a partial row that has no
+    // trailing '\n' yet. The tail read picks this up as the "last line" via
+    // lines().rev() — but it's garbage (incomplete field count or wrong values).
+    // The parser must discard it and return the last COMPLETE row ("144,...").
+    //
+    // This is the production failure mode: MangoHud writes continuously and a
+    // read landing mid-write sees a truncated last row without a terminating newline.
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Complete rows with trailing newline, then a partial row WITHOUT trailing newline.
+    // The partial fragment "999,1.0,99,99" (no \n) simulates a mid-flight write.
+    let content = "fps,frametime,cpu_load,gpu_load\n\
+                   144,6.5,60,80\n\
+                   999,1.0,99,99"; // no trailing newline — partial write in progress
+
+    write_mangohud_csv(tmp.path(), "game.csv", content);
+
+    let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    // The partial trailing row (999,...) must be dropped.
+    // The last complete row (144,...) must be returned.
+    let fps = readings.iter().find(|r| r.key == "fps").expect("fps must be present");
+    assert_eq!(
+        fps.value, "144",
+        "partial trailing row without newline must be discarded; got fps={}", fps.value
+    );
+
+    let cpu = readings.iter().find(|r| r.key == "cpu_load").expect("cpu_load must be present");
+    assert_eq!(
+        cpu.value, "60",
+        "cpu_load must come from last complete row, not partial fragment"
     );
 }

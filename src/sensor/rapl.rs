@@ -2,7 +2,7 @@
 // Computes instantaneous watts from energy counter deltas between polls.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -13,6 +13,10 @@ const DEFAULT_POWERCAP_PATH: &str = "/sys/class/powercap";
 
 pub struct RaplProvider {
     base_path: PathBuf,
+    // Cached at construction — max_energy_range_uj changes only on kernel/hardware change.
+    // On rollover, if this is None we skip the tick rather than substituting u64::MAX
+    // which would produce ~18 TW spurious readings.
+    max_energy_uj: Option<u64>,
     last_energy_uj: Option<u64>,
     last_poll: Option<Instant>,
     access_warned: bool,
@@ -20,8 +24,11 @@ pub struct RaplProvider {
 
 impl RaplProvider {
     pub fn new() -> Self {
+        let base_path = PathBuf::from(DEFAULT_POWERCAP_PATH);
+        let max_energy_uj = Self::read_max_at(&base_path);
         Self {
-            base_path: PathBuf::from(DEFAULT_POWERCAP_PATH),
+            base_path,
+            max_energy_uj,
             last_energy_uj: None,
             last_poll: None,
             access_warned: false,
@@ -29,24 +36,26 @@ impl RaplProvider {
     }
 
     pub fn with_base_path(base: PathBuf) -> Self {
+        let max_energy_uj = Self::read_max_at(&base);
         Self {
             base_path: base,
+            max_energy_uj,
             last_energy_uj: None,
             last_poll: None,
             access_warned: false,
         }
     }
 
-    fn read_energy_uj(&self) -> Option<u64> {
-        // intel-rapl:0 is the CPU package (works on both Intel and AMD)
-        let path = self.base_path.join("intel-rapl:0/energy_uj");
+    fn read_max_at(base: &Path) -> Option<u64> {
+        let path = base.join("intel-rapl:0/max_energy_range_uj");
         fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse().ok())
     }
 
-    fn read_max_energy_uj(&self) -> Option<u64> {
-        let path = self.base_path.join("intel-rapl:0/max_energy_range_uj");
+    fn read_energy_uj(&self) -> Option<u64> {
+        // intel-rapl:0 is the CPU package (works on both Intel and AMD)
+        let path = self.base_path.join("intel-rapl:0/energy_uj");
         fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse().ok())
@@ -88,8 +97,13 @@ impl SensorProvider for RaplProvider {
                 let delta_uj = if energy_uj >= prev_energy {
                     energy_uj - prev_energy
                 } else {
-                    // Counter wrapped — add max range
-                    let max = self.read_max_energy_uj().unwrap_or(u64::MAX);
+                    // Counter wrapped — add max range. If max is unknown, skip this
+                    // tick rather than substituting u64::MAX (~1.8e13 µJ → ~18 TW).
+                    let Some(max) = self.max_energy_uj else {
+                        self.last_energy_uj = Some(energy_uj);
+                        self.last_poll = Some(now);
+                        return Ok(readings);
+                    };
                     (max - prev_energy) + energy_uj
                 };
 

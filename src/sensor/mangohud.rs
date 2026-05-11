@@ -75,8 +75,18 @@ impl MangoHudProvider {
         let n = reader2.read(&mut tail_bytes).ok()?;
         let tail_str = String::from_utf8_lossy(&tail_bytes[..n]);
 
-        // Find the last non-empty line in the tail
-        let last_line = tail_str
+        // Drop leading partial line resulting from seeking mid-file.
+        let mut tail_view: &str = &tail_str;
+        if let Some(first_nl) = tail_view.find('\n') {
+            tail_view = &tail_view[first_nl + 1..];
+        }
+        // Drop trailing partial fragment (file being actively written, no closing '\n').
+        let usable: &str = match tail_view.rfind('\n') {
+            Some(idx) => &tail_view[..=idx],
+            None => return None, // no complete line in the window
+        };
+
+        let last_line = usable
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
