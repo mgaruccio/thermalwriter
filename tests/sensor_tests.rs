@@ -3,9 +3,11 @@ use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::SensorProvider;
 use std::fs;
 use tempfile::TempDir;
+use serial_test::serial;
 
 #[test]
 fn hwmon_reads_temperature_from_sysfs() {
@@ -745,5 +747,48 @@ fn mangohud_partial_trailing_row_without_newline_is_dropped() {
     assert_eq!(
         cpu.value, "60",
         "cpu_load must come from last complete row, not partial fragment"
+    );
+}
+
+// ─── NvidiaProvider timeout tests ────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn nvidia_poll_times_out_on_hung_subprocess() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    let shim = dir.path().join("nvidia-smi");
+    {
+        let mut f = std::fs::File::create(&shim).unwrap();
+        writeln!(f, "#!/bin/sh\nsleep 5").unwrap();
+    } // drop f so the file is closed before exec (avoids ETXTBSY)
+    let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&shim, perms).unwrap();
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", dir.path().display(), original_path);
+
+    // PATH mutation is process-wide; #[serial] ensures no other test runs
+    // concurrently while we have it pointed at the shim directory.
+    unsafe { std::env::set_var("PATH", &new_path); }
+
+    let mut provider = NvidiaProvider::new();
+    let start = Instant::now();
+    let result = provider.poll().unwrap();
+    let elapsed = start.elapsed();
+
+    unsafe { std::env::set_var("PATH", original_path); }
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "poll took {:?}, expected < 1.5s — timeout is not firing", elapsed
+    );
+    assert!(
+        result.is_empty(),
+        "poll should return empty on timeout, got {:?}", result
     );
 }

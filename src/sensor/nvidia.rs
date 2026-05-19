@@ -1,9 +1,15 @@
 // Nvidia GPU sensor provider: reads metrics via nvidia-smi.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use anyhow::Result;
+use wait_timeout::ChildExt;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
+
+// 500ms is generous for a healthy GPU; a hung driver blocks indefinitely.
+const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct NvidiaProvider;
 
@@ -87,24 +93,50 @@ impl SensorProvider for NvidiaProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
-        let output = match Command::new("nvidia-smi")
+        let mut child = match Command::new("nvidia-smi")
             .args([
                 "--query-gpu=temperature.gpu,utilization.gpu,power.draw,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ])
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
         {
-            Ok(o) if o.status.success() => o,
-            _ => return Ok(Vec::new()), // nvidia-smi not available or failed
+            Ok(c) => c,
+            Err(_) => return Ok(Vec::new()), // nvidia-smi not installed
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout.trim();
-        if line.is_empty() {
-            return Ok(Vec::new());
+        match child.wait_timeout(NVIDIA_SMI_TIMEOUT) {
+            Ok(Some(status)) if status.success() => {
+                let mut buf = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut buf);
+                }
+                let line = buf.trim();
+                if line.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(parse_csv_line(line))
+                }
+            }
+            Ok(Some(_)) => Ok(Vec::new()), // non-zero exit
+            Ok(None) => {
+                // Timed out — kill and reap so the process doesn't become a zombie.
+                let _ = child.kill();
+                let _ = child.wait();
+                log::warn!(
+                    "nvidia-smi timed out after {:?} — GPU may be in deep sleep or driver hung",
+                    NVIDIA_SMI_TIMEOUT
+                );
+                Ok(Vec::new())
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                log::warn!("nvidia-smi wait failed: {}", e);
+                Ok(Vec::new())
+            }
         }
-
-        Ok(parse_csv_line(line))
     }
 
     fn available_sensors(&self) -> Vec<SensorDescriptor> {
