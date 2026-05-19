@@ -55,6 +55,9 @@ pub struct ServiceState {
     pub background_dir: PathBuf,
     /// Currently active decoded background pixmap (premultiplied RGBA 480x480).
     pub current_background: Option<tiny_skia::Pixmap>,
+    /// Serializes all writes to config.toml so concurrent D-Bus calls don't lose
+    /// each other's edits (each writer does a read-modify-write cycle).
+    pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct DisplayInterface {
@@ -427,15 +430,31 @@ impl DisplayInterface {
         name: String,
         vars: HashMap<String, String>,
     ) -> zbus::fdo::Result<()> {
-        // Brief lock: validate + persist + update in-memory config, then drop.
-        let (tx, reload_vars) = {
+        // Clone handles out of the state lock, then release it before disk I/O.
+        let (write_lock, layout_dir, config_path, tx) = {
+            let state = self.state.lock().await;
+            (
+                state.config_write_lock.clone(),
+                state.layout_dir.clone(),
+                state.config_path.clone(),
+                state.mode_change_tx.clone(),
+            )
+        };
+
+        // Serialize all config.toml writers — prevents read-modify-write races.
+        let _write_guard = write_lock.lock().await;
+        validate_layout_path(&layout_dir, &name)?;
+        Config::save_layout_vars(&config_path, &name, &vars).map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to persist layout vars: {}", e))
+        })?;
+        drop(_write_guard);
+
+        // Update in-memory mirror under a brief state lock.
+        let reload_vars = {
             let mut state = self.state.lock().await;
-            let layout_dir = state.layout_dir.clone();
-            let config_path = state.config_path.clone();
-            apply_layout_vars(&layout_dir, &config_path, &mut state.config, &name, vars)?;
-            let reload_vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
-            (state.mode_change_tx.clone(), reload_vars)
-        }; // lock released here
+            state.config.layout_vars.insert(name.clone(), vars);
+            state.config.layout_vars.get(&name).cloned().unwrap_or_default()
+        };
 
         // Channel send outside the lock — avoids holding Mutex across .await.
         tx.send(ModeChange::Layout { name: name.clone(), vars: reload_vars })
@@ -449,13 +468,20 @@ impl DisplayInterface {
     /// in-memory Config mirror. Does NOT reload the active layout — use
     /// `set_layout_vars` or `set_layout` for live switching.
     async fn set_default_layout(&self, name: String) -> zbus::fdo::Result<()> {
-        // Brief lock: clone the paths we need, then drop before disk I/O.
-        let (layout_dir, config_path) = {
+        // Clone handles out of the state lock, then release before disk I/O.
+        let (write_lock, layout_dir, config_path) = {
             let state = self.state.lock().await;
-            (state.layout_dir.clone(), state.config_path.clone())
+            (
+                state.config_write_lock.clone(),
+                state.layout_dir.clone(),
+                state.config_path.clone(),
+            )
         };
 
+        // Serialize all config.toml writers.
+        let _write_guard = write_lock.lock().await;
         save_default_layout_impl(&layout_dir, &config_path, &name)?;
+        drop(_write_guard);
 
         // Brief commit lock: update in-memory mirror.
         {
@@ -469,15 +495,16 @@ impl DisplayInterface {
 
     /// Set the global background image by filename (must exist in background_dir).
     async fn set_background(&self, name: String) -> zbus::fdo::Result<()> {
-        // Brief lock: clone the paths/handles we need, then release immediately.
-        let (background_dir, config_path, tx) = {
+        // Clone handles out of the state lock, then release before heavy work.
+        let (write_lock, background_dir, config_path, tx) = {
             let state = self.state.lock().await;
             (
+                state.config_write_lock.clone(),
                 state.background_dir.clone(),
                 state.config_path.clone(),
                 state.mode_change_tx.clone(),
             )
-        }; // lock released here — decode happens below with no lock held
+        };
 
         let bg_path = validate_background_path(&background_dir, &name)?;
 
@@ -489,11 +516,20 @@ impl DisplayInterface {
         .map_err(|e| zbus::fdo::Error::Failed(format!("decode task panicked: {}", e)))?
         .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e)))?;
 
-        // Persist to disk + signal tick loop — no lock needed (config_path and tx
-        // were cloned out above).
-        apply_background_outside_lock(&config_path, Some(&name), Some(pixmap.clone()), &tx).await?;
+        // Serialize the disk write alongside all other config writers.
+        {
+            let _write_guard = write_lock.lock().await;
+            Config::save_background_image(&config_path, Some(&name)).map_err(|e| {
+                zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
+            })?;
+        }
 
-        // Final brief lock: commit in-memory state mirror.
+        // Signal the tick loop outside the write lock.
+        tx.send(ModeChange::Background { image: Some(pixmap.clone()) })
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+
+        // Brief commit lock: update in-memory state mirror.
         {
             let mut state = self.state.lock().await;
             state.current_background = Some(pixmap);
@@ -504,11 +540,35 @@ impl DisplayInterface {
 
     /// Clear the global background image.
     async fn clear_background(&self) -> zbus::fdo::Result<()> {
-        let mut state = self.state.lock().await;
-        let config_path = state.config_path.clone();
-        let tx = state.mode_change_tx.clone();
-        apply_background(&config_path, &mut state.config, None, None, &tx).await?;
-        state.current_background = None;
+        // Clone handles out of the state lock, then release before disk I/O.
+        let (write_lock, config_path, tx) = {
+            let state = self.state.lock().await;
+            (
+                state.config_write_lock.clone(),
+                state.config_path.clone(),
+                state.mode_change_tx.clone(),
+            )
+        };
+
+        // Serialize the disk write.
+        {
+            let _write_guard = write_lock.lock().await;
+            Config::save_background_image(&config_path, None).map_err(|e| {
+                zbus::fdo::Error::Failed(format!("Failed to clear background: {}", e))
+            })?;
+        }
+
+        // Signal the tick loop outside the write lock.
+        tx.send(ModeChange::Background { image: None })
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+
+        // Brief commit lock: update in-memory state mirror.
+        {
+            let mut state = self.state.lock().await;
+            state.current_background = None;
+            state.config.background.image = None;
+        }
         Ok(())
     }
 

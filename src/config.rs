@@ -6,8 +6,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use anyhow::{Context, Result};
 use crate::theme::ThemePalette;
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_tmp_suffix() -> u64 {
+    TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Serializes all read-modify-write cycles on config.toml within a process.
+/// Each save_* method acquires this before reading the file and holds it
+/// through the rename, preventing lost-update races between concurrent callers.
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -179,6 +192,8 @@ impl Config {
     ) -> Result<()> {
         use toml_edit::{DocumentMut, Item, Table, value};
 
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Load existing document (or start empty).
         let existing = if path.exists() {
             std::fs::read_to_string(path)
@@ -217,9 +232,10 @@ impl Config {
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
         let tmp_name = format!(
-            "{}.tmp.{}",
+            "{}.tmp.{}.{}",
             file_name.to_string_lossy(),
-            std::process::id()
+            std::process::id(),
+            next_tmp_suffix(),
         );
         let tmp_path = parent.join(tmp_name);
 
@@ -247,6 +263,8 @@ impl Config {
     pub fn save_display_layout(path: &Path, layout_name: &str, mode: &str) -> Result<()> {
         use toml_edit::{DocumentMut, Item, Table, value};
 
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let existing = if path.exists() {
             std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to read config: {}", path.display()))?
@@ -273,9 +291,10 @@ impl Config {
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
         let tmp_name = format!(
-            "{}.tmp.{}",
+            "{}.tmp.{}.{}",
             file_name.to_string_lossy(),
-            std::process::id()
+            std::process::id(),
+            next_tmp_suffix(),
         );
         let tmp_path = parent.join(tmp_name);
 
@@ -303,6 +322,8 @@ impl Config {
     /// on-disk config, preserving user comments via `toml_edit`. Atomic write.
     pub fn save_background_image(path: &Path, image: Option<&str>) -> Result<()> {
         use toml_edit::{DocumentMut, Item, Table, value};
+
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let existing = if path.exists() {
             std::fs::read_to_string(path)
@@ -333,9 +354,10 @@ impl Config {
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
         let tmp_name = format!(
-            "{}.tmp.{}",
+            "{}.tmp.{}.{}",
             file_name.to_string_lossy(),
-            std::process::id()
+            std::process::id(),
+            next_tmp_suffix(),
         );
         let tmp_path = parent.join(tmp_name);
 

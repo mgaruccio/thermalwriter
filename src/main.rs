@@ -202,6 +202,7 @@ async fn main() -> Result<()> {
         mode_change_tx: mode_tx,
         background_dir: background_dir.clone(),
         current_background: initial_background.clone(),
+        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
     }));
 
     {

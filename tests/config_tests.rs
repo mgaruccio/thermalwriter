@@ -348,6 +348,76 @@ fn save_layout_vars_writes_atomically_via_same_dir_tempfile() {
 }
 
 #[test]
+fn concurrent_config_writes_do_not_corrupt_file() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let path = Arc::new(dir.path().join("config.toml"));
+    std::fs::write(&*path, "[display]\ntick_rate = 2\n").unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..16u32 {
+        let path = Arc::clone(&path);
+        handles.push(thread::spawn(move || {
+            let mut vars = HashMap::new();
+            vars.insert(format!("var_{}", i), format!("value_{}", i));
+            match i % 3 {
+                0 => Config::save_layout_vars(
+                    &path,
+                    &format!("layout_{}.svg", i),
+                    &vars,
+                ).unwrap(),
+                1 => Config::save_display_layout(
+                    &path,
+                    &format!("layout_{}.svg", i),
+                    "svg",
+                ).unwrap(),
+                _ => Config::save_background_image(
+                    &path,
+                    Some(&format!("bg_{}.png", i)),
+                ).unwrap(),
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Final file must parse as valid TOML.
+    let contents = std::fs::read_to_string(&*path).unwrap();
+    let doc: toml::Value = toml::from_str(&contents)
+        .expect("config.toml must be valid TOML after concurrent writes");
+
+    // No stray temp files.
+    let stragglers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(
+        stragglers.is_empty(),
+        "expected no stray temp files, found {:?}",
+        stragglers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+
+    // All 6 save_layout_vars writers (i%3==0: i=0,3,6,9,12,15) must survive
+    // in the final [layout_vars] table. This proves the read-modify-write mutex
+    // prevents lost updates — the counter alone (which avoids file collisions)
+    // would not guarantee this.
+    let layout_vars = doc.get("layout_vars")
+        .expect("[layout_vars] table must be present after concurrent writes");
+    for i in [0u32, 3, 6, 9, 12, 15] {
+        let key = format!("layout_{}.svg", i);
+        assert!(
+            layout_vars.get(&key).is_some(),
+            "layout_vars missing key '{}' — lost-update race not fixed",
+            key
+        );
+    }
+}
+
+#[test]
 fn config_load_parses_layout_vars_field() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(
