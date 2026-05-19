@@ -3,6 +3,44 @@ use std::time::Duration;
 use thermalwriter::sensor::history::SensorHistory;
 
 #[test]
+fn record_prunes_stale_data_when_sensor_drops_out() {
+    let mut history = SensorHistory::new();
+    history.configure_metric("gpu_power", Duration::from_millis(100));
+
+    let mut data = HashMap::new();
+    data.insert("gpu_power".to_string(), "150".to_string());
+    history.record(&data);
+    history.record(&data);
+    assert_eq!(history.query("gpu_power", 10).len(), 2);
+
+    // Sensor drops out — caller no longer includes the key.
+    std::thread::sleep(Duration::from_millis(150));
+    let empty: HashMap<String, String> = HashMap::new();
+    history.record(&empty);
+
+    assert!(
+        history.query("gpu_power", 10).is_empty(),
+        "buffer should be empty after sensor dropout + cutoff"
+    );
+}
+
+#[test]
+fn record_prunes_when_value_becomes_non_numeric() {
+    let mut history = SensorHistory::new();
+    history.configure_metric("gpu_temp", Duration::from_millis(100));
+
+    let mut data = HashMap::new();
+    data.insert("gpu_temp".to_string(), "75".to_string());
+    history.record(&data);
+
+    std::thread::sleep(Duration::from_millis(150));
+    data.insert("gpu_temp".to_string(), "N/A".to_string());
+    history.record(&data);
+
+    assert!(history.query("gpu_temp", 10).is_empty());
+}
+
+#[test]
 fn history_records_and_queries_numeric_values() {
     let mut history = SensorHistory::new();
     history.configure_metric("cpu_temp", Duration::from_secs(60));

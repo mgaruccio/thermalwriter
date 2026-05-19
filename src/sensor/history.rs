@@ -37,19 +37,26 @@ impl SensorHistory {
 
     /// Record current sensor readings. Only configured metrics are stored.
     /// Non-numeric values are silently skipped.
+    /// Pruning runs unconditionally for every configured metric — including when the
+    /// key is absent (sensor dropout) or non-numeric (e.g. nvidia-smi "N/A") — so
+    /// stale samples don't accumulate indefinitely as ghost values on history graphs.
     pub fn record(&mut self, data: &HashMap<String, String>) {
         let now = Instant::now();
-        for (key, config) in &self.configs {
-            if let Some(val_str) = data.get(key) {
+        // Collect cutoffs first to avoid a simultaneous borrow of configs + buffers.
+        let cutoffs: Vec<(String, Instant)> = self.configs
+            .iter()
+            .map(|(k, c)| (k.clone(), now - c.max_duration))
+            .collect();
+        for (key, cutoff) in cutoffs {
+            let buf = self.buffers.entry(key.clone()).or_insert_with(VecDeque::new);
+            if let Some(val_str) = data.get(&key) {
                 if let Ok(val) = val_str.parse::<f64>() {
-                    let buf = self.buffers.entry(key.clone()).or_insert_with(VecDeque::new);
                     buf.push_back(Sample { time: now, value: val });
-                    // Prune old entries
-                    let cutoff = now - config.max_duration;
-                    while buf.front().is_some_and(|s| s.time < cutoff) {
-                        buf.pop_front();
-                    }
                 }
+            }
+            // Prune unconditionally — covers dropout and non-numeric values.
+            while buf.front().is_some_and(|s| s.time < cutoff) {
+                buf.pop_front();
             }
         }
     }
