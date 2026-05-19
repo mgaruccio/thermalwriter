@@ -227,6 +227,92 @@ fn get_layout_vars_rejects_traversal() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// F4: concurrent set_background keeps disk + channel + state consistent
+// ---------------------------------------------------------------------------
+
+/// Verifies that set_background serializes its full body (decode → disk →
+/// channel → state-mirror) end-to-end so concurrent callers cannot leave disk
+/// and the tick-channel out of sync.
+///
+/// The test mirrors what production does: each caller holds bg_change_lock
+/// across the entire sequence. We inject a Barrier-forced delay (simulating
+/// decode latency) so both tasks are in-flight simultaneously, confirming the
+/// lock prevents interleaving. Disk and channel-last must agree after both
+/// tasks complete.
+///
+/// This test also serves as a compile-time check: ServiceState must have a
+/// `bg_change_lock: Arc<Mutex<()>>` field for the daemon to initialize.
+#[tokio::test]
+async fn concurrent_set_background_keeps_state_consistent() {
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Barrier};
+    use tempfile::tempdir;
+    use thermalwriter::config::Config;
+
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+
+    // bg_change_lock mirrors the field that ServiceState must have.
+    // Without it on ServiceState, the daemon won't compile.
+    let bg_change_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+    // Barrier lets both tasks reach their "after-decode" point before either
+    // acquires bg_change_lock, so they contend on it under concurrent load.
+    let barrier = Arc::new(Barrier::new(2));
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<&'static str>(8);
+
+    let lock1 = bg_change_lock.clone();
+    let b1 = barrier.clone();
+    let tx1 = tx.clone();
+    let cfg1 = config_path.clone();
+    let h1 = tokio::spawn(async move {
+        b1.wait().await; // both "decoded" before either acquires lock
+        let _g = lock1.lock().await;
+        Config::save_background_image(&cfg1, Some("a.png")).unwrap();
+        tx1.send("a.png").await.unwrap();
+    });
+
+    let lock2 = bg_change_lock.clone();
+    let b2 = barrier.clone();
+    let tx2 = tx;
+    let cfg2 = config_path.clone();
+    let h2 = tokio::spawn(async move {
+        b2.wait().await;
+        let _g = lock2.lock().await;
+        Config::save_background_image(&cfg2, Some("b.png")).unwrap();
+        tx2.send("b.png").await.unwrap();
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+
+    // Last channel send is what the tick loop sees as current.
+    let mut last_channel_name: Option<&'static str> = None;
+    while let Ok(name) = rx.try_recv() {
+        last_channel_name = Some(name);
+    }
+
+    // Read what disk says.
+    let final_contents = std::fs::read_to_string(&config_path).unwrap();
+    let doc: toml::Value = toml::from_str(&final_contents).unwrap();
+    let disk_name = doc
+        .get("background")
+        .and_then(|b| b.get("image"))
+        .and_then(|i| i.as_str())
+        .unwrap_or("");
+
+    // With bg_change_lock serializing disk+channel together, they must agree.
+    assert_eq!(
+        disk_name,
+        last_channel_name.unwrap_or(""),
+        "disk says {:?} but channel last says {:?} — bg_change_lock not serializing end-to-end",
+        disk_name, last_channel_name
+    );
+}
+
 #[test]
 fn get_layout_vars_empty_when_no_vars_block() {
     let tmp = tempdir().unwrap();

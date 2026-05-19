@@ -58,6 +58,10 @@ pub struct ServiceState {
     /// Serializes all writes to config.toml so concurrent D-Bus calls don't lose
     /// each other's edits (each writer does a read-modify-write cycle).
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the full set_background / clear_background body (decode →
+    /// disk → channel → state-mirror) so concurrent callers cannot interleave
+    /// their disk writes and channel sends, leaving them out of sync.
+    pub bg_change_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct DisplayInterface {
@@ -496,9 +500,10 @@ impl DisplayInterface {
     /// Set the global background image by filename (must exist in background_dir).
     async fn set_background(&self, name: String) -> zbus::fdo::Result<()> {
         // Clone handles out of the state lock, then release before heavy work.
-        let (write_lock, background_dir, config_path, tx) = {
+        let (bg_lock, write_lock, background_dir, config_path, tx) = {
             let state = self.state.lock().await;
             (
+                state.bg_change_lock.clone(),
                 state.config_write_lock.clone(),
                 state.background_dir.clone(),
                 state.config_path.clone(),
@@ -507,6 +512,10 @@ impl DisplayInterface {
         };
 
         let bg_path = validate_background_path(&background_dir, &name)?;
+
+        // Serialize the full body so concurrent callers cannot interleave their
+        // disk writes and channel sends (which would leave them out of sync).
+        let _bg_guard = bg_lock.lock().await;
 
         // CPU-bound decode + Lanczos3 resize on a blocking thread — 50-200 ms.
         let pixmap = tokio::task::spawn_blocking(move || {
@@ -524,7 +533,7 @@ impl DisplayInterface {
             })?;
         }
 
-        // Signal the tick loop outside the write lock.
+        // Signal the tick loop (still inside bg_guard, so channel send is ordered).
         tx.send(ModeChange::Background { image: Some(pixmap.clone()) })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
@@ -541,16 +550,20 @@ impl DisplayInterface {
     /// Clear the global background image.
     async fn clear_background(&self) -> zbus::fdo::Result<()> {
         // Clone handles out of the state lock, then release before disk I/O.
-        let (write_lock, config_path, tx) = {
+        let (bg_lock, write_lock, config_path, tx) = {
             let state = self.state.lock().await;
             (
+                state.bg_change_lock.clone(),
                 state.config_write_lock.clone(),
                 state.config_path.clone(),
                 state.mode_change_tx.clone(),
             )
         };
 
-        // Serialize the disk write.
+        // Serialize against concurrent set_background calls.
+        let _bg_guard = bg_lock.lock().await;
+
+        // Serialize the disk write alongside all other config writers.
         {
             let _write_guard = write_lock.lock().await;
             Config::save_background_image(&config_path, None).map_err(|e| {
@@ -558,7 +571,7 @@ impl DisplayInterface {
             })?;
         }
 
-        // Signal the tick loop outside the write lock.
+        // Signal the tick loop (still inside bg_guard).
         tx.send(ModeChange::Background { image: None })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;

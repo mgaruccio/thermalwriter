@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
         background_dir: background_dir.clone(),
         current_background: initial_background.clone(),
         config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        bg_change_lock: Arc::new(tokio::sync::Mutex::new(())),
     }));
 
     {
