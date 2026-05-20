@@ -17,8 +17,8 @@ Rust daemon with:
   - `XvfbSource` — mmap-based capture from Xvfb virtual framebuffer (any X11 app)
   - `TemplateRenderer` (legacy) — custom HTML subset, taffy + fontdue
   - `BlitzRenderer` (experimental) — behind `--features blitz`, alpha quality
-- **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics
-- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`); methods include `SetLayout`/`SetLayoutVars`/`SetDefaultLayout`/`SetBackground`/`ClearBackground`/`ListBackgrounds`/`SetMode`. `TickRate` is a writable property — change at runtime via `busctl set-property`. Heavy work (image decode, file writes) runs outside the state lock so concurrent calls don't block each other.
+- **Sensor providers** (hwmon, sysinfo, nvidia, amdgpu, mangohud, rapl) — system metrics. `nvidia-smi` polls use a 500 ms `wait_timeout` so a hung GPU driver (D3/TDR) doesn't freeze the tick loop — kill+wait reaps the child and the tick continues with other sensors. `SensorHistory` prunes every `record()` unconditionally — sensor dropout (key absent from the data map) or non-numeric value (e.g. nvidia-smi `"N/A"`) decays buffers within `max_duration` instead of leaving stale ghost samples on history graphs.
+- **D-Bus IPC** (zbus) — control interface (`com.thermalwriter.Service`); methods include `SetLayout`/`SetLayoutVars`/`SetDefaultLayout`/`SetBackground`/`ClearBackground`/`ListBackgrounds`/`SetMode`. `TickRate` is a writable property — change at runtime via `busctl set-property`. Heavy work (image decode, file writes) runs outside the state lock so concurrent calls don't block each other. **Concurrency hardening:** writes to `config.toml` are serialized via a process-global mutex + per-write atomic temp-file suffix (no lost updates under concurrent D-Bus calls); `SetBackground`/`ClearBackground` hold a `bg_change_lock` end-to-end (decode → disk → channel → state mirror) so disk, tick channel, and in-memory background never diverge under concurrent invocations.
 - **Global background images** — daemon-level bg compositing under any layout. PNG/JPEG files in `~/.config/thermalwriter/backgrounds/` (decoded once, cached as 480×480 premultiplied Pixmap, blitted under each rendered frame)
 - **CLI** (clap) — `thermalwriter daemon` / `thermalwriter ctl ...`
 - **systemd user service** — auto-starts on login. SIGTERM produces clean shutdown (drains tick loop, closes USB transport, exits in ~300ms — no SIGKILL needed).
@@ -37,7 +37,7 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (209 tests)
+cargo test                               # run tests (214 tests)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
@@ -103,4 +103,4 @@ Backgrounds in `~/.config/thermalwriter/backgrounds/` — placeholder PNGs seede
 
 ## Key Dependencies
 
-rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, memmap2, sysinfo, tokio, clap, dirs
+rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, memmap2, sysinfo, tokio, clap, dirs, wait-timeout
