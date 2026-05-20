@@ -14,9 +14,8 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use thermalwriter::config::Config;
 use thermalwriter::service::dbus::{
-    apply_background, apply_background_outside_lock, apply_layout_vars, get_layout_vars_impl,
-    list_backgrounds_impl, list_layouts_impl, save_default_layout_impl, validate_background_path,
-    validate_layout_path, ModeChange,
+    get_layout_vars_impl, list_backgrounds_impl, list_layouts_impl, save_default_layout_impl,
+    validate_background_path, validate_layout_path, ModeChange,
 };
 
 // ---------------------------------------------------------------------------
@@ -289,7 +288,8 @@ async fn concurrent_set_background_keeps_state_consistent() {
     h1.await.unwrap();
     h2.await.unwrap();
 
-    // Last channel send is what the tick loop sees as current.
+    // Last sender under lock wins — not just FIFO; whichever caller acquired
+    // bg_change_lock second sent last, and that determines the active background.
     let mut last_channel_name: Option<&'static str> = None;
     while let Ok(name) = rx.try_recv() {
         last_channel_name = Some(name);
@@ -345,12 +345,12 @@ fn validate_layout_path_returns_canonical_path() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_layout_vars: persists to disk AND mutates the in-memory Config so the
+// layout_vars: persists to disk AND mutates the in-memory Config so the
 // tick loop sees the new values without a restart (killer item).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn apply_layout_vars_updates_in_memory_and_disk() {
+fn layout_vars_updates_in_memory_and_disk() {
     let tmp = tempdir().unwrap();
     let layout_dir = tmp.path().join("layouts");
     fs::create_dir(&layout_dir).unwrap();
@@ -363,12 +363,17 @@ fn apply_layout_vars_updates_in_memory_and_disk() {
     fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
     let mut config = Config::default();
 
-    let mut vars = HashMap::new();
-    vars.insert("theme_primary".to_string(), "#00ff88".to_string());
-    vars.insert("cpu_label".to_string(), "CPU".to_string());
+    let vars: HashMap<String, String> = [
+        ("theme_primary".to_string(), "#00ff88".to_string()),
+        ("cpu_label".to_string(), "CPU".to_string()),
+    ]
+    .into();
 
-    apply_layout_vars(&layout_dir, &config_path, &mut config, "neon.svg", vars.clone())
-        .expect("apply_layout_vars should succeed");
+    // Validate path, persist to disk, then mirror into in-memory Config.
+    validate_layout_path(&layout_dir, "neon.svg").expect("layout path must be valid");
+    Config::save_layout_vars(&config_path, "neon.svg", &vars)
+        .expect("save_layout_vars should succeed");
+    config.layout_vars.insert("neon.svg".to_string(), vars.clone());
 
     // In-memory Config must reflect the new values — this is what the tick
     // loop reads when rendering the next frame.
@@ -389,26 +394,18 @@ fn apply_layout_vars_updates_in_memory_and_disk() {
 }
 
 #[test]
-fn apply_layout_vars_rejects_traversal_before_touching_disk() {
+fn layout_vars_rejects_traversal_before_touching_disk() {
     let tmp = tempdir().unwrap();
     let layout_dir = tmp.path().join("layouts");
     fs::create_dir(&layout_dir).unwrap();
     let config_path = tmp.path().join("config.toml");
     let pre = "[display]\ntick_rate = 2\n";
     fs::write(&config_path, pre).unwrap();
-    let mut config = Config::default();
+    let config = Config::default();
 
-    let mut vars = HashMap::new();
-    vars.insert("theme_primary".to_string(), "#00ff88".to_string());
-
-    let result = apply_layout_vars(
-        &layout_dir,
-        &config_path,
-        &mut config,
-        "../outside.svg",
-        vars,
-    );
-    assert!(result.is_err(), "traversal must be rejected");
+    // validate_layout_path must reject traversal before any disk write.
+    let result = validate_layout_path(&layout_dir, "../outside.svg");
+    assert!(result.is_err(), "traversal must be rejected by validate_layout_path");
 
     // Config file must be unchanged — nothing was persisted.
     let after = std::fs::read_to_string(&config_path).unwrap();
@@ -492,12 +489,13 @@ fn list_backgrounds_returns_png_and_jpeg_only() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_background: triple-effect — persists to disk, updates in-memory
-// config.background.image, sends ModeChange::Background over channel
+// background save: persists to disk, updates in-memory config.background.image,
+// sends ModeChange::Background over channel (production pattern: call
+// Config::save_background_image for disk, mirror in-memory, send channel).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn apply_background_sets_all_three_effects() {
+fn background_save_sets_all_three_effects() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
@@ -507,9 +505,12 @@ fn apply_background_sets_all_three_effects() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
-        apply_background(&config_path, &mut config, Some("dark.png"), None, &tx)
+        Config::save_background_image(&config_path, Some("dark.png"))
+            .expect("save_background_image must succeed");
+        config.background.image = Some("dark.png".to_string());
+        tx.send(ModeChange::Background { image: None })
             .await
-            .expect("apply_background must succeed");
+            .expect("channel send must succeed");
 
         // Effect 1: in-memory config updated
         assert_eq!(
@@ -537,7 +538,7 @@ fn apply_background_sets_all_three_effects() {
 }
 
 #[test]
-fn apply_background_none_clears_all_three_effects() {
+fn background_save_none_clears_all_three_effects() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     fs::write(
@@ -552,9 +553,12 @@ fn apply_background_none_clears_all_three_effects() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
-        apply_background(&config_path, &mut config, None, None, &tx)
+        Config::save_background_image(&config_path, None)
+            .expect("save_background_image(None) must succeed");
+        config.background.image = None;
+        tx.send(ModeChange::Background { image: None })
             .await
-            .expect("apply_background(None) must succeed");
+            .expect("channel send must succeed");
 
         // Effect 1: in-memory config cleared
         assert_eq!(
@@ -581,14 +585,12 @@ fn apply_background_none_clears_all_three_effects() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_background_outside_lock (Task 16): same triple-effect as apply_background
-// but takes no &mut Config — config mutation is the caller's responsibility.
+// background save outside lock: disk + channel without in-memory Config touch
+// (the caller's responsibility — mirrors how set_background works in production).
 // ---------------------------------------------------------------------------
 
-/// apply_background_outside_lock must persist to disk AND send ModeChange::Background
-/// over the channel without touching an in-memory Config (that's the caller's job).
 #[test]
-fn apply_background_outside_lock_sets_disk_and_channel() {
+fn background_save_outside_lock_sets_disk_and_channel() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
@@ -597,9 +599,11 @@ fn apply_background_outside_lock_sets_disk_and_channel() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
-        apply_background_outside_lock(&config_path, Some("dark.png"), None::<tiny_skia::Pixmap>, &tx)
+        Config::save_background_image(&config_path, Some("dark.png"))
+            .expect("save_background_image must succeed");
+        tx.send(ModeChange::Background { image: None })
             .await
-            .expect("apply_background_outside_lock must succeed");
+            .expect("channel send must succeed");
 
         // Effect 1: on-disk config must have image = "dark.png"
         let on_disk = fs::read_to_string(&config_path).unwrap();
@@ -620,10 +624,8 @@ fn apply_background_outside_lock_sets_disk_and_channel() {
     });
 }
 
-/// Clearing with apply_background_outside_lock (None name, None pixmap) must remove
-/// the image key from disk and send ModeChange::Background { image: None }.
 #[test]
-fn apply_background_outside_lock_none_clears_disk_and_channel() {
+fn background_save_outside_lock_none_clears_disk_and_channel() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     fs::write(
@@ -636,9 +638,11 @@ fn apply_background_outside_lock_none_clears_disk_and_channel() {
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
-        apply_background_outside_lock(&config_path, None, None::<tiny_skia::Pixmap>, &tx)
+        Config::save_background_image(&config_path, None)
+            .expect("save_background_image(None) must succeed");
+        tx.send(ModeChange::Background { image: None })
             .await
-            .expect("apply_background_outside_lock(None) must succeed");
+            .expect("channel send must succeed");
 
         // Disk: image key removed
         let on_disk = fs::read_to_string(&config_path).unwrap();

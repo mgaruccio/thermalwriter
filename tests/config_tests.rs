@@ -415,6 +415,22 @@ fn concurrent_config_writes_do_not_corrupt_file() {
             key
         );
     }
+
+    // At least one save_display_layout writer (i%3==1) must have survived.
+    let default_layout = doc
+        .get("display")
+        .and_then(|d| d.get("default_layout"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(!default_layout.is_empty(), "display.default_layout must be non-empty — save_display_layout writers lost");
+
+    // At least one save_background_image writer (i%3==2) must have survived.
+    let bg_image = doc
+        .get("background")
+        .and_then(|b| b.get("image"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(!bg_image.is_empty(), "background.image must be non-empty — save_background_image writers lost");
 }
 
 #[test]

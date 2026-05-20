@@ -216,51 +216,6 @@ pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
     out
 }
 
-/// Apply a background change — the non-D-Bus core of `set_background`/`clear_background`:
-///   1. Persist `image` to `config_path` via `Config::save_background_image`.
-///   2. Mirror into in-memory `config.background.image`.
-///   3. Send `ModeChange::Background { image: pixmap }` over `tx`.
-///
-/// `name` is the filename string (for persistence); `pixmap` is the decoded
-/// Pixmap (for the tick loop). Passing `None` for both clears the background.
-pub async fn apply_background(
-    config_path: &Path,
-    config: &mut Config,
-    name: Option<&str>,
-    pixmap: Option<tiny_skia::Pixmap>,
-    tx: &tokio::sync::mpsc::Sender<ModeChange>,
-) -> Result<(), zbus::fdo::Error> {
-    Config::save_background_image(config_path, name).map_err(|e| {
-        zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
-    })?;
-    config.background.image = name.map(|s| s.to_string());
-    tx.send(ModeChange::Background { image: pixmap })
-        .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
-    Ok(())
-}
-
-/// Lock-free variant of `apply_background` for use in `set_background` where the
-/// decode happens outside the state lock. Does NOT take `&mut Config`; the caller
-/// must commit the in-memory change with a separate brief lock after this returns.
-///
-///   1. Persist `image` to `config_path` via `Config::save_background_image`.
-///   2. Send `ModeChange::Background { image: pixmap }` over `tx`.
-pub async fn apply_background_outside_lock(
-    config_path: &Path,
-    name: Option<&str>,
-    pixmap: Option<tiny_skia::Pixmap>,
-    tx: &tokio::sync::mpsc::Sender<ModeChange>,
-) -> Result<(), zbus::fdo::Error> {
-    Config::save_background_image(config_path, name).map_err(|e| {
-        zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
-    })?;
-    tx.send(ModeChange::Background { image: pixmap })
-        .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
-    Ok(())
-}
-
 /// Read the layout file under `layout_dir` (validated against traversal) and
 /// return its declared variables as a list of dicts with keys `name`, `type`,
 /// `default`, `help`. Empty list if the layout declares no vars.
@@ -288,31 +243,6 @@ pub fn get_layout_vars_impl(
         out.push(m);
     }
     Ok(out)
-}
-
-/// Apply variable overrides for `name`:
-///   1. Validate the layout path against traversal.
-///   2. Persist vars to `config_path` via `Config::save_layout_vars`.
-///   3. Mirror the values into the in-memory `Config::layout_vars` so the
-///      running tick loop can see them without a restart.
-///
-/// This is the non-D-Bus core of `DisplayInterface::set_layout_vars` so tests
-/// can exercise the disk+in-memory contract without binding a session-bus
-/// service name. Callers are responsible for signalling the tick loop to
-/// reload the template after this returns Ok.
-pub fn apply_layout_vars(
-    layout_dir: &Path,
-    config_path: &Path,
-    config: &mut Config,
-    name: &str,
-    vars: HashMap<String, String>,
-) -> Result<(), zbus::fdo::Error> {
-    validate_layout_path(layout_dir, name)?;
-    Config::save_layout_vars(config_path, name, &vars).map_err(|e| {
-        zbus::fdo::Error::Failed(format!("Failed to persist layout vars: {}", e))
-    })?;
-    config.layout_vars.insert(name.to_string(), vars);
-    Ok(())
 }
 
 /// Validate `name` against `layout_dir`, then atomically persist it as the new
