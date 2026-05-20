@@ -499,25 +499,18 @@ fn background_save_sets_all_three_effects() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
-    let mut config = Config::default();
-
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
         Config::save_background_image(&config_path, Some("dark.png"))
             .expect("save_background_image must succeed");
-        config.background.image = Some("dark.png".to_string());
         tx.send(ModeChange::Background { image: None })
             .await
             .expect("channel send must succeed");
 
-        // Effect 1: in-memory config updated
-        assert_eq!(
-            config.background.image.as_deref(),
-            Some("dark.png"),
-            "in-memory config.background.image must be set"
-        );
+        // Effect 1 (in-memory mirror) is now the caller's explicit responsibility —
+        // no longer bundled into a helper, so we exercise effects 2 and 3 here.
 
         // Effect 2: on-disk config updated
         let on_disk = fs::read_to_string(&config_path).unwrap();
@@ -546,25 +539,18 @@ fn background_save_none_clears_all_three_effects() {
         "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n",
     )
     .unwrap();
-    let mut config = Config::default();
-    config.background.image = Some("old.png".to_string());
-
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
 
         Config::save_background_image(&config_path, None)
             .expect("save_background_image(None) must succeed");
-        config.background.image = None;
         tx.send(ModeChange::Background { image: None })
             .await
             .expect("channel send must succeed");
 
-        // Effect 1: in-memory config cleared
-        assert_eq!(
-            config.background.image, None,
-            "in-memory config.background.image must be None"
-        );
+        // Effect 1 (in-memory mirror) is now the caller's explicit responsibility —
+        // no longer bundled into a helper, so we exercise effects 2 and 3 here.
 
         // Effect 2: on-disk key removed
         let on_disk = fs::read_to_string(&config_path).unwrap();
