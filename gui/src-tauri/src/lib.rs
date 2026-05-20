@@ -29,7 +29,13 @@ pub fn run() {
     builtin_layouts::seed_background_dir(&background_dir)
         .expect("failed to seed built-in backgrounds");
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    }
+
+    builder
         .manage(commands::RendererState::new(layout_dir, background_dir, config_path))
         .invoke_handler(tauri::generate_handler![
             commands::list_layouts,
@@ -40,6 +46,7 @@ pub fn run() {
             commands::save_config,
             commands::apply_to_daemon,
             commands::list_backgrounds,
+            commands::read_background,
             commands::set_background,
             commands::save_background,
             commands::get_active_background,

@@ -101,6 +101,14 @@ tick_rate = 15  # 1-60 FPS for xvfb capture mode
 Layouts in `~/.config/thermalwriter/layouts/` — built-in layouts seeded on first run.
 Backgrounds in `~/.config/thermalwriter/backgrounds/` — placeholder PNGs seeded on first run; drop your own 480×480 PNG/JPEG and select via `busctl call ... SetBackground` or the Tauri GUI's BgGallery.
 
+## Tauri Config GUI
+
+Sub-project under `gui/` — Svelte 5 + Tauri 2. Talks to the daemon over D-Bus; falls back to direct `config.toml` writes if the daemon is offline.
+
+- **Design system**: Tokyo Night Terminal HUD (see `gui/src/app.css`). Themes: Tokyo Night Storm (default), Tokyo Night, Catppuccin Mocha, Gruvbox Material, Nord — switched via `data-theme` on `<html>` and persisted in localStorage as `tw-theme`. Typography: Major Mono Display + IBM Plex Mono/Sans loaded from Google Fonts (CSP allows `fonts.googleapis.com`/`fonts.gstatic.com`).
+- **Dev mode**: `cd gui && npm run tauri:dev`. The MCP bridge (`tauri-plugin-mcp-bridge`) is wired up debug-only — once running, Claude's Tauri MCP can screenshot/inspect/drive the webview on `localhost:9223`.
+- **Backgrounds**: GUI fetches thumbnails through the `read_background` Tauri command (returns raw bytes; frontend wraps in a Blob URL).
+
 ## Key Dependencies
 
 rusb, zbus, tiny-skia, resvg, taffy, tera, fontdue, image, memmap2, sysinfo, tokio, clap, dirs, wait-timeout

@@ -255,6 +255,19 @@ pub fn list_backgrounds(
     Ok(list_background_names(&state.background_dir))
 }
 
+/// Read raw background image bytes for thumbnail rendering in the GUI.
+/// Validates the path through `validate_background_path` so traversal/symlink
+/// escapes are rejected before any disk read.
+#[tauri::command]
+pub fn read_background(
+    name: String,
+    state: tauri::State<'_, RendererState>,
+) -> Result<Response, AppError> {
+    let path = validate_background_path(&state.background_dir, &name)?;
+    let bytes = std::fs::read(&path).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
 pub async fn set_background(
     name: Option<String>,

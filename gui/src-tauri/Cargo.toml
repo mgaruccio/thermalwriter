@@ -18,7 +18,7 @@ devtools = ["tauri/devtools"]
 
 [dependencies]
 thermalwriter = { path = "../..", default-features = false }
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -27,6 +27,11 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
+# MCP bridge plugin so the GUI can be driven from Claude Code's Tauri MCP
+# server during development. The `#[cfg(debug_assertions)]` block in
+# src/lib.rs ensures `init()` is only called in dev builds, so release builds
+# never start the WebSocket server even though the crate is linked.
+tauri-plugin-mcp-bridge = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
