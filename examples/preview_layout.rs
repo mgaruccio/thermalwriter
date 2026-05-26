@@ -12,16 +12,10 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use thermalwriter::render::{FrameSource, TemplateRenderer};
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::sensor::SensorHub;
+use thermalwriter::render::{FrameSource, TemplateRenderer};
 use thermalwriter::sensor::history::SensorHistory;
-use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalwriter::sensor::amdgpu::AmdGpuProvider;
-use thermalwriter::sensor::nvidia::NvidiaProvider;
-use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::theme::ThemePalette;
 
 /// Returns (content, display_name, is_svg).
@@ -31,7 +25,8 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
     if path.exists() && path.is_file() {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let display_name = path.file_stem()
+        let display_name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("custom")
             .to_string();
@@ -59,9 +54,21 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
 
     // Fall back to built-in layouts
     match name_or_path {
-        "system-stats" => Ok((include_str!("../layouts/system-stats.html").to_string(), "system-stats".to_string(), false)),
-        "gpu-focus" => Ok((include_str!("../layouts/gpu-focus.html").to_string(), "gpu-focus".to_string(), false)),
-        "minimal" => Ok((include_str!("../layouts/minimal.html").to_string(), "minimal".to_string(), false)),
+        "system-stats" => Ok((
+            include_str!("../layouts/system-stats.html").to_string(),
+            "system-stats".to_string(),
+            false,
+        )),
+        "gpu-focus" => Ok((
+            include_str!("../layouts/gpu-focus.html").to_string(),
+            "gpu-focus".to_string(),
+            false,
+        )),
+        "minimal" => Ok((
+            include_str!("../layouts/minimal.html").to_string(),
+            "minimal".to_string(),
+            false,
+        )),
         other => anyhow::bail!(
             "Layout not found: '{}'\n\nUsage: cargo run --example preview_layout [name_or_path]\n  name_or_path: file path (.html or .svg), layouts/<name>.html, layouts/svg/<name>.svg, or built-in (system-stats, gpu-focus, minimal)",
             other
@@ -71,11 +78,16 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
 
 /// Generate synthetic history data for preview (60 points, sinusoidal wave around a base value).
 /// Uses a deterministic pattern so previews are reproducible.
-fn fill_synthetic_history(history: &mut SensorHistory, metrics: &[String], sensor_data: &HashMap<String, String>) {
+fn fill_synthetic_history(
+    history: &mut SensorHistory,
+    metrics: &[String],
+    sensor_data: &HashMap<String, String>,
+) {
     let sample_count = 60usize;
     for metric in metrics {
         // Use current sensor value as base if available, otherwise pick a reasonable default
-        let base: f64 = sensor_data.get(metric)
+        let base: f64 = sensor_data
+            .get(metric)
             .and_then(|v| v.parse().ok())
             .unwrap_or(50.0);
 
@@ -92,21 +104,30 @@ fn fill_synthetic_history(history: &mut SensorHistory, metrics: &[String], senso
     }
 }
 
+/// Mock sensor data keeps preview generation deterministic and hardware-free.
+fn mock_sensors() -> HashMap<String, String> {
+    HashMap::from([
+        ("cpu_temp".into(), "67".into()),
+        ("cpu_util".into(), "42".into()),
+        ("gpu_temp".into(), "71".into()),
+        ("gpu_util".into(), "87".into()),
+        ("gpu_power".into(), "285".into()),
+        ("ram_used".into(), "24.2".into()),
+        ("ram_total".into(), "60.4".into()),
+        ("vram_used".into(), "9.8".into()),
+        ("vram_total".into(), "15.9".into()),
+        ("fps".into(), "144".into()),
+        ("frametime".into(), "6.9".into()),
+    ])
+}
+
 fn main() -> Result<()> {
-    let name_or_path = std::env::args().nth(1).unwrap_or("system-stats".to_string());
+    let name_or_path = std::env::args()
+        .nth(1)
+        .unwrap_or("system-stats".to_string());
     let (template, display_name, is_svg) = load_template(&name_or_path)?;
 
-    let mut hub = SensorHub::new();
-    hub.add_provider(Box::new(HwmonProvider::new()));
-    hub.add_provider(Box::new(SysinfoProvider::new()));
-    hub.add_provider(Box::new(AmdGpuProvider::new()));
-    hub.add_provider(Box::new(NvidiaProvider::new()));
-    hub.add_provider(Box::new(RaplProvider::new()));
-
-    // RAPL needs two polls to compute power delta
-    hub.poll();
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    let sensors = hub.poll();
+    let sensors = mock_sensors();
     let mut keys: Vec<_> = sensors.iter().collect();
     keys.sort_by_key(|(k, _)| (*k).clone());
     for (k, v) in &keys {
@@ -129,7 +150,11 @@ fn main() -> Result<()> {
                 history.configure_metric(metric, cfg.duration);
             }
             fill_synthetic_history(&mut history, &metrics, &sensors);
-            println!("Pre-filled {} metrics with {} synthetic samples each", metrics.len(), 60);
+            println!(
+                "Pre-filled {} metrics with {} synthetic samples each",
+                metrics.len(),
+                60
+            );
             Some(Arc::new(Mutex::new(history)))
         } else {
             None

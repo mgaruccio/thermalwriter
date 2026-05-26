@@ -36,7 +36,11 @@ pub fn run() {
     }
 
     builder
-        .manage(commands::RendererState::new(layout_dir, background_dir, config_path))
+        .manage(commands::RendererState::new(
+            layout_dir,
+            background_dir,
+            config_path,
+        ))
         .invoke_handler(tauri::generate_handler![
             commands::list_layouts,
             commands::get_layout_vars,

@@ -35,7 +35,11 @@ impl Function for BtopBarsFunction {
         let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let w = args.get("w").and_then(|v| v.as_f64()).unwrap_or(480.0);
         let h = args.get("h").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let color = args.get("color").and_then(|v| v.as_str()).unwrap_or("#e94560").to_string();
+        let color = args
+            .get("color")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#e94560")
+            .to_string();
 
         let mut max_samples = 0usize;
         for hist in &all_histories {
@@ -106,60 +110,102 @@ impl Function for BtopNetFunction {
         let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let w = args.get("w").and_then(|v| v.as_f64()).unwrap_or(480.0);
         let h = args.get("h").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let rx_color = args.get("rx_color").and_then(|v| v.as_str()).unwrap_or("#53d8fb").to_string();
-        let tx_color = args.get("tx_color").and_then(|v| v.as_str()).unwrap_or("#e94560").to_string();
+        let rx_color = args
+            .get("rx_color")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#53d8fb")
+            .to_string();
+        let tx_color = args
+            .get("tx_color")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#e94560")
+            .to_string();
 
         let center_y = y + h / 2.0;
         let half_h = h / 2.0;
 
         // Find max across both datasets for consistent scaling
-        let max_val = rx_data.iter().chain(tx_data.iter())
+        let max_val = rx_data
+            .iter()
+            .chain(tx_data.iter())
             .cloned()
             .fold(0.0f64, f64::max);
         let scale = if max_val > 0.0 { half_h / max_val } else { 1.0 };
 
         let n_samples = rx_data.len().max(tx_data.len());
-        let step_x = if n_samples > 1 { w / (n_samples - 1) as f64 } else { w };
+        let step_x = if n_samples > 1 {
+            w / (n_samples - 1) as f64
+        } else {
+            w
+        };
 
         // Build RX polygon (above center — y decreases upward)
         let mut rx_svg = String::new();
         if !rx_data.is_empty() {
-            let rx_points: Vec<String> = rx_data.iter().enumerate().map(|(i, &val)| {
-                let px = x + i as f64 * step_x;
-                let py = center_y - (val * scale);
-                format!("{:.1},{:.1}", px, py)
-            }).collect();
-            let br = format!("{:.1},{:.1}", x + (rx_data.len() - 1) as f64 * step_x, center_y);
+            let rx_points: Vec<String> = rx_data
+                .iter()
+                .enumerate()
+                .map(|(i, &val)| {
+                    let px = x + i as f64 * step_x;
+                    let py = center_y - (val * scale);
+                    format!("{:.1},{:.1}", px, py)
+                })
+                .collect();
+            let br = format!(
+                "{:.1},{:.1}",
+                x + (rx_data.len() - 1) as f64 * step_x,
+                center_y
+            );
             let bl = format!("{:.1},{:.1}", x, center_y);
             rx_svg = format!(
                 r#"<polygon points="{} {} {}" fill="{}" opacity="0.7"/>"#,
-                rx_points.join(" "), br, bl, rx_color
+                rx_points.join(" "),
+                br,
+                bl,
+                rx_color
             );
         }
 
         // Build TX polygon (below center — y increases downward)
         let mut tx_svg = String::new();
         if !tx_data.is_empty() {
-            let tx_points: Vec<String> = tx_data.iter().enumerate().map(|(i, &val)| {
-                let px = x + i as f64 * step_x;
-                let py = center_y + (val * scale);
-                format!("{:.1},{:.1}", px, py)
-            }).collect();
-            let tr = format!("{:.1},{:.1}", x + (tx_data.len() - 1) as f64 * step_x, center_y);
+            let tx_points: Vec<String> = tx_data
+                .iter()
+                .enumerate()
+                .map(|(i, &val)| {
+                    let px = x + i as f64 * step_x;
+                    let py = center_y + (val * scale);
+                    format!("{:.1},{:.1}", px, py)
+                })
+                .collect();
+            let tr = format!(
+                "{:.1},{:.1}",
+                x + (tx_data.len() - 1) as f64 * step_x,
+                center_y
+            );
             let tl = format!("{:.1},{:.1}", x, center_y);
             tx_svg = format!(
                 r#"<polygon points="{} {} {}" fill="{}" opacity="0.7"/>"#,
-                tx_points.join(" "), tr, tl, tx_color
+                tx_points.join(" "),
+                tr,
+                tl,
+                tx_color
             );
         }
 
         // Center axis line
         let axis = format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#444444\" stroke-width=\"1\"/>",
-            x, center_y, x + w, center_y
+            x,
+            center_y,
+            x + w,
+            center_y
         );
 
-        Ok(Value::String(format!("<g>{}{}{}</g>", axis, rx_svg, tx_svg)))
+        Ok(Value::String(format!(
+            "<g>{}{}{}</g>",
+            axis, rx_svg, tx_svg
+        )))
     }
 
     fn is_safe(&self) -> bool {
@@ -191,25 +237,48 @@ impl Function for BtopRamFunction {
         let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let w = args.get("w").and_then(|v| v.as_f64()).unwrap_or(480.0);
         let h = args.get("h").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let fill = args.get("fill").and_then(|v| v.as_str()).unwrap_or("#cc9eff").to_string();
-        let total = args.get("total").and_then(|v| v.as_f64()).unwrap_or(1.0).max(0.001);
+        let fill = args
+            .get("fill")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#cc9eff")
+            .to_string();
+        let total = args
+            .get("total")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(0.001);
 
-        let step_x = if data.len() > 1 { w / (data.len() - 1) as f64 } else { 0.0 };
+        let step_x = if data.len() > 1 {
+            w / (data.len() - 1) as f64
+        } else {
+            0.0
+        };
         let bottom_y = y + h;
 
-        let points: Vec<String> = data.iter().enumerate().map(|(i, &val)| {
-            let px = x + i as f64 * step_x;
-            let normalized = (val / total).clamp(0.0, 1.0);
-            let py = bottom_y - (normalized * h);
-            format!("{:.1},{:.1}", px, py)
-        }).collect();
+        let points: Vec<String> = data
+            .iter()
+            .enumerate()
+            .map(|(i, &val)| {
+                let px = x + i as f64 * step_x;
+                let normalized = (val / total).clamp(0.0, 1.0);
+                let py = bottom_y - (normalized * h);
+                format!("{:.1},{:.1}", px, py)
+            })
+            .collect();
 
-        let br = format!("{:.1},{:.1}", x + (data.len() - 1) as f64 * step_x, bottom_y);
+        let br = format!(
+            "{:.1},{:.1}",
+            x + (data.len() - 1) as f64 * step_x,
+            bottom_y
+        );
         let bl = format!("{:.1},{:.1}", x, bottom_y);
 
         let area = format!(
             r#"<polygon points="{} {} {}" fill="{}" opacity="0.8"/>"#,
-            points.join(" "), br, bl, fill
+            points.join(" "),
+            br,
+            bl,
+            fill
         );
 
         Ok(Value::String(format!("<g>{}</g>", area)))

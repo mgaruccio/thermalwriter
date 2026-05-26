@@ -49,17 +49,30 @@ fn to_taffy_style(es: &ElementStyle) -> Style {
     }
 
     if let Some(gap) = es.gap {
-        style.gap = Size { width: length(gap), height: length(gap) };
+        style.gap = Size {
+            width: length(gap),
+            height: length(gap),
+        };
     }
 
     if let Some(p) = es.padding {
         let lp = LengthPercentage::Length(p);
-        style.padding = Rect { left: lp, right: lp, top: lp, bottom: lp };
+        style.padding = Rect {
+            left: lp,
+            right: lp,
+            top: lp,
+            bottom: lp,
+        };
     }
 
     if let Some(m) = es.margin {
         let lpa = LengthPercentageAuto::Length(m);
-        style.margin = Rect { left: lpa, right: lpa, top: lpa, bottom: lpa };
+        style.margin = Rect {
+            left: lpa,
+            right: lpa,
+            top: lpa,
+            bottom: lpa,
+        };
     }
 
     if let Some(w) = es.width {
@@ -99,16 +112,23 @@ fn build_taffy_tree(
 }
 
 /// Compute layout for an element tree. Returns flat list of positioned nodes.
-pub fn compute_layout(root: &Element, container_w: f32, container_h: f32) -> Result<Vec<LayoutNode>> {
+pub fn compute_layout(
+    root: &Element,
+    container_w: f32,
+    container_h: f32,
+) -> Result<Vec<LayoutNode>> {
     let mut taffy: TaffyTree<usize> = TaffyTree::new();
     let mut node_map: Vec<(NodeId, Element)> = Vec::new();
 
     let root_id = build_taffy_tree(&mut taffy, root, &mut node_map)?;
 
-    taffy.compute_layout(root_id, Size {
-        width: AvailableSpace::Definite(container_w),
-        height: AvailableSpace::Definite(container_h),
-    })?;
+    taffy.compute_layout(
+        root_id,
+        Size {
+            width: AvailableSpace::Definite(container_w),
+            height: AvailableSpace::Definite(container_h),
+        },
+    )?;
 
     // Collect layout results with absolute positions
     let mut result = Vec::new();

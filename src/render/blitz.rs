@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tiny_skia::Pixmap;
 
-use anyrender::{render_to_buffer, PaintScene as _};
+use anyrender::{PaintScene as _, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
@@ -66,13 +66,7 @@ impl BlitzRenderer {
                 );
 
                 // Paint the document
-                paint_scene(
-                    scene,
-                    document.as_ref(),
-                    scale as f64,
-                    render_w,
-                    render_h,
-                );
+                paint_scene(scene, document.as_ref(), scale as f64, render_w, render_h);
             },
             render_w,
             render_h,

@@ -1,7 +1,7 @@
 // Drawing: renders positioned elements onto a tiny-skia pixmap using fontdue for text.
 
-use tiny_skia::*;
 use fontdue::{Font, FontSettings};
+use tiny_skia::*;
 
 use super::layout::LayoutNode;
 use super::parser::Color as ElementColor;
@@ -20,8 +20,7 @@ fn default_font() -> &'static Font {
 /// Render a list of positioned layout nodes into a tiny-skia Pixmap.
 pub fn render_nodes(nodes: &[LayoutNode], width: u32, height: u32) -> anyhow::Result<Pixmap> {
     use anyhow::Context;
-    let mut pixmap = Pixmap::new(width, height)
-        .context("Failed to create pixmap")?;
+    let mut pixmap = Pixmap::new(width, height).context("Failed to create pixmap")?;
 
     for node in nodes {
         // Draw background
@@ -34,30 +33,36 @@ pub fn render_nodes(nodes: &[LayoutNode], width: u32, height: u32) -> anyhow::Re
         }
 
         // Draw text
-        if let Some(ref text) = node.text {
-            if !text.is_empty() {
-                let font_size = node.style.font_size.unwrap_or(16.0);
-                let color = node.style.color.as_ref().cloned().unwrap_or(ElementColor::white());
-                let text_align = node.style.text_align.as_deref().unwrap_or("left");
+        if let Some(ref text) = node.text
+            && !text.is_empty()
+        {
+            let font_size = node.style.font_size.unwrap_or(16.0);
+            let color = node
+                .style
+                .color
+                .as_ref()
+                .cloned()
+                .unwrap_or(ElementColor::white());
+            let text_align = node.style.text_align.as_deref().unwrap_or("left");
 
-                draw_text(
-                    &mut pixmap,
-                    text,
-                    node.x,
-                    node.y,
-                    node.width,
-                    node.height,
-                    font_size,
-                    &color,
-                    text_align,
-                );
-            }
+            draw_text(
+                &mut pixmap,
+                text,
+                node.x,
+                node.y,
+                node.width,
+                node.height,
+                font_size,
+                &color,
+                text_align,
+            );
         }
     }
 
     Ok(pixmap)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     pixmap: &mut Pixmap,
     text: &str,
@@ -104,7 +109,9 @@ fn draw_text(
         for row in 0..metrics.height {
             for col in 0..metrics.width {
                 let alpha = bitmap[row * metrics.width + col];
-                if alpha == 0 { continue; }
+                if alpha == 0 {
+                    continue;
+                }
 
                 let px = (glyph_x + col as f32) as i32;
                 let py = (glyph_y + row as f32) as i32;
@@ -119,7 +126,7 @@ fn draw_text(
                 // Alpha blend the glyph pixel
                 let a = alpha as u16;
                 let inv_a = 255 - a;
-                data[idx]     = ((color.r as u16 * a + data[idx]     as u16 * inv_a) / 255) as u8;
+                data[idx] = ((color.r as u16 * a + data[idx] as u16 * inv_a) / 255) as u8;
                 data[idx + 1] = ((color.g as u16 * a + data[idx + 1] as u16 * inv_a) / 255) as u8;
                 data[idx + 2] = ((color.b as u16 * a + data[idx + 2] as u16 * inv_a) / 255) as u8;
                 data[idx + 3] = 255; // Always fully opaque — LCD output has no transparency channel

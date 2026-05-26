@@ -3,6 +3,10 @@ name = "thermalwriter-gui"
 version = "0.1.0"
 description = "Configuration GUI for the thermalwriter cooler LCD daemon"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/mgaruccio/thermalwriter"
+publish = false
 
 [[bin]]
 name = "thermalwriter-gui"

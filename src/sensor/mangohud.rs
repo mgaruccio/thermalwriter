@@ -2,15 +2,21 @@
 // MangoHud writes CSV files to ~/.local/share/MangoHud/ (or $MANGOHUD_LOG_DIR).
 // We read only the header line + last data line — NOT the full file (can be 100s of MB).
 
+use anyhow::Result;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
-use anyhow::Result;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
 
 pub struct MangoHudProvider {
     log_dir: PathBuf,
+}
+
+impl Default for MangoHudProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MangoHudProvider {
@@ -53,7 +59,10 @@ impl MangoHudProvider {
         let mut reader = BufReader::new(file);
         let mut header = String::new();
         reader.read_line(&mut header).ok()?;
-        let header = header.trim_end_matches('\n').trim_end_matches('\r').to_string();
+        let header = header
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string();
         if header.is_empty() {
             return None;
         }
@@ -149,17 +158,26 @@ impl SensorProvider for MangoHudProvider {
             let (formatted, unit) = match key {
                 "fps" => {
                     // Round to integer
-                    let f: f64 = match raw.parse() { Ok(v) => v, Err(_) => continue };
+                    let f: f64 = match raw.parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     (format!("{}", f.round() as i64), "fps".to_string())
                 }
                 "frametime" => {
                     // 1 decimal place
-                    let f: f64 = match raw.parse() { Ok(v) => v, Err(_) => continue };
+                    let f: f64 = match raw.parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     (format!("{:.1}", f), "ms".to_string())
                 }
                 "cpu_load" | "gpu_load" => {
                     // Integer percent
-                    let f: f64 = match raw.parse() { Ok(v) => v, Err(_) => continue };
+                    let f: f64 = match raw.parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     (format!("{}", f.round() as i64), "%".to_string())
                 }
                 _ => continue,
@@ -176,10 +194,13 @@ impl SensorProvider for MangoHudProvider {
     }
 
     fn available_sensors(&self) -> Vec<SensorDescriptor> {
-        WANTED_KEYS.iter().map(|k| SensorDescriptor {
-            key: k.to_string(),
-            name: k.to_string(),
-            unit: String::new(),
-        }).collect()
+        WANTED_KEYS
+            .iter()
+            .map(|k| SensorDescriptor {
+                key: k.to_string(),
+                name: k.to_string(),
+                unit: String::new(),
+            })
+            .collect()
     }
 }

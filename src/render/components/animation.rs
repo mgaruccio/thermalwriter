@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use image::{DynamicImage, Frame, ImageFormat, codecs::gif::GifDecoder};
 use image::AnimationDecoder;
+use image::{DynamicImage, Frame, ImageFormat, codecs::gif::GifDecoder};
 
 const DEFAULT_FRAME_DELAY_MS: u64 = 100;
 
@@ -36,8 +36,7 @@ impl AnimationSource {
         let data = std::fs::read(path)
             .with_context(|| format!("Failed to read animation file: {}", path.display()))?;
 
-        let decoder = GifDecoder::new(Cursor::new(&data))
-            .context("Failed to decode GIF")?;
+        let decoder = GifDecoder::new(Cursor::new(&data)).context("Failed to decode GIF")?;
 
         let frames_iter = decoder.into_frames();
         let mut frames: Vec<AnimFrame> = Vec::new();
@@ -46,7 +45,11 @@ impl AnimationSource {
             let frame: Frame = frame_result.context("Failed to decode GIF frame")?;
             let delay_ms = {
                 let (numer, denom) = frame.delay().numer_denom_ms();
-                let ms = if denom > 0 { numer as u64 / denom as u64 } else { DEFAULT_FRAME_DELAY_MS };
+                let ms = if denom > 0 {
+                    numer as u64 / denom as u64
+                } else {
+                    DEFAULT_FRAME_DELAY_MS
+                };
                 if ms == 0 { DEFAULT_FRAME_DELAY_MS } else { ms }
             };
             let img = DynamicImage::ImageRgba8(frame.into_buffer());
@@ -64,7 +67,10 @@ impl AnimationSource {
         anyhow::ensure!(!frames.is_empty(), "GIF has no frames");
 
         let total_duration = frames.iter().map(|f| f.delay).sum();
-        Ok(Self { frames, total_duration })
+        Ok(Self {
+            frames,
+            total_duration,
+        })
     }
 
     /// Number of frames in the animation.
@@ -83,7 +89,11 @@ impl AnimationSource {
             return 0.0;
         }
         let avg_delay_secs = self.total_duration.as_secs_f64() / self.frames.len() as f64;
-        if avg_delay_secs > 0.0 { 1.0 / avg_delay_secs } else { 10.0 }
+        if avg_delay_secs > 0.0 {
+            1.0 / avg_delay_secs
+        } else {
+            10.0
+        }
     }
 
     /// Return the RGBA pixel data for the frame at `elapsed` time (loops automatically).

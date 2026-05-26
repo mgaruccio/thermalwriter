@@ -2,12 +2,12 @@
 //! Usage: cargo run --example test_display
 
 use anyhow::Result;
+use fontdue::{Font, FontSettings};
 use std::io::Cursor;
 use std::thread;
 use std::time::Duration;
-use tiny_skia::*;
-use fontdue::{Font, FontSettings};
 use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
+use tiny_skia::*;
 
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 480;
@@ -20,7 +20,9 @@ fn draw_test_frame() -> Pixmap {
     bg.set_color_rgba8(26, 26, 46, 255); // #1a1a2e
     pixmap.fill_rect(
         Rect::from_xywh(0.0, 0.0, WIDTH as f32, HEIGHT as f32).unwrap(),
-        &bg, Transform::identity(), None,
+        &bg,
+        Transform::identity(),
+        None,
     );
 
     // Red band at top
@@ -28,7 +30,9 @@ fn draw_test_frame() -> Pixmap {
     red.set_color_rgba8(255, 0, 0, 255);
     pixmap.fill_rect(
         Rect::from_xywh(0.0, 0.0, WIDTH as f32, 80.0).unwrap(),
-        &red, Transform::identity(), None,
+        &red,
+        Transform::identity(),
+        None,
     );
 
     // Green band in middle
@@ -36,7 +40,9 @@ fn draw_test_frame() -> Pixmap {
     green.set_color_rgba8(0, 255, 0, 255);
     pixmap.fill_rect(
         Rect::from_xywh(0.0, 200.0, WIDTH as f32, 80.0).unwrap(),
-        &green, Transform::identity(), None,
+        &green,
+        Transform::identity(),
+        None,
     );
 
     // Blue band at bottom
@@ -44,23 +50,58 @@ fn draw_test_frame() -> Pixmap {
     blue.set_color_rgba8(0, 0, 255, 255);
     pixmap.fill_rect(
         Rect::from_xywh(0.0, 400.0, WIDTH as f32, 80.0).unwrap(),
-        &blue, Transform::identity(), None,
+        &blue,
+        Transform::identity(),
+        None,
     );
 
     // Draw "TOP" text near the red band using fontdue
     let font = Font::from_bytes(
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf") as &[u8],
         FontSettings::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
-    blit_text(&mut pixmap, &font, "RED=TOP", 20.0, 30.0, 48.0, [255, 255, 255]);
-    blit_text(&mut pixmap, &font, "GREEN=MID", 20.0, 230.0, 48.0, [0, 0, 0]);
-    blit_text(&mut pixmap, &font, "BLUE=BOT", 20.0, 430.0, 48.0, [255, 255, 255]);
+    blit_text(
+        &mut pixmap,
+        &font,
+        "RED=TOP",
+        20.0,
+        30.0,
+        48.0,
+        [255, 255, 255],
+    );
+    blit_text(
+        &mut pixmap,
+        &font,
+        "GREEN=MID",
+        20.0,
+        230.0,
+        48.0,
+        [0, 0, 0],
+    );
+    blit_text(
+        &mut pixmap,
+        &font,
+        "BLUE=BOT",
+        20.0,
+        430.0,
+        48.0,
+        [255, 255, 255],
+    );
 
     pixmap
 }
 
-fn blit_text(pixmap: &mut Pixmap, font: &Font, text: &str, x: f32, y: f32, size: f32, color: [u8; 3]) {
+fn blit_text(
+    pixmap: &mut Pixmap,
+    font: &Font,
+    text: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: [u8; 3],
+) {
     let mut cx = x;
     for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, size);
@@ -69,15 +110,19 @@ fn blit_text(pixmap: &mut Pixmap, font: &Font, text: &str, x: f32, y: f32, size:
         for row in 0..metrics.height {
             for col in 0..metrics.width {
                 let alpha = bitmap[row * metrics.width + col];
-                if alpha == 0 { continue; }
+                if alpha == 0 {
+                    continue;
+                }
                 let px = (gx + col as f32) as i32;
                 let py = (gy + row as f32) as i32;
-                if px < 0 || py < 0 || px >= WIDTH as i32 || py >= HEIGHT as i32 { continue; }
+                if px < 0 || py < 0 || px >= WIDTH as i32 || py >= HEIGHT as i32 {
+                    continue;
+                }
                 let idx = (py as u32 * WIDTH + px as u32) as usize * 4;
                 let data = pixmap.data_mut();
                 let a = alpha as u16;
                 let inv = 255 - a;
-                data[idx]     = ((color[0] as u16 * a + data[idx] as u16 * inv) / 255) as u8;
+                data[idx] = ((color[0] as u16 * a + data[idx] as u16 * inv) / 255) as u8;
                 data[idx + 1] = ((color[1] as u16 * a + data[idx + 1] as u16 * inv) / 255) as u8;
                 data[idx + 2] = ((color[2] as u16 * a + data[idx + 2] as u16 * inv) / 255) as u8;
                 data[idx + 3] = 255;

@@ -26,7 +26,9 @@ pub enum AppError {
     #[error("renderer state poisoned")]
     StatePoisoned,
 
-    #[error("daemon is not running ({reason}). Start it with `systemctl --user start thermalwriter`.")]
+    #[error(
+        "daemon is not running ({reason}). Start it with `systemctl --user start thermalwriter`."
+    )]
     DaemonUnavailable { reason: String },
 
     #[error("daemon call failed: {0}")]

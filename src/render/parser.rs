@@ -26,35 +26,61 @@ impl Color {
             let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
             let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
             let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
-            Some(Self { r: r * 17, g: g * 17, b: b * 17, a: 255 })
+            Some(Self {
+                r: r * 17,
+                g: g * 17,
+                b: b * 17,
+                a: 255,
+            })
         } else {
             None
         }
     }
 
-    pub fn white() -> Self { Self { r: 255, g: 255, b: 255, a: 255 } }
-    pub fn black() -> Self { Self { r: 0, g: 0, b: 0, a: 255 } }
-    pub fn transparent() -> Self { Self { r: 0, g: 0, b: 0, a: 0 } }
+    pub fn white() -> Self {
+        Self {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        }
+    }
+    pub fn black() -> Self {
+        Self {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+    pub fn transparent() -> Self {
+        Self {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        }
+    }
 }
 
 /// Parsed inline styles relevant to our subset.
 #[derive(Debug, Clone, Default)]
 pub struct ElementStyle {
-    pub display: Option<String>,           // "flex", "block"
-    pub flex_direction: Option<String>,    // "row", "column"
-    pub justify_content: Option<String>,   // "center", "space-between", etc.
-    pub align_items: Option<String>,       // "center", "flex-start", etc.
-    pub gap: Option<f32>,                  // px
-    pub padding: Option<f32>,             // px (uniform for now)
-    pub margin: Option<f32>,              // px (uniform for now)
-    pub font_size: Option<f32>,           // px
+    pub display: Option<String>,         // "flex", "block"
+    pub flex_direction: Option<String>,  // "row", "column"
+    pub justify_content: Option<String>, // "center", "space-between", etc.
+    pub align_items: Option<String>,     // "center", "flex-start", etc.
+    pub gap: Option<f32>,                // px
+    pub padding: Option<f32>,            // px (uniform for now)
+    pub margin: Option<f32>,             // px (uniform for now)
+    pub font_size: Option<f32>,          // px
     pub font_family: Option<String>,
     pub color: Option<Color>,
     pub background: Option<Color>,
-    pub text_align: Option<String>,       // "left", "center", "right"
-    pub border_radius: Option<f32>,       // px
-    pub width: Option<f32>,               // px
-    pub height: Option<f32>,              // px
+    pub text_align: Option<String>, // "left", "center", "right"
+    pub border_radius: Option<f32>, // px
+    pub width: Option<f32>,         // px
+    pub height: Option<f32>,        // px
 }
 
 /// A node in the parsed element tree.
@@ -78,7 +104,9 @@ pub fn parse_style(style_str: &str) -> ElementStyle {
     let mut style = ElementStyle::default();
     for decl in style_str.split(';') {
         let decl = decl.trim();
-        if decl.is_empty() { continue; }
+        if decl.is_empty() {
+            continue;
+        }
         let mut parts = decl.splitn(2, ':');
         let prop = parts.next().unwrap_or("").trim();
         let val = parts.next().unwrap_or("").trim();
@@ -123,9 +151,7 @@ impl<'a> HtmlParser<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.pos < self.input.len()
-            && self.input.as_bytes()[self.pos].is_ascii_whitespace()
-        {
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
     }
@@ -162,7 +188,9 @@ impl<'a> HtmlParser<'a> {
                 // Closing tag
                 self.pos += 2 + tag.len(); // skip '</' + tag
                 self.skip_whitespace();
-                if self.starts_with(">") { self.pos += 1; }
+                if self.starts_with(">") {
+                    self.pos += 1;
+                }
                 break;
             } else if self.starts_with("<") {
                 // Child element
@@ -187,9 +215,18 @@ impl<'a> HtmlParser<'a> {
             }
         }
 
-        let text = if text_parts.is_empty() { None } else { Some(text_parts.join(" ")) };
+        let text = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join(" "))
+        };
 
-        Ok(Element { tag, style, text, children })
+        Ok(Element {
+            tag,
+            style,
+            text,
+            children,
+        })
     }
 
     fn parse_tag_name(&mut self) -> String {
@@ -211,7 +248,9 @@ impl<'a> HtmlParser<'a> {
 
         while self.pos < self.input.len() && !self.starts_with(">") {
             self.skip_whitespace();
-            if self.starts_with(">") { break; }
+            if self.starts_with(">") {
+                break;
+            }
 
             let attr_name = self.parse_tag_name();
             if attr_name.is_empty() {
@@ -246,7 +285,9 @@ impl<'a> HtmlParser<'a> {
                 self.pos += 1;
             }
             let val = self.input[start..self.pos].to_string();
-            if self.pos < self.input.len() { self.pos += 1; } // skip closing quote
+            if self.pos < self.input.len() {
+                self.pos += 1;
+            } // skip closing quote
             val
         } else {
             let start = self.pos;

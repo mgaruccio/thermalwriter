@@ -2,6 +2,39 @@
 name = "thermalwriter"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Linux daemon for Thermalright cooler LCD displays"
+license = "MIT"
+repository = "https://github.com/mgaruccio/thermalwriter"
+homepage = "https://github.com/mgaruccio/thermalwriter"
+readme = "README.md"
+keywords = ["thermalright", "lcd", "cooler", "daemon", "linux"]
+categories = ["command-line-utilities", "hardware-support"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/assets/**",
+    "/layouts/blitz-glass.html",
+    "/layouts/blitz-rings.html",
+    "/layouts/dual-gauge.html",
+    "/layouts/fps-hero.html",
+    "/layouts/gpu-focus.html",
+    "/layouts/minimal.html",
+    "/layouts/neon-dash.html",
+    "/layouts/system-stats.html",
+    "/layouts/svg/**",
+    "/packaging/**",
+    "/systemd/**",
+    "/docs/architecture.md",
+    "/docs/release.md",
+]
 
 [workspace]
 members = [".", "gui/src-tauri"]

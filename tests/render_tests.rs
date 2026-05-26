@@ -1,16 +1,15 @@
-use thermalwriter::render::parser::*;
-use thermalwriter::render::layout::*;
-use thermalwriter::render::{FrameSource, TemplateRenderer};
-use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::sensor::history::SensorHistory;
-use thermalwriter::theme::ThemePalette;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use thermalwriter::render::layout::*;
+use thermalwriter::render::parser::*;
+use thermalwriter::render::svg::SvgRenderer;
+use thermalwriter::render::{FrameSource, TemplateRenderer};
+use thermalwriter::sensor::history::SensorHistory;
+use thermalwriter::theme::ThemePalette;
 
 fn make_solid_color_png(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
-    use image::{ImageBuffer, Rgb, ImageFormat};
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
+    use image::{ImageBuffer, ImageFormat, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, ImageFormat::Png).unwrap();
     buf.into_inner()
@@ -81,8 +80,14 @@ fn layout_flex_column_stacks_children() {
     let el = parse_html(html).unwrap();
     let nodes = compute_layout(&el, 480.0, 480.0).unwrap();
     // Find children by text
-    let top = nodes.iter().find(|n| n.text.as_deref() == Some("Top")).unwrap();
-    let bottom = nodes.iter().find(|n| n.text.as_deref() == Some("Bottom")).unwrap();
+    let top = nodes
+        .iter()
+        .find(|n| n.text.as_deref() == Some("Top"))
+        .unwrap();
+    let bottom = nodes
+        .iter()
+        .find(|n| n.text.as_deref() == Some("Bottom"))
+        .unwrap();
     assert!(bottom.y > top.y, "Bottom should be below Top");
 }
 
@@ -131,7 +136,10 @@ fn svg_renderer_without_history_errors_on_graph_component() {
     // Deliberately do NOT call set_history() — simulates the buggy reload path
 
     let result = renderer.render(&HashMap::new());
-    assert!(result.is_err(), "Expected Tera error when graph() receives undefined cpu_temp_history");
+    assert!(
+        result.is_err(),
+        "Expected Tera error when graph() receives undefined cpu_temp_history"
+    );
     let err_str = format!("{:#}", result.unwrap_err());
     assert!(
         err_str.contains("cpu_temp_history") || err_str.contains("not found"),
@@ -167,12 +175,16 @@ fn svg_renderer_with_history_renders_visible_chart() {
 
     // With history, the red stroke line is rendered — at least one pixel in the
     // top-half chart area should have R > 0 (red stroke).
-    let has_red_pixel = (0..240usize).flat_map(|row| (0..480usize).map(move |col| (row, col)))
+    let has_red_pixel = (0..240usize)
+        .flat_map(|row| (0..480usize).map(move |col| (row, col)))
         .any(|(row, col)| {
             let idx = (row * 480 + col) * 3;
             frame.data[idx] > 0 // R channel: red stroke
         });
-    assert!(has_red_pixel, "Expected a visible red chart stroke when history data is present");
+    assert!(
+        has_red_pixel,
+        "Expected a visible red chart stroke when history data is present"
+    );
 }
 
 /// Rendering with a configured (non-default) theme palette injects the configured
@@ -205,12 +217,24 @@ fn svg_renderer_uses_configured_theme_not_default() {
 
     // Top-left pixel should be #7aa2f7 (R=0x7a, G=0xa2, B=0xf7)
     // NOT the default primary #e94560 (R=0xe9, G=0x45, B=0x60)
-    assert_eq!(frame.data[0], 0x7a, "R: expected Tokyo Night blue #7aa2f7, not default #e94560");
-    assert_eq!(frame.data[1], 0xa2, "G: expected Tokyo Night blue #7aa2f7, not default #e94560");
-    assert_eq!(frame.data[2], 0xf7, "B: expected Tokyo Night blue #7aa2f7, not default #e94560");
+    assert_eq!(
+        frame.data[0], 0x7a,
+        "R: expected Tokyo Night blue #7aa2f7, not default #e94560"
+    );
+    assert_eq!(
+        frame.data[1], 0xa2,
+        "G: expected Tokyo Night blue #7aa2f7, not default #e94560"
+    );
+    assert_eq!(
+        frame.data[2], 0xf7,
+        "B: expected Tokyo Night blue #7aa2f7, not default #e94560"
+    );
 
     // Verify it's NOT the default color
-    assert_ne!(frame.data[0], 0xe9, "Should not be the default theme primary R=0xe9");
+    assert_ne!(
+        frame.data[0], 0xe9,
+        "Should not be the default theme primary R=0xe9"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +245,7 @@ fn svg_renderer_uses_configured_theme_not_default() {
 /// We use a 9000x9000 image that exceeds the 8192-pixel dimension cap.
 #[test]
 fn decode_to_pixmap_rejects_oversized_image() {
-    use image::{ImageBuffer, Rgb, ImageFormat};
+    use image::{ImageBuffer, ImageFormat, Rgb};
     // 9000x9000 exceeds the 8192 dimension limit
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
         ImageBuffer::from_pixel(9000, 9000, Rgb([128u8, 128u8, 128u8]));
@@ -230,7 +254,10 @@ fn decode_to_pixmap_rejects_oversized_image() {
     let bytes = buf.into_inner();
 
     let result = thermalwriter::render::background::decode_to_pixmap(&bytes);
-    assert!(result.is_err(), "decode_to_pixmap must reject images with dimensions > 8192");
+    assert!(
+        result.is_err(),
+        "decode_to_pixmap must reject images with dimensions > 8192"
+    );
 }
 
 /// decode_from_file must reject files larger than 8 MB BEFORE reading them via a
@@ -244,7 +271,12 @@ fn decode_from_file_rejects_oversized_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fat.png");
     // Sparse file > 8 MB: seek past 8 MB and write a single byte.
-    let mut f = OpenOptions::new().create(true).write(true).open(&path).unwrap();
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
     let eight_mb_plus_one: u64 = 8 * 1024 * 1024 + 1;
     f.seek(SeekFrom::Start(eight_mb_plus_one)).unwrap();
     f.write_all(b"\x00").unwrap();
@@ -271,7 +303,11 @@ fn decode_from_file_rejects_oversized_file() {
 fn decode_to_pixmap_accepts_valid_480_image() {
     let bytes = make_solid_color_png(480, 480, 0, 128, 255);
     let result = thermalwriter::render::background::decode_to_pixmap(&bytes);
-    assert!(result.is_ok(), "decode_to_pixmap must accept a valid 480x480 PNG; got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "decode_to_pixmap must accept a valid 480x480 PNG; got: {:?}",
+        result.err()
+    );
     let pixmap = result.unwrap();
     assert_eq!(pixmap.width(), 480);
     assert_eq!(pixmap.height(), 480);
@@ -294,10 +330,14 @@ fn decode_png_to_pixmap_roundtrips_dimensions_and_pixel_values() {
     // premultiplied == straight: R=255, G=0, B=0, A=255.
     let idx = (240 * 480 + 240) * 4;
     let data = pixmap.data();
-    assert_eq!(data[idx],     255, "center pixel R should be 255 (red)");
-    assert_eq!(data[idx + 1],   0, "center pixel G should be 0");
-    assert_eq!(data[idx + 2],   0, "center pixel B should be 0");
-    assert_eq!(data[idx + 3], 255, "center pixel A should be 255 (fully opaque)");
+    assert_eq!(data[idx], 255, "center pixel R should be 255 (red)");
+    assert_eq!(data[idx + 1], 0, "center pixel G should be 0");
+    assert_eq!(data[idx + 2], 0, "center pixel B should be 0");
+    assert_eq!(
+        data[idx + 3],
+        255,
+        "center pixel A should be 255 (fully opaque)"
+    );
 }
 
 #[test]
@@ -330,8 +370,8 @@ fn svg_renderer_composites_background_under_transparent_layout() {
     let frame = renderer.render(&Default::default()).unwrap();
     // Top-left pixel (0,0): no text there, so bg red shows through
     assert_eq!(frame.data[0], 255, "R should be 255 (bg red)");
-    assert_eq!(frame.data[1], 0,   "G should be 0");
-    assert_eq!(frame.data[2], 0,   "B should be 0");
+    assert_eq!(frame.data[1], 0, "G should be 0");
+    assert_eq!(frame.data[2], 0, "B should be 0");
 }
 
 #[test]
@@ -344,8 +384,8 @@ fn svg_renderer_renders_normally_without_background() {
     // No set_background call — should still render fine
     let frame = renderer.render(&Default::default()).unwrap();
     assert_eq!(frame.data[2], 255, "B should be 255 (the rect's blue)");
-    assert_eq!(frame.data[0], 0,   "R should be 0");
-    assert_eq!(frame.data[1], 0,   "G should be 0");
+    assert_eq!(frame.data[0], 0, "R should be 0");
+    assert_eq!(frame.data[1], 0, "G should be 0");
 }
 
 /// Simulates the tick loop's `frame_source.set_background(bg)` call on a live
@@ -375,9 +415,12 @@ fn frame_source_set_background_applies_to_running_renderer() {
 
     // After: green background shows through transparent canvas at (0,0)
     let frame_after = source.render(&Default::default()).unwrap();
-    assert_eq!(frame_after.data[0], 0,   "R after: should be 0 (green bg)");
-    assert_eq!(frame_after.data[1], 255, "G after: should be 255 (green bg)");
-    assert_eq!(frame_after.data[2], 0,   "B after: should be 0 (green bg)");
+    assert_eq!(frame_after.data[0], 0, "R after: should be 0 (green bg)");
+    assert_eq!(
+        frame_after.data[1], 255,
+        "G after: should be 255 (green bg)"
+    );
+    assert_eq!(frame_after.data[2], 0, "B after: should be 0 (green bg)");
 
     // Clear background — pixel (0,0) returns to black
     source.set_background(None);

@@ -2,14 +2,14 @@
 // Config file location: ~/.config/thermalwriter/config.toml
 // Missing file → defaults. Invalid TOML → error with path.
 
+use crate::theme::ThemePalette;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use anyhow::{Context, Result};
-use crate::theme::ThemePalette;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -171,9 +171,7 @@ impl Config {
     /// Returns the default config file path: ~/.config/thermalwriter/config.toml
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from(
-                std::env::var("HOME").unwrap_or_default()
-            ))
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
             .join("thermalwriter")
             .join("config.toml")
     }
@@ -343,8 +341,12 @@ impl Config {
             .context("background section is not a table")?;
 
         match image {
-            Some(name) => { bg.insert("image", value(name)); }
-            None => { bg.remove("image"); }
+            Some(name) => {
+                bg.insert("image", value(name));
+            }
+            None => {
+                bg.remove("image");
+            }
         }
 
         let parent = path
@@ -411,8 +413,9 @@ pub mod builtin_layouts {
         for (name, content) in backgrounds {
             let dest = bg_dir.join(name);
             if !dest.exists() {
-                std::fs::write(&dest, content)
-                    .with_context(|| format!("Failed to write built-in background: {}", dest.display()))?;
+                std::fs::write(&dest, content).with_context(|| {
+                    format!("Failed to write built-in background: {}", dest.display())
+                })?;
             }
         }
         Ok(())
@@ -434,12 +437,14 @@ pub mod builtin_layouts {
         for (name, content) in &layouts {
             let dest = layout_dir.join(name);
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create layout dir: {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create layout dir: {}", parent.display())
+                })?;
             }
             if !dest.exists() {
-                std::fs::write(&dest, content)
-                    .with_context(|| format!("Failed to write built-in layout: {}", dest.display()))?;
+                std::fs::write(&dest, content).with_context(|| {
+                    format!("Failed to write built-in layout: {}", dest.display())
+                })?;
             }
         }
         Ok(())

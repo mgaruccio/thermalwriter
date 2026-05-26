@@ -1,8 +1,8 @@
 // AmdGpu sensor provider: reads /sys/class/drm/card*/device for GPU metrics.
 
+use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
 
@@ -13,9 +13,17 @@ pub struct AmdGpuProvider {
     base_path: PathBuf,
 }
 
+impl Default for AmdGpuProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmdGpuProvider {
     pub fn new() -> Self {
-        Self { base_path: PathBuf::from(DEFAULT_DRM_PATH) }
+        Self {
+            base_path: PathBuf::from(DEFAULT_DRM_PATH),
+        }
     }
 
     /// For testing with a fake sysfs tree.
@@ -123,11 +131,14 @@ impl SensorProvider for AmdGpuProvider {
     fn available_sensors(&self) -> Vec<SensorDescriptor> {
         let mut probe = AmdGpuProvider::with_base_path(self.base_path.clone());
         match probe.poll() {
-            Ok(readings) => readings.iter().map(|r| SensorDescriptor {
-                key: r.key.clone(),
-                name: r.key.clone(),
-                unit: r.unit.clone(),
-            }).collect(),
+            Ok(readings) => readings
+                .iter()
+                .map(|r| SensorDescriptor {
+                    key: r.key.clone(),
+                    name: r.key.clone(),
+                    unit: r.unit.clone(),
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }

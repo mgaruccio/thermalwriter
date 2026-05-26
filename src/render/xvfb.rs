@@ -1,8 +1,8 @@
 //! Xvfb framebuffer capture: reads pixels from an mmap'd XWD file produced by Xvfb -fbdir.
 
+use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::path::Path;
-use anyhow::{Context, Result, bail};
 
 use super::{FrameSource, RawFrame, SensorData};
 
@@ -17,7 +17,12 @@ const XWD_COLOR_ENTRY_SIZE: usize = 12;
 
 /// Read a big-endian u32 from a byte slice at the given offset.
 fn read_be_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 /// Parsed XWD header info needed for pixel extraction.
@@ -43,7 +48,10 @@ fn parse_xwd_header(data: &[u8]) -> Result<XwdHeader> {
     let pixel_data_offset = header_size + ncolors * XWD_COLOR_ENTRY_SIZE;
 
     if bits_per_pixel != 32 {
-        bail!("Unsupported XWD bits_per_pixel: {} (expected 32)", bits_per_pixel);
+        bail!(
+            "Unsupported XWD bits_per_pixel: {} (expected 32)",
+            bits_per_pixel
+        );
     }
 
     Ok(XwdHeader {
@@ -68,7 +76,7 @@ fn bgrx_to_rgb(src: &[u8], width: u32, height: u32, bytes_per_line: u32) -> Vec<
             // x86 LSBFirst: memory layout is [B, G, R, X]
             rgb.push(src[px + 2]); // R
             rgb.push(src[px + 1]); // G
-            rgb.push(src[px]);     // B
+            rgb.push(src[px]); // B
         }
     }
 
@@ -92,15 +100,17 @@ impl XvfbSource {
             .with_context(|| format!("Failed to open XWD file: {}", fbdir_file.display()))?;
 
         // Safety: Xvfb owns the file and writes valid data. We read-only mmap.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
-            .context("Failed to mmap XWD file")?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.context("Failed to mmap XWD file")?;
 
         let header = parse_xwd_header(&mmap)?;
 
         if header.width != expected_width || header.height != expected_height {
             bail!(
                 "XWD dimensions {}x{} don't match expected {}x{}",
-                header.width, header.height, expected_width, expected_height
+                header.width,
+                header.height,
+                expected_width,
+                expected_height
             );
         }
 
@@ -200,7 +210,7 @@ mod tests {
         let width = 2u32;
         let height = 2u32;
         // 4 pixels, all green: B=0, G=255, R=0, X=0
-        let pixels = vec![0x00, 0xFF, 0x00, 0x00].repeat(4);
+        let pixels = [0x00, 0xFF, 0x00, 0x00].repeat(4);
         let xwd_data = build_test_xwd(width, height, &pixels);
 
         // Write to temp file

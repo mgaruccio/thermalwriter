@@ -22,6 +22,12 @@ pub struct RaplProvider {
     access_warned: bool,
 }
 
+impl Default for RaplProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RaplProvider {
     pub fn new() -> Self {
         let base_path = PathBuf::from(DEFAULT_POWERCAP_PATH);

@@ -51,10 +51,12 @@ pub struct SvgRenderer<'a> {
 
 impl<'a> SvgRenderer<'a> {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
-        let mut options = usvg::Options::default();
-        options.font_family = EMBEDDED_FONT_FAMILY.to_string();
-        // Pure refcount bump — no Database::clone on layout switches.
-        options.fontdb = shared_fontdb();
+        let options = usvg::Options {
+            font_family: EMBEDDED_FONT_FAMILY.to_string(),
+            // Pure refcount bump — no Database::clone on layout switches.
+            fontdb: shared_fontdb(),
+            ..Default::default()
+        };
 
         let mut tera = Tera::default();
         tera.autoescape_on(vec![]); // Disable autoescaping for SVG
@@ -131,10 +133,10 @@ impl FrameSource for SvgRenderer<'static> {
         }
 
         // Inject history arrays if configured
-        if let Some(ref history) = self.history {
-            if let Ok(hist) = history.lock() {
-                hist.inject_into_context(&mut context, DEFAULT_HISTORY_SAMPLE_COUNT);
-            }
+        if let Some(ref history) = self.history
+            && let Ok(hist) = history.lock()
+        {
+            hist.inject_into_context(&mut context, DEFAULT_HISTORY_SAMPLE_COUNT);
         }
 
         // Step 2: Tera template substitution
@@ -148,7 +150,8 @@ impl FrameSource for SvgRenderer<'static> {
             usvg::Tree::from_str(&svg_string, &self.options).context("Failed to parse SVG")?;
 
         // Step 4: Render layout to its own transparent pixmap
-        let mut layout_pixmap = Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
+        let mut layout_pixmap =
+            Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
 
         // Scale the SVG to fit the target canvas
         let svg_size = tree.size();

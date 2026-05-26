@@ -15,10 +15,7 @@ pub struct GraphFunction;
 impl Function for GraphFunction {
     fn call(&self, args: &HashMap<String, Value>) -> Result<Value> {
         let data = match args.get("data") {
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .collect::<Vec<f64>>(),
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<f64>>(),
             _ => return Ok(Value::String("<g></g>".to_string())),
         };
 
@@ -30,19 +27,42 @@ impl Function for GraphFunction {
         let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let w = args.get("w").and_then(|v| v.as_f64()).unwrap_or(480.0);
         let h = args.get("h").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let style = args.get("style").and_then(|v| v.as_str()).unwrap_or("line").to_string();
-        let stroke = args.get("stroke").and_then(|v| v.as_str()).unwrap_or("#e94560").to_string();
-        let fill = args.get("fill").and_then(|v| v.as_str()).unwrap_or("none").to_string();
-        let stroke_width = args.get("stroke_width").and_then(|v| v.as_f64()).unwrap_or(2.0);
+        let style = args
+            .get("style")
+            .and_then(|v| v.as_str())
+            .unwrap_or("line")
+            .to_string();
+        let stroke = args
+            .get("stroke")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#e94560")
+            .to_string();
+        let fill = args
+            .get("fill")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let stroke_width = args
+            .get("stroke_width")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2.0);
 
         // Compute min/max for Y-axis scaling
         let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         // Fallback to 1.0 to avoid division by zero when all values are constant
-        let range = if (max_val - min_val).abs() < 0.001 { 1.0 } else { max_val - min_val };
+        let range = if (max_val - min_val).abs() < 0.001 {
+            1.0
+        } else {
+            max_val - min_val
+        };
 
         // Generate points
-        let step_x = if data.len() > 1 { w / (data.len() - 1) as f64 } else { 0.0 };
+        let step_x = if data.len() > 1 {
+            w / (data.len() - 1) as f64
+        } else {
+            0.0
+        };
         let points: Vec<String> = data
             .iter()
             .enumerate()

@@ -1,15 +1,15 @@
 // Tick loop: polls sensors, renders a frame, encodes to JPEG, sends via transport.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use log::{debug, info, warn};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::render::{FrameSource, RawFrame};
-use crate::sensor::history::SensorHistory;
 use crate::sensor::SensorHub;
+use crate::sensor::history::SensorHistory;
 use crate::transport::Transport;
 
 /// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
@@ -76,6 +76,7 @@ pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u
 /// `source_rx`: channel for hot-swapping the frame source at runtime.
 /// `template_rx`: watch channel carrying updated HTML template strings.
 /// `sensor_history`: optional shared history buffer — updated each time sensors are polled.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tick_loop(
     transport: &mut dyn Transport,
     mut frame_source: Box<dyn FrameSource>,
@@ -92,7 +93,10 @@ pub async fn run_tick_loop(
     connected_tx: tokio::sync::watch::Sender<bool>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<()> {
-    info!("Tick loop started: {} FPS, JPEG quality={}, rotation={}°", tick_rate_fps, jpeg_quality, rotation);
+    info!(
+        "Tick loop started: {} FPS, JPEG quality={}, rotation={}°",
+        tick_rate_fps, jpeg_quality, rotation
+    );
 
     let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
@@ -127,7 +131,10 @@ pub async fn run_tick_loop(
             latest_source = Some(new_source);
         }
         if let Some(new_source) = latest_source {
-            info!("Frame source swapped to: {} (queue drained)", new_source.name());
+            info!(
+                "Frame source swapped to: {} (queue drained)",
+                new_source.name()
+            );
             frame_source = new_source;
             frame_source.set_background(cached_background.clone());
             cached_sensors.clear();
@@ -146,10 +153,10 @@ pub async fn run_tick_loop(
         let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
             let data = sensor_hub.poll();
             // Record into history buffer if configured
-            if let Some(ref hist) = sensor_history {
-                if let Ok(mut h) = hist.lock() {
-                    h.record(&data);
-                }
+            if let Some(ref hist) = sensor_history
+                && let Ok(mut h) = hist.lock()
+            {
+                h.record(&data);
             }
             cached_sensors = data;
             last_poll = tick_start;
@@ -168,11 +175,13 @@ pub async fn run_tick_loop(
                         // block_in_place yields the runtime thread pool during the USB
                         // syscall so D-Bus and other async tasks remain responsive even
                         // when a write stalls for the full WRITE_TIMEOUT (5s).
-                        if let Err(e) = tokio::task::block_in_place(|| transport.send_frame(&jpeg)) {
+                        if let Err(e) = tokio::task::block_in_place(|| transport.send_frame(&jpeg))
+                        {
                             warn!("Failed to send frame: {}", e);
                             if !transport.is_connected() {
                                 let _ = connected_tx.send(false);
-                                let reconnect_result = tokio::task::block_in_place(|| transport.try_reconnect());
+                                let reconnect_result =
+                                    tokio::task::block_in_place(|| transport.try_reconnect());
                                 match reconnect_result {
                                     Ok(()) => {
                                         info!("USB device reconnected");

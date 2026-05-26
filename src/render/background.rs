@@ -54,10 +54,9 @@ pub fn decode_to_pixmap(bytes: &[u8]) -> Result<Pixmap> {
         px[2] = ((px[2] as u32 * a) / 255) as u8;
     }
 
-    let size = IntSize::from_wh(LCD_W, LCD_H)
-        .ok_or_else(|| anyhow!("invalid LCD size constants"))?;
-    Pixmap::from_vec(data, size)
-        .ok_or_else(|| anyhow!("Pixmap::from_vec rejected RGBA buffer"))
+    let size =
+        IntSize::from_wh(LCD_W, LCD_H).ok_or_else(|| anyhow!("invalid LCD size constants"))?;
+    Pixmap::from_vec(data, size).ok_or_else(|| anyhow!("Pixmap::from_vec rejected RGBA buffer"))
 }
 
 /// Decode a background image from a file path. Used by the daemon at startup
@@ -68,10 +67,7 @@ pub fn decode_from_file(path: &std::path::Path) -> Result<Pixmap> {
         .len();
 
     if file_len > MAX_FILE_BYTES {
-        bail!(
-            "background file too large: {} bytes (max 8 MB)",
-            file_len
-        );
+        bail!("background file too large: {} bytes (max 8 MB)", file_len);
     }
 
     let bytes = std::fs::read(path)

@@ -1,21 +1,21 @@
 // Rendering pipeline: HTML/CSS template parsing, layout computation, and pixmap drawing.
 // Converts HTML/CSS templates into 480x480 JPEG frames for the cooler LCD.
 
-pub mod parser;
-pub mod layout;
-pub mod draw;
-pub mod svg;
-pub mod components;
-pub mod frontmatter;
 pub mod background;
+pub mod components;
+pub mod draw;
+pub mod frontmatter;
+pub mod layout;
+pub mod parser;
+pub mod svg;
 #[cfg(feature = "daemon")]
 pub mod xvfb;
 
 #[cfg(feature = "blitz")]
 pub mod blitz;
 
-use std::collections::HashMap;
 use anyhow::Result;
+use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
 /// Sensor data: flat map of key → string value.
@@ -56,9 +56,9 @@ impl RawFrame {
     /// Save frame as PNG (convenience for examples/debugging).
     pub fn save_png(&self, path: &str) -> anyhow::Result<()> {
         use image::{ImageBuffer, Rgb};
-        let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(
-            self.width, self.height, self.data.clone()
-        ).ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+        let img: ImageBuffer<Rgb<u8>, _> =
+            ImageBuffer::from_raw(self.width, self.height, self.data.clone())
+                .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
         img.save(path)?;
         Ok(())
     }

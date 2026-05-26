@@ -1,9 +1,9 @@
 // Nvidia GPU sensor provider: reads metrics via nvidia-smi.
 
+use anyhow::Result;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use anyhow::Result;
 use wait_timeout::ChildExt;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
@@ -12,6 +12,12 @@ use super::{SensorDescriptor, SensorProvider, SensorReading};
 const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct NvidiaProvider;
+
+impl Default for NvidiaProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NvidiaProvider {
     pub fn new() -> Self {
@@ -30,58 +36,54 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
     }
 
     // temperature.gpu — skip if N/A
-    if fields[0] != "N/A" {
-        if let Ok(_) = fields[0].parse::<f64>() {
-            readings.push(SensorReading {
-                key: "gpu_temp".to_string(),
-                value: fields[0].to_string(),
-                unit: "°C".to_string(),
-            });
-        }
+    if fields[0] != "N/A" && fields[0].parse::<f64>().is_ok() {
+        readings.push(SensorReading {
+            key: "gpu_temp".to_string(),
+            value: fields[0].to_string(),
+            unit: "°C".to_string(),
+        });
     }
 
     // utilization.gpu — skip if N/A
-    if fields[1] != "N/A" {
-        if let Ok(_) = fields[1].parse::<f64>() {
-            readings.push(SensorReading {
-                key: "gpu_util".to_string(),
-                value: fields[1].to_string(),
-                unit: "%".to_string(),
-            });
-        }
+    if fields[1] != "N/A" && fields[1].parse::<f64>().is_ok() {
+        readings.push(SensorReading {
+            key: "gpu_util".to_string(),
+            value: fields[1].to_string(),
+            unit: "%".to_string(),
+        });
     }
 
     // power.draw (watts with decimals) — skip if N/A
-    if fields[2] != "N/A" {
-        if let Ok(w) = fields[2].parse::<f64>() {
-            readings.push(SensorReading {
-                key: "gpu_power".to_string(),
-                value: format!("{:.0}", w),
-                unit: "W".to_string(),
-            });
-        }
+    if fields[2] != "N/A"
+        && let Ok(w) = fields[2].parse::<f64>()
+    {
+        readings.push(SensorReading {
+            key: "gpu_power".to_string(),
+            value: format!("{:.0}", w),
+            unit: "W".to_string(),
+        });
     }
 
     // memory.used (MiB → GB) — skip if N/A
-    if fields[3] != "N/A" {
-        if let Ok(mib) = fields[3].parse::<f64>() {
-            readings.push(SensorReading {
-                key: "vram_used".to_string(),
-                value: format!("{:.1}", mib / 1024.0),
-                unit: "GB".to_string(),
-            });
-        }
+    if fields[3] != "N/A"
+        && let Ok(mib) = fields[3].parse::<f64>()
+    {
+        readings.push(SensorReading {
+            key: "vram_used".to_string(),
+            value: format!("{:.1}", mib / 1024.0),
+            unit: "GB".to_string(),
+        });
     }
 
     // memory.total (MiB → GB) — skip if N/A
-    if fields[4] != "N/A" {
-        if let Ok(mib) = fields[4].parse::<f64>() {
-            readings.push(SensorReading {
-                key: "vram_total".to_string(),
-                value: format!("{:.1}", mib / 1024.0),
-                unit: "GB".to_string(),
-            });
-        }
+    if fields[4] != "N/A"
+        && let Ok(mib) = fields[4].parse::<f64>()
+    {
+        readings.push(SensorReading {
+            key: "vram_total".to_string(),
+            value: format!("{:.1}", mib / 1024.0),
+            unit: "GB".to_string(),
+        });
     }
 
     readings
@@ -141,11 +143,31 @@ impl SensorProvider for NvidiaProvider {
 
     fn available_sensors(&self) -> Vec<SensorDescriptor> {
         vec![
-            SensorDescriptor { key: "gpu_temp".into(), name: "GPU Temperature".into(), unit: "°C".into() },
-            SensorDescriptor { key: "gpu_util".into(), name: "GPU Utilization".into(), unit: "%".into() },
-            SensorDescriptor { key: "gpu_power".into(), name: "GPU Power".into(), unit: "W".into() },
-            SensorDescriptor { key: "vram_used".into(), name: "VRAM Used".into(), unit: "GB".into() },
-            SensorDescriptor { key: "vram_total".into(), name: "VRAM Total".into(), unit: "GB".into() },
+            SensorDescriptor {
+                key: "gpu_temp".into(),
+                name: "GPU Temperature".into(),
+                unit: "°C".into(),
+            },
+            SensorDescriptor {
+                key: "gpu_util".into(),
+                name: "GPU Utilization".into(),
+                unit: "%".into(),
+            },
+            SensorDescriptor {
+                key: "gpu_power".into(),
+                name: "GPU Power".into(),
+                unit: "W".into(),
+            },
+            SensorDescriptor {
+                key: "vram_used".into(),
+                name: "VRAM Used".into(),
+                unit: "GB".into(),
+            },
+            SensorDescriptor {
+                key: "vram_total".into(),
+                name: "VRAM Total".into(),
+                unit: "GB".into(),
+            },
         ]
     }
 }

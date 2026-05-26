@@ -1,6 +1,6 @@
 //! Preview a layout rendered via Blitz (full CSS support).
 //! Usage:
-//!   cargo run --features blitz --example preview_blitz [name_or_path]
+//!   cargo run --features blitz --example preview_blitz [name_or_path] [--live]
 //!
 //! Examples:
 //!   cargo run --features blitz --example preview_blitz neon-dash
@@ -9,14 +9,14 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use thermalwriter::render::blitz::BlitzRenderer;
 use thermalwriter::render::FrameSource;
+use thermalwriter::render::blitz::BlitzRenderer;
 use thermalwriter::sensor::SensorHub;
-use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 
 fn load_template(name_or_path: &str) -> Result<(String, String)> {
     // Try as file path first
@@ -24,7 +24,8 @@ fn load_template(name_or_path: &str) -> Result<(String, String)> {
     if path.exists() && path.is_file() {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let display_name = path.file_stem()
+        let display_name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("custom")
             .to_string();
@@ -48,13 +49,23 @@ fn load_template(name_or_path: &str) -> Result<(String, String)> {
 
 fn main() -> Result<()> {
     let name_or_path = std::env::args().nth(1).unwrap_or("neon-dash".to_string());
-    let use_mock = std::env::args().any(|a| a == "--mock");
+    let use_live = std::env::args().any(|a| a == "--live");
 
     println!("Rendering '{}' via Blitz...", name_or_path);
     let (template, display_name) = load_template(&name_or_path)?;
 
-    let sensors = if use_mock {
-        // Mock gaming-load data for testing
+    let sensors = if use_live {
+        let mut hub = SensorHub::new();
+        hub.add_provider(Box::new(HwmonProvider::new()));
+        hub.add_provider(Box::new(SysinfoProvider::new()));
+        hub.add_provider(Box::new(AmdGpuProvider::new()));
+        hub.add_provider(Box::new(NvidiaProvider::new()));
+        hub.add_provider(Box::new(RaplProvider::new()));
+        hub.poll();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        hub.poll()
+    } else {
+        // Mock gaming-load data keeps previews deterministic and hardware-free.
         let mut m = std::collections::HashMap::new();
         m.insert("cpu_temp".into(), "72".into());
         m.insert("cpu_util".into(), "45".into());
@@ -69,16 +80,6 @@ fn main() -> Result<()> {
         m.insert("gpu_clock".into(), "2520".into());
         m.insert("gpu_mem_clock".into(), "1200".into());
         m
-    } else {
-        let mut hub = SensorHub::new();
-        hub.add_provider(Box::new(HwmonProvider::new()));
-        hub.add_provider(Box::new(SysinfoProvider::new()));
-        hub.add_provider(Box::new(AmdGpuProvider::new()));
-        hub.add_provider(Box::new(NvidiaProvider::new()));
-        hub.add_provider(Box::new(RaplProvider::new()));
-        hub.poll();
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        hub.poll()
     };
 
     let mut keys: Vec<_> = sensors.iter().collect();

@@ -1,7 +1,7 @@
-use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
+use std::time::Duration;
 
 use super::{DeviceInfo, Transport};
 
@@ -49,10 +49,10 @@ fn pm_to_resolution(pm: u8) -> (u32, u32) {
     match pm {
         5 => (240, 240),
         7 | 9 => (320, 320),
-        10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 => (320, 240),
+        10..=17 => (320, 240),
         32 => (480, 480),
         50 => (240, 320),
-        64 | 65 | 66 => (320, 320),
+        64..=66 => (320, 320),
         68 | 69 => (480, 480),
         _ => (480, 480), // Default for unknown PMs (including PM=4)
     }
@@ -89,18 +89,21 @@ pub struct BulkUsb {
 
 impl BulkUsb {
     pub fn new() -> Result<Self> {
-        let handle = rusb::open_device_with_vid_pid(VID, PID)
-            .context("USB device 87AD:70DB not found")?;
+        let handle =
+            rusb::open_device_with_vid_pid(VID, PID).context("USB device 87AD:70DB not found")?;
 
-        handle.set_auto_detach_kernel_driver(true)
+        handle
+            .set_auto_detach_kernel_driver(true)
             .context("Failed to set auto-detach kernel driver")?;
 
-        handle.claim_interface(0)
+        handle
+            .claim_interface(0)
             .context("Failed to claim USB interface 0")?;
 
         // Discover bulk endpoints
         let device = handle.device();
-        let config = device.active_config_descriptor()
+        let config = device
+            .active_config_descriptor()
             .context("Failed to get active config descriptor")?;
 
         let mut ep_out = 0u8;
@@ -128,8 +131,10 @@ impl BulkUsb {
             bail!("Could not find bulk IN/OUT endpoints");
         }
 
-        info!("Opened BulkUSB device {:04x}:{:04x} (EP OUT=0x{:02x}, EP IN=0x{:02x})",
-              VID, PID, ep_out, ep_in);
+        info!(
+            "Opened BulkUSB device {:04x}:{:04x} (EP OUT=0x{:02x}, EP IN=0x{:02x})",
+            VID, PID, ep_out, ep_in
+        );
 
         Ok(Self {
             handle: Some(handle),
@@ -150,7 +155,8 @@ impl BulkUsb {
         // Timeout is excluded — a slow write is not a disconnect.
         // Use chain() not root_cause(): write_all wraps rusb::Error with context,
         // so the rusb::Error appears at chain[1], not as the root cause.
-        let is_fatal = err.chain()
+        let is_fatal = err
+            .chain()
             .find_map(|cause| cause.downcast_ref::<rusb::Error>())
             .map(|e| !matches!(e, rusb::Error::Timeout))
             .unwrap_or(false);
@@ -167,18 +173,23 @@ impl Transport for BulkUsb {
 
         // Write handshake
         let payload = handshake_payload();
-        handle.write_bulk(self.ep_out, &payload, TIMEOUT)
+        handle
+            .write_bulk(self.ep_out, &payload, TIMEOUT)
             .context("Handshake write failed")?;
         debug!("Handshake sent ({} bytes)", payload.len());
 
         // Read response
         let mut resp = [0u8; HANDSHAKE_READ_SIZE];
-        let n = handle.read_bulk(self.ep_in, &mut resp, TIMEOUT)
+        let n = handle
+            .read_bulk(self.ep_in, &mut resp, TIMEOUT)
             .context("Handshake read failed")?;
         info!("Handshake response: {} bytes", n);
 
         if n < 41 || resp[24] == 0 {
-            bail!("Handshake failed: resp[24]={} (expected non-zero)", resp[24]);
+            bail!(
+                "Handshake failed: resp[24]={} (expected non-zero)",
+                resp[24]
+            );
         }
 
         let pm = resp[24];
@@ -186,8 +197,10 @@ impl Transport for BulkUsb {
         let (width, height) = pm_to_resolution(pm);
         let use_jpeg = pm != 32;
 
-        info!("Handshake OK: PM={}, SUB={}, resolution={}x{}, jpeg={}",
-              pm, sub, width, height, use_jpeg);
+        info!(
+            "Handshake OK: PM={}, SUB={}, resolution={}x{}, jpeg={}",
+            pm, sub, width, height, use_jpeg
+        );
 
         let info = DeviceInfo {
             vid: VID,
@@ -222,11 +235,13 @@ impl Transport for BulkUsb {
             let handle = self.handle.as_ref().context("Device not open")?;
             let ep_out = self.ep_out;
 
-            let chunk_result: Result<()> = frame.chunks(CHUNK_SIZE)
-                .try_for_each(|chunk| write_all(chunk, |buf| handle.write_bulk(ep_out, buf, WRITE_TIMEOUT)));
+            let chunk_result: Result<()> = frame.chunks(CHUNK_SIZE).try_for_each(|chunk| {
+                write_all(chunk, |buf| handle.write_bulk(ep_out, buf, WRITE_TIMEOUT))
+            });
 
             if chunk_result.is_ok() && frame.len() % 512 == 0 {
-                handle.write_bulk(ep_out, &[], WRITE_TIMEOUT)
+                handle
+                    .write_bulk(ep_out, &[], WRITE_TIMEOUT)
                     .context("ZLP write failed")?;
             }
             chunk_result
@@ -235,8 +250,10 @@ impl Transport for BulkUsb {
         if let Err(ref e) = send_result {
             self.mark_disconnected_if_fatal(e);
         } else {
-            debug!("Frame sent: {}x{}, cmd={}, {} bytes",
-                   log_info.0, log_info.1, log_info.2, log_info.3);
+            debug!(
+                "Frame sent: {}x{}, cmd={}, {} bytes",
+                log_info.0, log_info.1, log_info.2, log_info.3
+            );
         }
         send_result
     }

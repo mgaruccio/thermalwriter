@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use thermalwriter::config::Config;
 use thermalwriter::service::dbus::{
-    get_layout_vars_impl, list_backgrounds_impl, list_layouts_impl, save_default_layout_impl,
-    validate_background_path, validate_layout_path, ModeChange,
+    ModeChange, get_layout_vars_impl, list_backgrounds_impl, list_layouts_impl,
+    save_default_layout_impl, validate_background_path, validate_layout_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,10 +157,7 @@ fn list_layouts_sorted_and_deduped() {
     let layouts = list_layouts_impl(layout_dir);
     let mut sorted = layouts.clone();
     sorted.sort();
-    assert_eq!(
-        layouts, sorted,
-        "list_layouts must return sorted output"
-    );
+    assert_eq!(layouts, sorted, "list_layouts must return sorted output");
 }
 
 #[test]
@@ -195,10 +192,8 @@ fn get_layout_vars_reads_frontmatter_from_disk() {
     assert_eq!(vars.len(), 2, "expected 2 vars, got {:?}", vars);
 
     // Find each by name (order isn't guaranteed — HashMap under the hood).
-    let by_name: HashMap<&str, &HashMap<String, String>> = vars
-        .iter()
-        .map(|m| (m["name"].as_str(), m))
-        .collect();
+    let by_name: HashMap<&str, &HashMap<String, String>> =
+        vars.iter().map(|m| (m["name"].as_str(), m)).collect();
 
     let theme = by_name["theme_primary"];
     assert_eq!(theme["type"], "color");
@@ -216,7 +211,11 @@ fn get_layout_vars_rejects_traversal() {
     let tmp = tempdir().unwrap();
     let layout_dir = tmp.path().join("layouts");
     fs::create_dir_all(&layout_dir).unwrap();
-    fs::write(tmp.path().join("outside.svg"), "{# vars:\nx: text = \"a\" \"b\"\n#}").unwrap();
+    fs::write(
+        tmp.path().join("outside.svg"),
+        "{# vars:\nx: text = \"a\" \"b\"\n#}",
+    )
+    .unwrap();
 
     let result = get_layout_vars_impl(&layout_dir, "../outside.svg");
     assert!(
@@ -245,9 +244,9 @@ fn get_layout_vars_rejects_traversal() {
 #[tokio::test]
 async fn concurrent_set_background_keeps_state_consistent() {
     use std::sync::Arc;
-    use tokio::sync::{Mutex, Barrier};
     use tempfile::tempdir;
     use thermalwriter::config::Config;
+    use tokio::sync::{Barrier, Mutex};
 
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
@@ -309,7 +308,8 @@ async fn concurrent_set_background_keeps_state_consistent() {
         disk_name,
         last_channel_name.unwrap_or(""),
         "disk says {:?} but channel last says {:?} — bg_change_lock not serializing end-to-end",
-        disk_name, last_channel_name
+        disk_name,
+        last_channel_name
     );
 }
 
@@ -341,7 +341,10 @@ fn validate_layout_path_returns_canonical_path() {
 
     let resolved: PathBuf = validate_layout_path(layout_dir, "svg/x.svg").unwrap();
     assert_eq!(resolved, file.canonicalize().unwrap());
-    assert!(resolved.is_absolute(), "canonicalized path must be absolute");
+    assert!(
+        resolved.is_absolute(),
+        "canonicalized path must be absolute"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +376,9 @@ fn layout_vars_updates_in_memory_and_disk() {
     validate_layout_path(&layout_dir, "neon.svg").expect("layout path must be valid");
     Config::save_layout_vars(&config_path, "neon.svg", &vars)
         .expect("save_layout_vars should succeed");
-    config.layout_vars.insert("neon.svg".to_string(), vars.clone());
+    config
+        .layout_vars
+        .insert("neon.svg".to_string(), vars.clone());
 
     // In-memory Config must reflect the new values — this is what the tick
     // loop reads when rendering the next frame.
@@ -405,11 +410,17 @@ fn layout_vars_rejects_traversal_before_touching_disk() {
 
     // validate_layout_path must reject traversal before any disk write.
     let result = validate_layout_path(&layout_dir, "../outside.svg");
-    assert!(result.is_err(), "traversal must be rejected by validate_layout_path");
+    assert!(
+        result.is_err(),
+        "traversal must be rejected by validate_layout_path"
+    );
 
     // Config file must be unchanged — nothing was persisted.
     let after = std::fs::read_to_string(&config_path).unwrap();
-    assert_eq!(after, pre, "disk config must be untouched on traversal reject");
+    assert_eq!(
+        after, pre,
+        "disk config must be untouched on traversal reject"
+    );
     // In-memory config must also be unchanged.
     assert!(
         config.layout_vars.is_empty(),
@@ -484,8 +495,14 @@ fn list_backgrounds_returns_png_and_jpeg_only() {
     let bgs = list_backgrounds_impl(bg_dir);
     assert!(bgs.contains(&"dark.png".to_string()), "must include .png");
     assert!(bgs.contains(&"city.jpg".to_string()), "must include .jpg");
-    assert!(!bgs.contains(&"readme.txt".to_string()), "must exclude .txt");
-    assert!(!bgs.contains(&"config.toml".to_string()), "must exclude .toml");
+    assert!(
+        !bgs.contains(&"readme.txt".to_string()),
+        "must exclude .txt"
+    );
+    assert!(
+        !bgs.contains(&"config.toml".to_string()),
+        "must exclude .toml"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -515,10 +532,7 @@ fn background_save_sets_all_three_effects() {
         // Effect 2: on-disk config updated
         let on_disk = fs::read_to_string(&config_path).unwrap();
         let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
-        assert_eq!(
-            parsed["background"]["image"].as_str().unwrap(),
-            "dark.png"
-        );
+        assert_eq!(parsed["background"]["image"].as_str().unwrap(), "dark.png");
 
         // Effect 3: ModeChange::Background sent over channel
         let msg = rx.try_recv().expect("ModeChange::Background must be sent");
@@ -556,7 +570,10 @@ fn background_save_none_clears_all_three_effects() {
         let on_disk = fs::read_to_string(&config_path).unwrap();
         let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
         assert!(
-            parsed.get("background").and_then(|b| b.get("image")).is_none(),
+            parsed
+                .get("background")
+                .and_then(|b| b.get("image"))
+                .is_none(),
             "image key must be absent on disk after clear"
         );
 
@@ -634,7 +651,10 @@ fn background_save_outside_lock_none_clears_disk_and_channel() {
         let on_disk = fs::read_to_string(&config_path).unwrap();
         let parsed: toml::Value = toml::from_str(&on_disk).unwrap();
         assert!(
-            parsed.get("background").and_then(|b| b.get("image")).is_none(),
+            parsed
+                .get("background")
+                .and_then(|b| b.get("image"))
+                .is_none(),
             "image key must be absent after clear, disk: {on_disk}"
         );
 
@@ -716,5 +736,8 @@ fn save_default_layout_impl_rejects_traversal() {
 
     // Disk must be unchanged
     let after = fs::read_to_string(&config_path).unwrap();
-    assert_eq!(after, original, "config must be untouched on traversal reject");
+    assert_eq!(
+        after, original,
+        "config must be untouched on traversal reject"
+    );
 }

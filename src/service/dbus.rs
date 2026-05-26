@@ -5,12 +5,12 @@
 // Properties: active_layout, connected, resolution, tick_rate.
 // Signals: layout_changed, device_connected, device_disconnected, error.
 
+use log::info;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use zbus::{interface, object_server::SignalEmitter};
-use log::info;
 
 use crate::config::Config;
 use crate::render::frontmatter::LayoutFrontmatter;
@@ -108,9 +108,10 @@ fn validate_path_within_dir(
             base_dir.display()
         ))
     })?;
-    let resolved = base.join(name).canonicalize().map_err(|_| {
-        zbus::fdo::Error::InvalidArgs(format!("{kind} not found: {name}"))
-    })?;
+    let resolved = base
+        .join(name)
+        .canonicalize()
+        .map_err(|_| zbus::fdo::Error::InvalidArgs(format!("{kind} not found: {name}")))?;
     if !resolved.starts_with(&base) {
         return Err(zbus::fdo::Error::InvalidArgs(format!(
             "{kind} path escapes directory: {name}"
@@ -120,10 +121,7 @@ fn validate_path_within_dir(
 }
 
 /// Resolve `name` against `layout_dir`, rejecting traversal and symlink escapes.
-pub fn validate_layout_path(
-    layout_dir: &Path,
-    name: &str,
-) -> Result<PathBuf, zbus::fdo::Error> {
+pub fn validate_layout_path(layout_dir: &Path, name: &str) -> Result<PathBuf, zbus::fdo::Error> {
     validate_path_within_dir(layout_dir, name, "Layout")
 }
 
@@ -139,10 +137,10 @@ pub fn list_layouts_impl(layout_dir: &Path) -> Vec<String> {
     for entry in top.flatten() {
         let path = entry.path();
         if path.is_file() {
-            if has_layout_ext(&path) {
-                if let Some(name) = path.file_name() {
-                    out.push(name.to_string_lossy().to_string());
-                }
+            if has_layout_ext(&path)
+                && let Some(name) = path.file_name()
+            {
+                out.push(name.to_string_lossy().to_string());
             }
         } else if path.is_dir() {
             let Ok(sub) = std::fs::read_dir(&path) else {
@@ -150,22 +148,23 @@ pub fn list_layouts_impl(layout_dir: &Path) -> Vec<String> {
             };
             for sub_entry in sub.flatten() {
                 let sub_path = sub_entry.path();
-                if sub_path.is_file() && has_layout_ext(&sub_path) {
-                    if let Ok(rel) = sub_path.strip_prefix(layout_dir) {
-                        // Normalize to forward slashes; the LCD repo is unix-only.
-                        let s = rel
-                            .components()
-                            .filter_map(|c| match c {
-                                std::path::Component::Normal(os) => {
-                                    Some(os.to_string_lossy().into_owned())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("/");
-                        if !s.is_empty() {
-                            out.push(s);
-                        }
+                if sub_path.is_file()
+                    && has_layout_ext(&sub_path)
+                    && let Ok(rel) = sub_path.strip_prefix(layout_dir)
+                {
+                    // Normalize to forward slashes; the LCD repo is unix-only.
+                    let s = rel
+                        .components()
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(os) => {
+                                Some(os.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    if !s.is_empty() {
+                        out.push(s);
                     }
                 }
             }
@@ -192,10 +191,7 @@ fn has_image_ext(p: &Path) -> bool {
 }
 
 /// Resolve `name` against `bg_dir`, rejecting traversal and symlink escapes.
-pub fn validate_background_path(
-    bg_dir: &Path,
-    name: &str,
-) -> Result<PathBuf, zbus::fdo::Error> {
+pub fn validate_background_path(bg_dir: &Path, name: &str) -> Result<PathBuf, zbus::fdo::Error> {
     validate_path_within_dir(bg_dir, name, "Background")
 }
 
@@ -207,7 +203,9 @@ pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name() else { continue; };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         if path.is_file() && has_image_ext(&path) {
             out.push(name.to_string_lossy().to_string());
         }
@@ -225,11 +223,7 @@ pub fn get_layout_vars_impl(
 ) -> Result<Vec<HashMap<String, String>>, zbus::fdo::Error> {
     let path = validate_layout_path(layout_dir, name)?;
     let content = std::fs::read_to_string(&path).map_err(|e| {
-        zbus::fdo::Error::Failed(format!(
-            "Failed to read layout {}: {}",
-            path.display(),
-            e
-        ))
+        zbus::fdo::Error::Failed(format!("Failed to read layout {}: {}", path.display(), e))
     })?;
     let fm = LayoutFrontmatter::parse(&content);
 
@@ -256,10 +250,13 @@ pub fn save_default_layout_impl(
     name: &str,
 ) -> Result<(), zbus::fdo::Error> {
     validate_layout_path(layout_dir, name)?;
-    let mode = if name.ends_with(".html") { "html" } else { "svg" };
-    Config::save_display_layout(config_path, name, mode).map_err(|e| {
-        zbus::fdo::Error::Failed(format!("save_display_layout: {}", e))
-    })?;
+    let mode = if name.ends_with(".html") {
+        "html"
+    } else {
+        "svg"
+    };
+    Config::save_display_layout(config_path, name, mode)
+        .map_err(|e| zbus::fdo::Error::Failed(format!("save_display_layout: {}", e)))?;
     Ok(())
 }
 
@@ -277,11 +274,27 @@ impl DisplayInterface {
         let mut state = self.state.lock().await;
         // Path-traversal + existence check.
         validate_layout_path(&state.layout_dir, &name)?;
-        let vars = state.config.layout_vars.get(&name).cloned().unwrap_or_default();
-        state.mode_change_tx.send(ModeChange::Layout { name: name.clone(), vars }).await
+        let vars = state
+            .config
+            .layout_vars
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+        state
+            .mode_change_tx
+            .send(ModeChange::Layout {
+                name: name.clone(),
+                vars,
+            })
+            .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.active_layout = name.clone();
-        state.mode = if name.ends_with(".html") { "html" } else { "svg" }.to_string();
+        state.mode = if name.ends_with(".html") {
+            "html"
+        } else {
+            "svg"
+        }
+        .to_string();
 
         Self::layout_changed(&emitter, &name).await?;
         Ok(format!("Layout set to: {}", name))
@@ -295,23 +308,39 @@ impl DisplayInterface {
             "xvfb" => {
                 if command.is_empty() {
                     return Err(zbus::fdo::Error::InvalidArgs(
-                        "xvfb mode requires a command".to_string()
+                        "xvfb mode requires a command".to_string(),
                     ));
                 }
-                ModeChange::Xvfb { command: command.clone() }
+                ModeChange::Xvfb {
+                    command: command.clone(),
+                }
             }
             "svg" | "html" => {
                 // Path-traversal + existence check on the layout name.
                 validate_layout_path(&state.layout_dir, &command)?;
-                let vars = state.config.layout_vars.get(&command).cloned().unwrap_or_default();
-                ModeChange::Layout { name: command.clone(), vars }
+                let vars = state
+                    .config
+                    .layout_vars
+                    .get(&command)
+                    .cloned()
+                    .unwrap_or_default();
+                ModeChange::Layout {
+                    name: command.clone(),
+                    vars,
+                }
             }
-            _ => return Err(zbus::fdo::Error::InvalidArgs(
-                format!("Unknown mode: {} (expected svg, html, or xvfb)", mode)
-            )),
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "Unknown mode: {} (expected svg, html, or xvfb)",
+                    mode
+                )));
+            }
         };
 
-        state.mode_change_tx.send(change).await
+        state
+            .mode_change_tx
+            .send(change)
+            .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         state.mode = mode.clone();
 
@@ -325,8 +354,10 @@ impl DisplayInterface {
         status.insert("active_layout".to_string(), state.active_layout.clone());
         status.insert("mode".to_string(), state.mode.clone());
         status.insert("connected".to_string(), state.connected.to_string());
-        status.insert("resolution".to_string(),
-            format!("{}x{}", state.resolution.0, state.resolution.1));
+        status.insert(
+            "resolution".to_string(),
+            format!("{}x{}", state.resolution.0, state.resolution.1),
+        );
         status.insert("tick_rate".to_string(), state.tick_rate.to_string());
         status
     }
@@ -387,13 +418,21 @@ impl DisplayInterface {
         let reload_vars = {
             let mut state = self.state.lock().await;
             state.config.layout_vars.insert(name.clone(), vars);
-            state.config.layout_vars.get(&name).cloned().unwrap_or_default()
+            state
+                .config
+                .layout_vars
+                .get(&name)
+                .cloned()
+                .unwrap_or_default()
         };
 
         // Channel send outside the lock — avoids holding Mutex across .await.
-        tx.send(ModeChange::Layout { name: name.clone(), vars: reload_vars })
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+        tx.send(ModeChange::Layout {
+            name: name.clone(),
+            vars: reload_vars,
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
         Ok(())
     }
@@ -420,7 +459,11 @@ impl DisplayInterface {
         // Brief commit lock: update in-memory mirror.
         {
             let mut state = self.state.lock().await;
-            let mode = if name.ends_with(".html") { "html" } else { "svg" };
+            let mode = if name.ends_with(".html") {
+                "html"
+            } else {
+                "svg"
+            };
             state.config.display.default_layout = name;
             state.config.display.mode = mode.to_string();
         }
@@ -453,7 +496,9 @@ impl DisplayInterface {
         })
         .await
         .map_err(|e| zbus::fdo::Error::Failed(format!("decode task panicked: {}", e)))?
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e)))?;
+        .map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e))
+        })?;
 
         // Serialize the disk write alongside all other config writers.
         {
@@ -464,9 +509,11 @@ impl DisplayInterface {
         }
 
         // Signal the tick loop (still inside bg_guard, so channel send is ordered).
-        tx.send(ModeChange::Background { image: Some(pixmap.clone()) })
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+        tx.send(ModeChange::Background {
+            image: Some(pixmap.clone()),
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
         // Brief commit lock: update in-memory state mirror.
         {
@@ -565,7 +612,7 @@ impl DisplayInterface {
     async fn set_tick_rate(&mut self, rate: u32) -> zbus::fdo::Result<()> {
         if rate == 0 || rate > 60 {
             return Err(zbus::fdo::Error::InvalidArgs(
-                "Tick rate must be 1-60".to_string()
+                "Tick rate must be 1-60".to_string(),
             ));
         }
         let mut state = self.state.lock().await;

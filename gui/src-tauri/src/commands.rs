@@ -71,7 +71,9 @@ pub struct SensorDescriptor {
 }
 
 #[tauri::command]
-pub fn list_layouts(state: tauri::State<'_, RendererState>) -> Result<Vec<LayoutSummary>, AppError> {
+pub fn list_layouts(
+    state: tauri::State<'_, RendererState>,
+) -> Result<Vec<LayoutSummary>, AppError> {
     let mut layouts = Vec::new();
     for name in list_layout_names(&state.layout_dir) {
         let path = match validate_layout_path(&state.layout_dir, &name) {
@@ -81,7 +83,12 @@ pub fn list_layouts(state: tauri::State<'_, RendererState>) -> Result<Vec<Layout
         let configurable = std::fs::read_to_string(&path)
             .map(|content| !LayoutFrontmatter::parse(&content).variables.is_empty())
             .unwrap_or(false);
-        let kind = if name.ends_with(".svg") { "svg" } else { "html" }.to_string();
+        let kind = if name.ends_with(".svg") {
+            "svg"
+        } else {
+            "html"
+        }
+        .to_string();
         layouts.push(LayoutSummary {
             name,
             kind,
@@ -97,8 +104,7 @@ pub fn get_layout_vars(
     state: tauri::State<'_, RendererState>,
 ) -> Result<Vec<VariableDecl>, AppError> {
     let path = validate_layout_path(&state.layout_dir, &layout)?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| AppError::LayoutIo(e.to_string()))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| AppError::LayoutIo(e.to_string()))?;
     let frontmatter = LayoutFrontmatter::parse(&content);
 
     let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
@@ -155,8 +161,7 @@ pub fn render_preview(
     state: tauri::State<'_, RendererState>,
 ) -> Result<Response, AppError> {
     let path = validate_layout_path(&state.layout_dir, &layout)?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| AppError::LayoutIo(e.to_string()))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| AppError::LayoutIo(e.to_string()))?;
     let frontmatter = LayoutFrontmatter::parse(&content);
     validate_vars(&frontmatter.variables, &vars)?;
 
@@ -165,8 +170,8 @@ pub fn render_preview(
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
     if cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none() {
-        let renderer = SvgRenderer::new(&content, 480, 480)
-            .map_err(|e| AppError::Render(e.to_string()))?;
+        let renderer =
+            SvgRenderer::new(&content, 480, 480).map_err(|e| AppError::Render(e.to_string()))?;
         cache.renderer = Some(renderer);
         cache.current_layout = Some(layout.clone());
     }
@@ -195,12 +200,15 @@ pub fn save_config(
     // Validate that the named layout exists and the vars are well-typed before
     // persisting — prevents writing junk to config.toml.
     let path = validate_layout_path(&state.layout_dir, &layout)?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| AppError::LayoutIo(e.to_string()))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| AppError::LayoutIo(e.to_string()))?;
     let frontmatter = LayoutFrontmatter::parse(&content);
     validate_vars(&frontmatter.variables, &vars)?;
 
-    let mode = if layout.ends_with(".html") { "html" } else { "svg" };
+    let mode = if layout.ends_with(".html") {
+        "html"
+    } else {
+        "svg"
+    };
     Config::save_layout_vars(&state.config_path, &layout, &vars)
         .map_err(|e| AppError::ConfigWrite(e.to_string()))?;
     Config::save_display_layout(&state.config_path, &layout, mode)
@@ -216,16 +224,16 @@ pub async fn apply_to_daemon(
 ) -> Result<(), AppError> {
     // Validate before touching D-Bus — same guarantees as save_config.
     let path = validate_layout_path(&state.layout_dir, &layout)?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| AppError::LayoutIo(e.to_string()))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| AppError::LayoutIo(e.to_string()))?;
     let frontmatter = LayoutFrontmatter::parse(&content);
     validate_vars(&frontmatter.variables, &vars)?;
 
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -249,9 +257,7 @@ pub async fn apply_to_daemon(
 // ---- background commands ----
 
 #[tauri::command]
-pub fn list_backgrounds(
-    state: tauri::State<'_, RendererState>,
-) -> Result<Vec<String>, AppError> {
+pub fn list_backgrounds(state: tauri::State<'_, RendererState>) -> Result<Vec<String>, AppError> {
     Ok(list_background_names(&state.background_dir))
 }
 
@@ -273,11 +279,12 @@ pub async fn set_background(
     name: Option<String>,
     state: tauri::State<'_, RendererState>,
 ) -> Result<(), AppError> {
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -341,21 +348,22 @@ fn list_layout_names(layout_dir: &Path) -> Vec<String> {
             };
             for sub_entry in sub.flatten() {
                 let sub_path = sub_entry.path();
-                if sub_path.is_file() && has_layout_ext(&sub_path) {
-                    if let Ok(rel) = sub_path.strip_prefix(layout_dir) {
-                        let s = rel
-                            .components()
-                            .filter_map(|c| match c {
-                                std::path::Component::Normal(os) => {
-                                    Some(os.to_string_lossy().into_owned())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("/");
-                        if !s.is_empty() {
-                            out.push(s);
-                        }
+                if sub_path.is_file()
+                    && has_layout_ext(&sub_path)
+                    && let Ok(rel) = sub_path.strip_prefix(layout_dir)
+                {
+                    let s = rel
+                        .components()
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(os) => {
+                                Some(os.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    if !s.is_empty() {
+                        out.push(s);
                     }
                 }
             }
@@ -654,8 +662,7 @@ mod tests {
         let outside = tmp.path().join("outside.svg");
         fs::write(&outside, SIMPLE_SVG).unwrap();
 
-        let err = validate_layout_path(&layout_dir, "../outside.svg")
-            .expect_err("must reject ..");
+        let err = validate_layout_path(&layout_dir, "../outside.svg").expect_err("must reject ..");
         assert!(matches!(err, AppError::InvalidLayout(_)), "got {err:?}");
     }
 
@@ -773,11 +780,7 @@ mod tests {
         Config::save_layout_vars(&state.config_path, &layout, &overrides).unwrap();
 
         let config = Config::load(&state.config_path).unwrap();
-        let saved = config
-            .layout_vars
-            .get(&layout)
-            .cloned()
-            .unwrap_or_default();
+        let saved = config.layout_vars.get(&layout).cloned().unwrap_or_default();
         assert_eq!(saved.get("accent").map(String::as_str), Some("#ff00aa"));
     }
 
@@ -798,8 +801,7 @@ mod tests {
         let bg_dir = make_bg_dir(&tmp);
         let outside = tmp.path().join("outside.png");
         fs::write(&outside, b"PNG").unwrap();
-        let err = validate_background_path(&bg_dir, "../outside.png")
-            .expect_err("must reject ..");
+        let err = validate_background_path(&bg_dir, "../outside.png").expect_err("must reject ..");
         assert!(matches!(err, AppError::InvalidBackground(_)), "got {err:?}");
     }
 
@@ -829,8 +831,8 @@ mod tests {
     fn validate_background_path_accepts_legit_file() {
         let tmp = TempDir::new().unwrap();
         let bg_dir = make_bg_dir(&tmp);
-        let resolved = validate_background_path(&bg_dir, "dark-solid.png")
-            .expect("legit file must resolve");
+        let resolved =
+            validate_background_path(&bg_dir, "dark-solid.png").expect("legit file must resolve");
         assert!(resolved.ends_with("dark-solid.png"));
     }
 
@@ -848,8 +850,11 @@ mod tests {
         fs::write(bg_dir.join("ignored.svg"), b"svg").unwrap();
 
         let names = list_background_names(&bg_dir);
-        assert_eq!(names, vec!["alpha.jpg", "middle.jpeg", "zebra.png"],
-            "must be sorted, PNG/JPEG only, no .txt or .svg");
+        assert_eq!(
+            names,
+            vec!["alpha.jpg", "middle.jpeg", "zebra.png"],
+            "must be sorted, PNG/JPEG only, no .txt or .svg"
+        );
     }
 
     #[test]
@@ -857,7 +862,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bg_dir = tmp.path().join("backgrounds_nonexistent");
         let names = list_background_names(&bg_dir);
-        assert!(names.is_empty(), "missing dir must yield empty list, not panic");
+        assert!(
+            names.is_empty(),
+            "missing dir must yield empty list, not panic"
+        );
     }
 
     // ---- get_active_background semantics ----
@@ -868,8 +876,10 @@ mod tests {
         let config_path = tmp.path().join("config.toml");
         // Config file doesn't exist yet — should load defaults cleanly
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.background.image, None,
-            "fresh config must have no active background");
+        assert_eq!(
+            config.background.image, None,
+            "fresh config must have no active background"
+        );
     }
 
     #[test]
@@ -892,8 +902,10 @@ mod tests {
         Config::save_background_image(&config_path, Some("dark-solid.png")).unwrap();
         Config::save_background_image(&config_path, None).unwrap();
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.background.image, None,
-            "clearing image must persist as None");
+        assert_eq!(
+            config.background.image, None,
+            "clearing image must persist as None"
+        );
     }
 
     // ---- variable validation ----

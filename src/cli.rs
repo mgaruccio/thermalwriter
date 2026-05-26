@@ -1,16 +1,19 @@
-use std::time::{Duration, Instant};
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 use crate::config::Config;
 use crate::dbus_types::DisplayProxy;
 use crate::render::RawFrame;
 use crate::service::tick::encode_jpeg;
 use crate::transport::Transport;
 use crate::transport::bulk_usb::BulkUsb;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use std::time::{Duration, Instant};
 
 /// Thermalright cooler LCD display daemon and control CLI.
 #[derive(Parser, Debug)]
-#[command(name = "thermalwriter", about = "Thermalright cooler LCD display daemon")]
+#[command(
+    name = "thermalwriter",
+    about = "Thermalright cooler LCD display daemon"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -62,15 +65,19 @@ pub enum CtlCommand {
 
 /// Execute a `ctl` subcommand against the running daemon over D-Bus.
 pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
-    let connection = zbus::Connection::session().await
+    let connection = zbus::Connection::session()
+        .await
         .context("Could not connect to D-Bus session bus — is D-Bus running?")?;
 
-    let proxy = DisplayProxy::new(&connection).await
+    let proxy = DisplayProxy::new(&connection)
+        .await
         .context("Could not connect to thermalwriter service — is the daemon running?")?;
 
     match cmd {
         CtlCommand::Status => {
-            let status = proxy.get_status().await
+            let status = proxy
+                .get_status()
+                .await
                 .context("Failed to get status from daemon")?;
             // Print in sorted key order for consistent output
             let mut pairs: Vec<_> = status.into_iter().collect();
@@ -80,19 +87,25 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
             }
         }
         CtlCommand::Layout { name } => {
-            let result = proxy.set_layout(&name).await
+            let result = proxy
+                .set_layout(&name)
+                .await
                 .context("Failed to set layout")?;
             println!("{}", result);
         }
         CtlCommand::Layouts => {
-            let layouts = proxy.list_layouts().await
+            let layouts = proxy
+                .list_layouts()
+                .await
                 .context("Failed to list layouts")?;
             for layout in layouts {
                 println!("{}", layout);
             }
         }
         CtlCommand::Sensors => {
-            let sensors = proxy.list_sensors().await
+            let sensors = proxy
+                .list_sensors()
+                .await
                 .context("Failed to list sensors")?;
             for (key, name, unit) in sensors {
                 if unit.is_empty() {
@@ -103,17 +116,17 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
             }
         }
         CtlCommand::Stop => {
-            proxy.stop().await
-                .context("Failed to stop daemon")?;
+            proxy.stop().await.context("Failed to stop daemon")?;
             println!("Daemon stop signal sent.");
         }
         CtlCommand::Reload => {
-            proxy.reload().await
-                .context("Failed to reload daemon")?;
+            proxy.reload().await.context("Failed to reload daemon")?;
             println!("Daemon reload signal sent.");
         }
         CtlCommand::Mirror { command } => {
-            let result = proxy.set_mode("xvfb", &command).await
+            let result = proxy
+                .set_mode("xvfb", &command)
+                .await
                 .context("Failed to set mirror mode")?;
             println!("{}", result);
         }
@@ -129,10 +142,18 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     let rotation = config.display.rotation;
 
     // Pre-render two solid-color frames (red and blue) for visual confirmation
-    let frame_red = RawFrame { data: vec![255, 0, 0].repeat(480 * 480), width: 480, height: 480 };
+    let frame_red = RawFrame {
+        data: [255, 0, 0].repeat(480 * 480),
+        width: 480,
+        height: 480,
+    };
     let jpeg_red = encode_jpeg(&frame_red, quality, rotation)?;
 
-    let frame_blue = RawFrame { data: vec![0, 0, 255].repeat(480 * 480), width: 480, height: 480 };
+    let frame_blue = RawFrame {
+        data: [0, 0, 255].repeat(480 * 480),
+        width: 480,
+        height: 480,
+    };
     let jpeg_blue = encode_jpeg(&frame_blue, quality, rotation)?;
 
     // Open USB device and handshake
@@ -141,7 +162,11 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
 
     println!("Benchmarking display throughput...");
     println!("  Device: {}x{}", info.width, info.height);
-    println!("  Frame size: {} bytes (JPEG q={})", jpeg_red.len(), quality);
+    println!(
+        "  Frame size: {} bytes (JPEG q={})",
+        jpeg_red.len(),
+        quality
+    );
     println!("  Duration: {}s", duration_secs);
     println!();
 
@@ -172,17 +197,19 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     let min = frame_times.iter().min().unwrap();
     let max = frame_times.iter().max().unwrap();
     let avg = Duration::from_nanos(
-        (frame_times.iter().map(|d| d.as_nanos()).sum::<u128>() / count as u128) as u64
+        (frame_times.iter().map(|d| d.as_nanos()).sum::<u128>() / count as u128) as u64,
     );
 
     println!("Results:");
     println!("  Duration: {:.1}s", total_elapsed.as_secs_f64());
     println!("  Frames sent: {}", count);
     println!("  Average FPS: {:.1}", avg_fps);
-    println!("  Frame time: min={:.1}ms avg={:.1}ms max={:.1}ms",
-             min.as_secs_f64() * 1000.0,
-             avg.as_secs_f64() * 1000.0,
-             max.as_secs_f64() * 1000.0);
+    println!(
+        "  Frame time: min={:.1}ms avg={:.1}ms max={:.1}ms",
+        min.as_secs_f64() * 1000.0,
+        avg.as_secs_f64() * 1000.0,
+        max.as_secs_f64() * 1000.0
+    );
 
     Ok(())
 }
@@ -198,8 +225,7 @@ pub fn run_setup_udev() -> Result<()> {
     let euid = unsafe { libc::geteuid() };
     if euid != 0 {
         eprintln!("Root required to write {UDEV_RULE_DEST}; re-running under sudo...");
-        let exe = std::env::current_exe()
-            .context("Could not determine current executable path")?;
+        let exe = std::env::current_exe().context("Could not determine current executable path")?;
         let status = std::process::Command::new("sudo")
             .arg(exe)
             .arg("setup-udev")
@@ -254,12 +280,18 @@ mod tests {
     #[test]
     fn cli_parses_ctl_status() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "status"]).unwrap();
-        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Status }));
+        assert!(matches!(
+            cli.command,
+            Command::Ctl {
+                subcommand: CtlCommand::Status
+            }
+        ));
     }
 
     #[test]
     fn cli_parses_ctl_layout() {
-        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "layout", "gpu-focus.html"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["thermalwriter", "ctl", "layout", "gpu-focus.html"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Ctl { subcommand: CtlCommand::Layout { ref name } } if name == "gpu-focus.html"
@@ -269,25 +301,45 @@ mod tests {
     #[test]
     fn cli_parses_ctl_layouts() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "layouts"]).unwrap();
-        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Layouts }));
+        assert!(matches!(
+            cli.command,
+            Command::Ctl {
+                subcommand: CtlCommand::Layouts
+            }
+        ));
     }
 
     #[test]
     fn cli_parses_ctl_stop() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "stop"]).unwrap();
-        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Stop }));
+        assert!(matches!(
+            cli.command,
+            Command::Ctl {
+                subcommand: CtlCommand::Stop
+            }
+        ));
     }
 
     #[test]
     fn cli_parses_ctl_reload() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "reload"]).unwrap();
-        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Reload }));
+        assert!(matches!(
+            cli.command,
+            Command::Ctl {
+                subcommand: CtlCommand::Reload
+            }
+        ));
     }
 
     #[test]
     fn cli_parses_ctl_sensors() {
         let cli = Cli::try_parse_from(["thermalwriter", "ctl", "sensors"]).unwrap();
-        assert!(matches!(cli.command, Command::Ctl { subcommand: CtlCommand::Sensors }));
+        assert!(matches!(
+            cli.command,
+            Command::Ctl {
+                subcommand: CtlCommand::Sensors
+            }
+        ));
     }
 
     #[test]
@@ -330,7 +382,8 @@ mod tests {
 
     #[test]
     fn cli_parses_ctl_mirror() {
-        let cli = Cli::try_parse_from(["thermalwriter", "ctl", "mirror", "conky -c foo.conf"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["thermalwriter", "ctl", "mirror", "conky -c foo.conf"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Ctl { subcommand: CtlCommand::Mirror { ref command } } if command == "conky -c foo.conf"

@@ -44,8 +44,14 @@ impl Function for BackgroundFunction {
         }
 
         // Mode 3: pattern
-        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("grid");
-        let color = args.get("color").and_then(|v| v.as_str()).unwrap_or("#ffffff10");
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("grid");
+        let color = args
+            .get("color")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#ffffff10");
         let spacing = args.get("spacing").and_then(|v| v.as_f64()).unwrap_or(20.0);
 
         // Generate a unique pattern ID from the args so multiple background()

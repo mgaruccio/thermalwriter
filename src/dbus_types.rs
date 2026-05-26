@@ -24,13 +24,8 @@ pub trait Display {
     async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
     /// Returns (key, name, unit) tuples for each available sensor.
     async fn list_sensors(&self) -> zbus::Result<Vec<(String, String, String)>>;
-    async fn get_layout_vars(&self, name: &str)
-        -> zbus::Result<Vec<HashMap<String, String>>>;
-    async fn set_layout_vars(
-        &self,
-        name: &str,
-        vars: HashMap<String, String>,
-    ) -> zbus::Result<()>;
+    async fn get_layout_vars(&self, name: &str) -> zbus::Result<Vec<HashMap<String, String>>>;
+    async fn set_layout_vars(&self, name: &str, vars: HashMap<String, String>) -> zbus::Result<()>;
     async fn stop(&self) -> zbus::Result<()>;
     async fn reload(&self) -> zbus::Result<()>;
     async fn set_background(&self, name: &str) -> zbus::Result<()>;

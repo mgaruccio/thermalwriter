@@ -12,8 +12,14 @@ fn graph_component_emits_svg_polyline() {
     tera.add_raw_template("test.svg", template).unwrap();
     let result = tera.render("test.svg", &context).unwrap();
 
-    assert!(result.contains("<polyline"), "Should contain a polyline element");
-    assert!(result.contains("stroke=\"#ff0000\""), "Should use specified stroke color");
+    assert!(
+        result.contains("<polyline"),
+        "Should contain a polyline element"
+    );
+    assert!(
+        result.contains("stroke=\"#ff0000\""),
+        "Should use specified stroke color"
+    );
     assert!(result.contains("<g"), "Should be wrapped in a <g> group");
 }
 
@@ -30,7 +36,10 @@ fn graph_component_area_style_emits_polygon() {
     let result = tera.render("test.svg", &context).unwrap();
 
     assert!(result.contains("<polygon"), "Area style should use polygon");
-    assert!(result.contains("fill=\"#ff000033\""), "Should use specified fill");
+    assert!(
+        result.contains("fill=\"#ff000033\""),
+        "Should use specified fill"
+    );
 }
 
 #[test]
@@ -67,9 +76,9 @@ fn graph_component_constant_values_no_division_by_zero() {
 
 #[test]
 fn svg_renderer_uses_persistent_tera_with_components() {
-    use thermalwriter::render::svg::SvgRenderer;
-    use thermalwriter::render::FrameSource;
     use std::collections::HashMap;
+    use thermalwriter::render::FrameSource;
+    use thermalwriter::render::svg::SvgRenderer;
 
     // Template with a graph call — uses a literal array so no undefined variable
     let template = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480">
@@ -79,15 +88,19 @@ fn svg_renderer_uses_persistent_tera_with_components() {
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
     let sensors: HashMap<String, String> = HashMap::new();
     let frame = renderer.render(&sensors);
-    assert!(frame.is_ok(), "Renderer with component function should render: {:?}", frame.err());
+    assert!(
+        frame.is_ok(),
+        "Renderer with component function should render: {:?}",
+        frame.err()
+    );
 }
 
 #[test]
 fn svg_renderer_injects_layout_vars_after_theme() {
-    use thermalwriter::render::svg::SvgRenderer;
-    use thermalwriter::render::FrameSource;
-    use thermalwriter::theme::ThemePalette;
     use std::collections::HashMap;
+    use thermalwriter::render::FrameSource;
+    use thermalwriter::render::svg::SvgRenderer;
+    use thermalwriter::theme::ThemePalette;
 
     let template = r##"{# vars:
 theme_background: color = "#010203" "Background"
@@ -141,7 +154,11 @@ fn btop_net_emits_mirrored_polygons() {
     let result = tera.render("test.svg", &context).unwrap();
 
     let polygon_count = result.matches("<polygon").count();
-    assert!(polygon_count >= 2, "Should have at least 2 polygons (rx + tx), got {}", polygon_count);
+    assert!(
+        polygon_count >= 2,
+        "Should have at least 2 polygons (rx + tx), got {}",
+        polygon_count
+    );
 }
 
 #[test]
@@ -157,7 +174,10 @@ fn btop_ram_emits_area_with_capacity_line() {
     let result = tera.render("test.svg", &context).unwrap();
 
     assert!(result.contains("<polygon"), "Should contain area polygon");
-    assert!(result.contains("fill=\"#cc9eff\""), "Should use specified fill color");
+    assert!(
+        result.contains("fill=\"#cc9eff\""),
+        "Should use specified fill color"
+    );
 }
 
 // ─── Background component tests ──────────────────────────────────────────────
@@ -173,8 +193,14 @@ fn background_pattern_grid_emits_svg_pattern() {
     let result = tera.render("test.svg", &context).unwrap();
 
     assert!(result.contains("<defs>"), "Should contain defs for pattern");
-    assert!(result.contains("<pattern"), "Should contain pattern element");
-    assert!(result.contains("<rect"), "Should contain rect using the pattern");
+    assert!(
+        result.contains("<pattern"),
+        "Should contain pattern element"
+    );
+    assert!(
+        result.contains("<rect"),
+        "Should contain rect using the pattern"
+    );
 }
 
 #[test]
@@ -190,7 +216,10 @@ fn background_image_emits_base64_image_tag() {
     let result = tera.render("test.svg", &context).unwrap();
 
     assert!(result.contains("<image"), "Should contain image element");
-    assert!(result.contains("data:image/png;base64,"), "Should use data URI");
+    assert!(
+        result.contains("data:image/png;base64,"),
+        "Should use data URI"
+    );
 }
 
 #[test]
@@ -205,7 +234,10 @@ fn background_with_opacity_sets_attribute() {
     tera.add_raw_template("test.svg", template).unwrap();
     let result = tera.render("test.svg", &context).unwrap();
 
-    assert!(result.contains("opacity=\"0.3\""), "Should set opacity attribute");
+    assert!(
+        result.contains("opacity=\"0.3\""),
+        "Should set opacity attribute"
+    );
 }
 
 #[test]
@@ -225,7 +257,11 @@ fn background_pattern_id_matches_fill_reference() {
     let pat_id = &result[id_start..id_end];
 
     let expected_fill = format!("fill=\"url(#{})", pat_id);
-    assert!(result.contains(&expected_fill), "fill url reference should match pattern id: {}", result);
+    assert!(
+        result.contains(&expected_fill),
+        "fill url reference should match pattern id: {}",
+        result
+    );
 }
 
 #[test]
@@ -251,7 +287,16 @@ fn background_different_patterns_produce_different_ids() {
 
     let id_grid = extract_id(&result_grid);
     let id_dots = extract_id(&result_dots);
-    assert_ne!(id_grid, id_dots, "Different pattern args should produce different IDs");
-    assert!(id_grid.starts_with("bg-pattern-"), "ID should have bg-pattern- prefix");
-    assert!(id_dots.starts_with("bg-pattern-"), "ID should have bg-pattern- prefix");
+    assert_ne!(
+        id_grid, id_dots,
+        "Different pattern args should produce different IDs"
+    );
+    assert!(
+        id_grid.starts_with("bg-pattern-"),
+        "ID should have bg-pattern- prefix"
+    );
+    assert!(
+        id_dots.starts_with("bg-pattern-"),
+        "ID should have bg-pattern- prefix"
+    );
 }

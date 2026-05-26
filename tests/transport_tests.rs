@@ -1,7 +1,7 @@
 #![cfg(feature = "daemon")]
 
-use thermalwriter::transport::{bulk_usb, Transport, DeviceInfo};
 use anyhow::Result;
+use thermalwriter::transport::{DeviceInfo, Transport, bulk_usb};
 
 // ---------------------------------------------------------------------------
 // Reconnect trait tests (plan Task 9) — TDD: written BEFORE implementation
@@ -18,13 +18,25 @@ struct MockTransport {
 
 impl MockTransport {
     fn new() -> Self {
-        Self { send_count: 0, reconnect_count: 0, connected: true }
+        Self {
+            send_count: 0,
+            reconnect_count: 0,
+            connected: true,
+        }
     }
 }
 
 impl Transport for MockTransport {
     fn handshake(&mut self) -> Result<DeviceInfo> {
-        Ok(DeviceInfo { vid: 0, pid: 0, width: 480, height: 480, pm: 4, sub: 5, use_jpeg: true })
+        Ok(DeviceInfo {
+            vid: 0,
+            pid: 0,
+            width: 480,
+            height: 480,
+            pm: 4,
+            sub: 5,
+            use_jpeg: true,
+        })
     }
     fn send_frame(&mut self, _data: &[u8]) -> Result<()> {
         self.send_count += 1;
@@ -35,8 +47,12 @@ impl Transport for MockTransport {
             Ok(())
         }
     }
-    fn close(&mut self) { self.connected = false; }
-    fn is_connected(&self) -> bool { self.connected }
+    fn close(&mut self) {
+        self.connected = false;
+    }
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
     fn try_reconnect(&mut self) -> Result<()> {
         self.reconnect_count += 1;
         self.connected = true;
@@ -56,12 +72,21 @@ fn reconnect_is_called_after_send_frame_failure() {
     // First send fails and marks transport disconnected
     let r1 = t.send_frame(&[0u8; 100]);
     assert!(r1.is_err(), "first send must fail");
-    assert!(!t.is_connected(), "transport must be disconnected after send failure");
+    assert!(
+        !t.is_connected(),
+        "transport must be disconnected after send failure"
+    );
 
     // Caller reconnects
     t.try_reconnect().expect("reconnect must succeed");
-    assert!(t.is_connected(), "transport must be connected after try_reconnect");
-    assert_eq!(t.reconnect_count, 1, "try_reconnect must have been called once");
+    assert!(
+        t.is_connected(),
+        "transport must be connected after try_reconnect"
+    );
+    assert_eq!(
+        t.reconnect_count, 1,
+        "try_reconnect must have been called once"
+    );
 
     // Second send succeeds
     let r2 = t.send_frame(&[0u8; 100]);
@@ -86,8 +111,14 @@ fn write_all_handles_partial_writes_by_continuing() {
             Ok(chunk.len()) // full write of remainder
         }
     });
-    assert!(result.is_ok(), "write_all must succeed after partial then full write");
-    assert_eq!(call_count, 2, "must call writer twice: partial then remainder");
+    assert!(
+        result.is_ok(),
+        "write_all must succeed after partial then full write"
+    );
+    assert_eq!(
+        call_count, 2,
+        "must call writer twice: partial then remainder"
+    );
 }
 
 /// write_all must bail immediately when the writer returns 0 (signals disconnection).
@@ -95,7 +126,10 @@ fn write_all_handles_partial_writes_by_continuing() {
 fn write_all_bails_on_zero_length_write() {
     let data = vec![0u8; 100];
     let result = bulk_usb::write_all(&data, |_| Ok(0));
-    assert!(result.is_err(), "write_all must return Err on zero-length write");
+    assert!(
+        result.is_err(),
+        "write_all must return Err on zero-length write"
+    );
     let err = result.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -114,8 +148,8 @@ fn handshake_payload_is_64_bytes() {
     assert_eq!(payload[3], 0x78);
     assert_eq!(payload[56], 0x01);
     // All other bytes are zero
-    for i in 4..56 {
-        assert_eq!(payload[i], 0x00, "byte {} should be 0x00", i);
+    for (i, byte) in payload.iter().enumerate().take(56).skip(4) {
+        assert_eq!(*byte, 0x00, "byte {} should be 0x00", i);
     }
 }
 

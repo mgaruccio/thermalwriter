@@ -1,7 +1,7 @@
-use thermalwriter::theme::{ThemePalette, DefaultThemeSource, ManualThemeSource, ThemeSource};
-use thermalwriter::config::Config;
 use std::io::Write;
 use tempfile::NamedTempFile;
+use thermalwriter::config::Config;
+use thermalwriter::theme::{DefaultThemeSource, ManualThemeSource, ThemePalette, ThemeSource};
 
 #[test]
 fn theme_palette_default_uses_neon_dash_colors() {
@@ -47,8 +47,10 @@ fn default_theme_source_loads_default_palette() {
 
 #[test]
 fn manual_theme_source_overrides_palette() {
-    let mut custom = ThemePalette::default();
-    custom.primary = "#aabbcc".to_string();
+    let custom = ThemePalette {
+        primary: "#aabbcc".to_string(),
+        ..Default::default()
+    };
     let source = ManualThemeSource::new(custom);
     let palette = source.load().unwrap();
     assert_eq!(palette.primary, "#aabbcc");
@@ -58,10 +60,14 @@ fn manual_theme_source_overrides_palette() {
 #[test]
 fn config_deserializes_without_theme_section() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 5
-"#).unwrap();
+"#
+    )
+    .unwrap();
     let cfg = Config::load(f.path()).unwrap();
     // ThemeConfig should use defaults when absent
     assert_eq!(cfg.theme.source, "");
@@ -71,12 +77,16 @@ tick_rate = 5
 #[test]
 fn config_deserializes_with_empty_theme_section() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 5
 
 [theme]
-"#).unwrap();
+"#
+    )
+    .unwrap();
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(cfg.theme.source, "");
     assert!(cfg.theme.manual.is_none());

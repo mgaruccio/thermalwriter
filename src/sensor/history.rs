@@ -20,6 +20,12 @@ pub struct SensorHistory {
     configs: HashMap<String, MetricConfig>,
 }
 
+impl Default for SensorHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SensorHistory {
     pub fn new() -> Self {
         Self {
@@ -31,8 +37,9 @@ impl SensorHistory {
     /// Configure a metric for history retention.
     /// Must be called before `record()` will store values for this metric.
     pub fn configure_metric(&mut self, key: &str, max_duration: Duration) {
-        self.configs.insert(key.to_string(), MetricConfig { max_duration });
-        self.buffers.entry(key.to_string()).or_insert_with(VecDeque::new);
+        self.configs
+            .insert(key.to_string(), MetricConfig { max_duration });
+        self.buffers.entry(key.to_string()).or_default();
     }
 
     /// Record current sensor readings. Only configured metrics are stored.
@@ -43,16 +50,20 @@ impl SensorHistory {
     pub fn record(&mut self, data: &HashMap<String, String>) {
         let now = Instant::now();
         // Collect cutoffs first to avoid a simultaneous borrow of configs + buffers.
-        let cutoffs: Vec<(String, Instant)> = self.configs
+        let cutoffs: Vec<(String, Instant)> = self
+            .configs
             .iter()
             .map(|(k, c)| (k.clone(), now - c.max_duration))
             .collect();
         for (key, cutoff) in cutoffs {
-            let buf = self.buffers.entry(key.clone()).or_insert_with(VecDeque::new);
-            if let Some(val_str) = data.get(&key) {
-                if let Ok(val) = val_str.parse::<f64>() {
-                    buf.push_back(Sample { time: now, value: val });
-                }
+            let buf = self.buffers.entry(key.clone()).or_default();
+            if let Some(val_str) = data.get(&key)
+                && let Ok(val) = val_str.parse::<f64>()
+            {
+                buf.push_back(Sample {
+                    time: now,
+                    value: val,
+                });
             }
             // Prune unconditionally — covers dropout and non-numeric values.
             while buf.front().is_some_and(|s| s.time < cutoff) {

@@ -1,8 +1,8 @@
-use thermalwriter::config::Config;
-use thermalwriter::render::parser::parse_html;
 use std::collections::HashMap;
 use std::io::Write;
 use tempfile::{NamedTempFile, tempdir};
+use thermalwriter::config::Config;
+use thermalwriter::render::parser::parse_html;
 
 // ---------------------------------------------------------------------------
 // BackgroundConfig — [background] section parsing and backwards compat
@@ -11,13 +11,17 @@ use tempfile::{NamedTempFile, tempdir};
 #[test]
 fn config_parses_background_image_field() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 2
 
 [background]
 image = "skyline.png"
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(
@@ -31,18 +35,21 @@ image = "skyline.png"
 fn config_without_background_section_defaults_to_none() {
     // Existing config files have no [background] section — they must load cleanly.
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 2
 
 [sensors]
 poll_interval_ms = 1000
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(
-        cfg.background.image,
-        None,
+        cfg.background.image, None,
         "background.image should be None when [background] section is absent"
     );
 }
@@ -51,10 +58,14 @@ poll_interval_ms = 1000
 fn config_without_theme_section_still_loads() {
     // After deleting theme.background_image, configs without [theme] must still parse.
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 2
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     // Must not error — the theme section is entirely optional
     let cfg = Config::load(f.path()).unwrap();
@@ -66,7 +77,9 @@ tick_rate = 2
 #[test]
 fn config_loads_from_valid_toml() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 5
 default_layout = "gpu-focus.html"
@@ -75,7 +88,9 @@ jpeg_quality = 90
 [sensors]
 poll_interval_ms = 500
 mangohud_log_dir = "/tmp/mango"
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(cfg.display.tick_rate, 5);
@@ -97,10 +112,14 @@ fn config_uses_defaults_when_file_missing() {
 #[test]
 fn config_uses_defaults_for_missing_fields() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, r#"
+    writeln!(
+        f,
+        r#"
 [display]
 tick_rate = 10
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let cfg = Config::load(f.path()).unwrap();
     assert_eq!(cfg.display.tick_rate, 10);
@@ -175,14 +194,18 @@ tick_rate = 2
 default_layout = "old.html"
 mode = "html"
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     Config::save_display_layout(&path, "svg/neon-dash-v2.svg", "svg").unwrap();
 
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("# keep this comment"));
     let reloaded: toml::Value = toml::from_str(&contents).unwrap();
-    assert_eq!(reloaded["display"]["default_layout"].as_str().unwrap(), "svg/neon-dash-v2.svg");
+    assert_eq!(
+        reloaded["display"]["default_layout"].as_str().unwrap(),
+        "svg/neon-dash-v2.svg"
+    );
     assert_eq!(reloaded["display"]["mode"].as_str().unwrap(), "svg");
     assert_eq!(reloaded["display"]["tick_rate"].as_integer().unwrap(), 2);
 }
@@ -295,7 +318,9 @@ theme_primary = \"#aa0000\"
         "svg/x.svg"
     );
     assert_eq!(
-        reloaded["sensors"]["poll_interval_ms"].as_integer().unwrap(),
+        reloaded["sensors"]["poll_interval_ms"]
+            .as_integer()
+            .unwrap(),
         1234
     );
     // Existing layout_vars.other.svg untouched
@@ -363,20 +388,11 @@ fn concurrent_config_writes_do_not_corrupt_file() {
             let mut vars = HashMap::new();
             vars.insert(format!("var_{}", i), format!("value_{}", i));
             match i % 3 {
-                0 => Config::save_layout_vars(
-                    &path,
-                    &format!("layout_{}.svg", i),
-                    &vars,
-                ).unwrap(),
-                1 => Config::save_display_layout(
-                    &path,
-                    &format!("layout_{}.svg", i),
-                    "svg",
-                ).unwrap(),
-                _ => Config::save_background_image(
-                    &path,
-                    Some(&format!("bg_{}.png", i)),
-                ).unwrap(),
+                0 => Config::save_layout_vars(&path, &format!("layout_{}.svg", i), &vars).unwrap(),
+                1 => {
+                    Config::save_display_layout(&path, &format!("layout_{}.svg", i), "svg").unwrap()
+                }
+                _ => Config::save_background_image(&path, Some(&format!("bg_{}.png", i))).unwrap(),
             }
         }));
     }
@@ -386,8 +402,8 @@ fn concurrent_config_writes_do_not_corrupt_file() {
 
     // Final file must parse as valid TOML.
     let contents = std::fs::read_to_string(&*path).unwrap();
-    let doc: toml::Value = toml::from_str(&contents)
-        .expect("config.toml must be valid TOML after concurrent writes");
+    let doc: toml::Value =
+        toml::from_str(&contents).expect("config.toml must be valid TOML after concurrent writes");
 
     // No stray temp files.
     let stragglers: Vec<_> = std::fs::read_dir(dir.path())
@@ -405,7 +421,8 @@ fn concurrent_config_writes_do_not_corrupt_file() {
     // in the final [layout_vars] table. This proves the read-modify-write mutex
     // prevents lost updates — the counter alone (which avoids file collisions)
     // would not guarantee this.
-    let layout_vars = doc.get("layout_vars")
+    let layout_vars = doc
+        .get("layout_vars")
         .expect("[layout_vars] table must be present after concurrent writes");
     for i in [0u32, 3, 6, 9, 12, 15] {
         let key = format!("layout_{}.svg", i);
@@ -422,7 +439,10 @@ fn concurrent_config_writes_do_not_corrupt_file() {
         .and_then(|d| d.get("default_layout"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    assert!(!default_layout.is_empty(), "display.default_layout must be non-empty — save_display_layout writers lost");
+    assert!(
+        !default_layout.is_empty(),
+        "display.default_layout must be non-empty — save_display_layout writers lost"
+    );
 
     // At least one save_background_image writer (i%3==2) must have survived.
     let bg_image = doc
@@ -430,7 +450,10 @@ fn concurrent_config_writes_do_not_corrupt_file() {
         .and_then(|b| b.get("image"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    assert!(!bg_image.is_empty(), "background.image must be non-empty — save_background_image writers lost");
+    assert!(
+        !bg_image.is_empty(),
+        "background.image must be non-empty — save_background_image writers lost"
+    );
 }
 
 #[test]
@@ -482,14 +505,21 @@ fn save_background_image_writes_image_field() {
 fn save_background_image_none_removes_image_key() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("config.toml");
-    std::fs::write(&path, "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n").unwrap();
+    std::fs::write(
+        &path,
+        "[display]\ntick_rate = 2\n\n[background]\nimage = \"old.png\"\n",
+    )
+    .unwrap();
 
     Config::save_background_image(&path, None).unwrap();
 
     let contents = std::fs::read_to_string(&path).unwrap();
     let reloaded: toml::Value = toml::from_str(&contents).unwrap();
     assert!(
-        reloaded.get("background").and_then(|b| b.get("image")).is_none(),
+        reloaded
+            .get("background")
+            .and_then(|b| b.get("image"))
+            .is_none(),
         "image key should be absent after save_background_image(None)"
     );
 }
@@ -525,12 +555,16 @@ fn config_load_rejects_zero_tick_rate() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(f, "[display]\ntick_rate = 0").unwrap();
     let result = Config::load(f.path());
-    assert!(result.is_err(), "tick_rate=0 must be rejected by validate()");
+    assert!(
+        result.is_err(),
+        "tick_rate=0 must be rejected by validate()"
+    );
     // Use {:#} to include the full error chain including the root cause
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
         msg.contains("tick_rate"),
-        "error message should mention the offending field; got: {}", msg
+        "error message should mention the offending field; got: {}",
+        msg
     );
 }
 
@@ -539,12 +573,16 @@ fn config_load_rejects_invalid_rotation() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(f, "[display]\nrotation = 45").unwrap();
     let result = Config::load(f.path());
-    assert!(result.is_err(), "rotation=45 must be rejected by validate()");
+    assert!(
+        result.is_err(),
+        "rotation=45 must be rejected by validate()"
+    );
     // Use {:#} to include the full error chain including the root cause
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
         msg.contains("rotation"),
-        "error message should mention the offending field; got: {}", msg
+        "error message should mention the offending field; got: {}",
+        msg
     );
 }
 
@@ -559,7 +597,15 @@ fn config_load_rejects_out_of_range_jpeg_quality() {
 #[test]
 fn config_load_accepts_valid_values() {
     let mut f = NamedTempFile::new().unwrap();
-    writeln!(f, "[display]\ntick_rate = 30\nrotation = 90\njpeg_quality = 85").unwrap();
+    writeln!(
+        f,
+        "[display]\ntick_rate = 30\nrotation = 90\njpeg_quality = 85"
+    )
+    .unwrap();
     let cfg = Config::load(f.path());
-    assert!(cfg.is_ok(), "valid config must load without error: {:?}", cfg.err());
+    assert!(
+        cfg.is_ok(),
+        "valid config must load without error: {:?}",
+        cfg.err()
+    );
 }

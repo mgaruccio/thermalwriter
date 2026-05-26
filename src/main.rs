@@ -1,26 +1,26 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
-use tokio::sync::{Mutex, watch, mpsc};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc, watch};
 
 use thermalwriter::cli::{Cli, Command};
 use thermalwriter::config::{Config, builtin_layouts};
-use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::render::TemplateRenderer;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::xvfb::XvfbSource;
+use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalwriter::sensor::amdgpu::AmdGpuProvider;
-use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::service::dbus::{self, ModeChange, ServiceState};
 use thermalwriter::service::tick;
 use thermalwriter::service::xvfb as xvfb_manager;
@@ -55,9 +55,13 @@ async fn main() -> Result<()> {
     // Load config (defaults if file missing, error if invalid TOML)
     let config_path = config_dir.join("config.toml");
     let config = Config::load(&config_path)?;
-    info!("Config: tick_rate={}, layout={}, jpeg_quality={}, mode={}",
-          config.display.tick_rate, config.display.default_layout,
-          config.display.jpeg_quality, config.display.mode);
+    info!(
+        "Config: tick_rate={}, layout={}, jpeg_quality={}, mode={}",
+        config.display.tick_rate,
+        config.display.default_layout,
+        config.display.jpeg_quality,
+        config.display.mode
+    );
 
     // Seed built-in layouts on first run (only if files don't exist)
     builtin_layouts::seed_layout_dir(&layout_dir)?;
@@ -85,8 +89,10 @@ async fn main() -> Result<()> {
     // Setup USB transport
     let mut transport = BulkUsb::new()?;
     let device_info = transport.handshake()?;
-    info!("Device: {}x{}, PM={}, JPEG={}", device_info.width, device_info.height,
-          device_info.pm, device_info.use_jpeg);
+    info!(
+        "Device: {}x{}, PM={}, JPEG={}",
+        device_info.width, device_info.height, device_info.pm, device_info.use_jpeg
+    );
 
     // Setup sensor hub with all providers
     let mut sensor_hub = SensorHub::new();
@@ -114,76 +120,80 @@ async fn main() -> Result<()> {
     let (connected_tx, _) = watch::channel(true);
     let (template_tx, template_rx) = watch::channel(String::new());
     // Background watch channel: mode-change listener → tick loop (immediate apply)
-    let (background_tx, background_rx) = watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
+    let (background_tx, background_rx) =
+        watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
     // Tick rate watch channel: D-Bus set_tick_rate → tick loop (no restart needed)
     let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(config.display.tick_rate);
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
     // Determine initial frame source, tick rate, and sensor history based on config mode
-    let xvfb_tick_rate = config.xvfb.tick_rate.min(60).max(1);
+    let xvfb_tick_rate = config.xvfb.tick_rate.clamp(1, 60);
     // Always allocate SensorHistory so a later D-Bus set_layout into a history-using layout
     // populates correctly even when starting in xvfb mode.
     let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> =
         Some(Arc::new(std::sync::Mutex::new(SensorHistory::new())));
-    let (initial_frame_source, initial_xvfb_handle, active_tick_rate) =
-        if config.display.mode == "xvfb" {
-            if config.xvfb.command.is_empty() {
-                anyhow::bail!("xvfb mode requires [xvfb] command in config");
-            }
-            let handle = xvfb_manager::start(&config.xvfb.command, device_info.width, device_info.height)?;
-            let source = XvfbSource::new(handle.screen_file(), device_info.width, device_info.height)?;
-            let boxed: Box<dyn FrameSource> = Box::new(source);
-            // History is allocated but not seeded with layout frontmatter — metrics get configured
-            // when the user switches to a layout via D-Bus set_layout.
-            (boxed, Some(handle), xvfb_tick_rate)
+    let (initial_frame_source, initial_xvfb_handle, active_tick_rate) = if config.display.mode
+        == "xvfb"
+    {
+        if config.xvfb.command.is_empty() {
+            anyhow::bail!("xvfb mode requires [xvfb] command in config");
+        }
+        let handle =
+            xvfb_manager::start(&config.xvfb.command, device_info.width, device_info.height)?;
+        let source = XvfbSource::new(handle.screen_file(), device_info.width, device_info.height)?;
+        let boxed: Box<dyn FrameSource> = Box::new(source);
+        // History is allocated but not seeded with layout frontmatter — metrics get configured
+        // when the user switches to a layout via D-Bus set_layout.
+        (boxed, Some(handle), xvfb_tick_rate)
+    } else {
+        // Load configured layout — user file takes precedence over built-in
+        let layout_path = layout_dir.join(&config.display.default_layout);
+        let template = if layout_path.exists() {
+            std::fs::read_to_string(&layout_path)?
         } else {
-            // Load configured layout — user file takes precedence over built-in
-            let layout_path = layout_dir.join(&config.display.default_layout);
-            let template = if layout_path.exists() {
-                std::fs::read_to_string(&layout_path)?
-            } else {
-                builtin_layouts::SYSTEM_STATS.to_string()
-            };
-
-            let frontmatter = LayoutFrontmatter::parse(&template);
-            // Configure history metrics from the layout's frontmatter into the
-            // already-allocated shared SensorHistory.
-            if let Some(ref hist) = initial_sensor_history {
-                if let Ok(mut h) = hist.lock() {
-                    for (metric, cfg) in &frontmatter.history_configs {
-                        h.configure_metric(metric, cfg.duration);
-                    }
-                }
-            }
-
-            let theme_palette = if let Some(manual) = config.theme.manual.clone() {
-                manual
-            } else {
-                ThemePalette::default()
-            };
-
-            let is_svg = config.display.default_layout.ends_with(".svg");
-            let boxed: Box<dyn FrameSource> = if is_svg {
-                let mut renderer = SvgRenderer::new(&template, device_info.width, device_info.height)?;
-                if let Some(ref hist) = initial_sensor_history {
-                    renderer.set_history(hist.clone());
-                }
-                renderer.set_theme(theme_palette);
-                renderer.set_layout_vars(
-                    config.layout_vars
-                        .get(&config.display.default_layout)
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-                renderer.set_background(initial_background.clone());
-                Box::new(renderer)
-            } else {
-                Box::new(TemplateRenderer::new(&template, device_info.width, device_info.height)?)
-            };
-
-            (boxed, None, config.display.tick_rate)
+            builtin_layouts::SYSTEM_STATS.to_string()
         };
+
+        let frontmatter = LayoutFrontmatter::parse(&template);
+        // Configure history metrics from the layout's frontmatter into the
+        // already-allocated shared SensorHistory.
+        if let Some(ref hist) = initial_sensor_history
+            && let Ok(mut h) = hist.lock()
+        {
+            for (metric, cfg) in &frontmatter.history_configs {
+                h.configure_metric(metric, cfg.duration);
+            }
+        }
+
+        let theme_palette: ThemePalette = config.theme.manual.clone().unwrap_or_default();
+
+        let is_svg = config.display.default_layout.ends_with(".svg");
+        let boxed: Box<dyn FrameSource> = if is_svg {
+            let mut renderer = SvgRenderer::new(&template, device_info.width, device_info.height)?;
+            if let Some(ref hist) = initial_sensor_history {
+                renderer.set_history(hist.clone());
+            }
+            renderer.set_theme(theme_palette);
+            renderer.set_layout_vars(
+                config
+                    .layout_vars
+                    .get(&config.display.default_layout)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            renderer.set_background(initial_background.clone());
+            Box::new(renderer)
+        } else {
+            Box::new(TemplateRenderer::new(
+                &template,
+                device_info.width,
+                device_info.height,
+            )?)
+        };
+
+        (boxed, None, config.display.tick_rate)
+    };
 
     // Shared state for D-Bus ↔ tick loop communication
     let state = Arc::new(Mutex::new(ServiceState {
@@ -223,11 +233,7 @@ async fn main() -> Result<()> {
 
     // Theme palette for the mode-change handler to use on layout reload.
     // Computed here (outside the if/else block) so it can be moved into the spawn closure.
-    let reload_theme = if let Some(manual) = config.theme.manual.clone() {
-        manual
-    } else {
-        ThemePalette::default()
-    };
+    let reload_theme: ThemePalette = config.theme.manual.clone().unwrap_or_default();
 
     // Mode change listener: handles layout switches, xvfb mode, and background changes.
     let layout_dir_clone = layout_dir.clone();
@@ -243,18 +249,20 @@ async fn main() -> Result<()> {
             match change {
                 ModeChange::Layout { name, vars } => {
                     // Drop any running xvfb before switching back to layout mode
-                    if let Some(h) = xvfb_handle.take() { drop(h); }
+                    if let Some(h) = xvfb_handle.take() {
+                        drop(h);
+                    }
                     let path = layout_dir_clone.join(&name);
                     match std::fs::read_to_string(&path) {
                         Ok(template) => {
                             // Parse frontmatter and register any new history metrics.
                             // configure_metric is idempotent — existing buffers are preserved.
                             let new_fm = LayoutFrontmatter::parse(&template);
-                            if let Some(ref hist) = reload_history {
-                                if let Ok(mut h) = hist.lock() {
-                                    for (metric, cfg) in &new_fm.history_configs {
-                                        h.configure_metric(metric, cfg.duration);
-                                    }
+                            if let Some(ref hist) = reload_history
+                                && let Ok(mut h) = hist.lock()
+                            {
+                                for (metric, cfg) in &new_fm.history_configs {
+                                    h.configure_metric(metric, cfg.duration);
                                 }
                             }
                             let is_svg = name.ends_with(".svg");
@@ -271,7 +279,11 @@ async fn main() -> Result<()> {
                                         Box::new(r)
                                     }
                                     Err(e) => {
-                                        log::warn!("Failed to create SvgRenderer for {}: {}", name, e);
+                                        log::warn!(
+                                            "Failed to create SvgRenderer for {}: {}",
+                                            name,
+                                            e
+                                        );
                                         continue;
                                     }
                                 }
@@ -279,13 +291,19 @@ async fn main() -> Result<()> {
                                 match TemplateRenderer::new(&template, 480, 480) {
                                     Ok(r) => Box::new(r),
                                     Err(e) => {
-                                        log::warn!("Failed to create TemplateRenderer for {}: {}", name, e);
+                                        log::warn!(
+                                            "Failed to create TemplateRenderer for {}: {}",
+                                            name,
+                                            e
+                                        );
                                         continue;
                                     }
                                 }
                             };
                             if source_tx.send(new_source).await.is_err() {
-                                log::warn!("Failed to send new frame source to tick loop — receiver dropped");
+                                log::warn!(
+                                    "Failed to send new frame source to tick loop — receiver dropped"
+                                );
                             }
                             // Also push raw template for set_template hot-swap path
                             let _ = template_tx.send(template);
@@ -299,24 +317,32 @@ async fn main() -> Result<()> {
                     // Push to tick loop immediately so the running renderer updates
                     // without waiting for a layout switch.
                     let _ = background_tx.send(image.clone());
-                    info!("Background updated ({})", if image.is_some() { "set" } else { "cleared" });
+                    info!(
+                        "Background updated ({})",
+                        if image.is_some() { "set" } else { "cleared" }
+                    );
                 }
                 ModeChange::Xvfb { command } => {
                     // Drop previous xvfb handle before starting a new one
-                    if let Some(h) = xvfb_handle.take() { drop(h); }
+                    if let Some(h) = xvfb_handle.take() {
+                        drop(h);
+                    }
                     match xvfb_manager::start(&command, 480, 480) {
-                        Ok(handle) => {
-                            match XvfbSource::new(handle.screen_file(), 480, 480) {
-                                Ok(source) => {
-                                    if source_tx.send(Box::new(source)).await.is_err() {
-                                        log::warn!("Failed to send xvfb frame source to tick loop — receiver dropped");
-                                    }
-                                    xvfb_handle = Some(handle);
-                                    info!("Switched to xvfb mode: {} ({}fps)", command, xvfb_tick_rate_cfg);
+                        Ok(handle) => match XvfbSource::new(handle.screen_file(), 480, 480) {
+                            Ok(source) => {
+                                if source_tx.send(Box::new(source)).await.is_err() {
+                                    log::warn!(
+                                        "Failed to send xvfb frame source to tick loop — receiver dropped"
+                                    );
                                 }
-                                Err(e) => log::warn!("Failed to create XvfbSource: {}", e),
+                                xvfb_handle = Some(handle);
+                                info!(
+                                    "Switched to xvfb mode: {} ({}fps)",
+                                    command, xvfb_tick_rate_cfg
+                                );
                             }
-                        }
+                            Err(e) => log::warn!("Failed to create XvfbSource: {}", e),
+                        },
                         Err(e) => log::warn!("Failed to start xvfb: {}", e),
                     }
                 }
@@ -329,9 +355,8 @@ async fn main() -> Result<()> {
     let rotation = config.display.rotation;
     let sensor_poll_interval = Duration::from_millis(config.sensors.poll_interval_ms);
 
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate()
-    ).expect("install SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
 
     tokio::select! {
         res = tick::run_tick_loop(

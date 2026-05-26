@@ -1,5 +1,5 @@
-use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl};
 use std::time::Duration;
+use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl};
 
 #[test]
 fn parse_history_frontmatter() {
@@ -106,8 +106,14 @@ good_name: color = "#00ff88" "A color"
 #}
 <svg/>"##;
     let fm = LayoutFrontmatter::parse(svg);
-    assert!(!fm.variables.contains_key("BadName"), "uppercase name must be rejected");
-    assert!(fm.variables.contains_key("good_name"), "valid name must be accepted");
+    assert!(
+        !fm.variables.contains_key("BadName"),
+        "uppercase name must be rejected"
+    );
+    assert!(
+        fm.variables.contains_key("good_name"),
+        "valid name must be accepted"
+    );
 }
 
 #[test]
@@ -120,9 +126,18 @@ good_color: color = "#ff8800" "Valid hex color"
 #}
 <svg/>"##;
     let fm = LayoutFrontmatter::parse(svg);
-    assert!(!fm.variables.contains_key("bad_color"), "named color must be rejected");
-    assert!(!fm.variables.contains_key("also_bad"), "invalid hex digits must be rejected");
-    assert!(fm.variables.contains_key("good_color"), "valid hex color must be accepted");
+    assert!(
+        !fm.variables.contains_key("bad_color"),
+        "named color must be rejected"
+    );
+    assert!(
+        !fm.variables.contains_key("also_bad"),
+        "invalid hex digits must be rejected"
+    );
+    assert!(
+        fm.variables.contains_key("good_color"),
+        "valid hex color must be accepted"
+    );
 }
 
 #[test]
@@ -134,6 +149,12 @@ safe_text: text = "CPU Temperature" "Plain text label"
 #}
 <svg/>"#;
     let fm = LayoutFrontmatter::parse(svg);
-    assert!(!fm.variables.contains_key("unsafe_text"), "Tera delimiters must be rejected");
-    assert!(fm.variables.contains_key("safe_text"), "plain text must be accepted");
+    assert!(
+        !fm.variables.contains_key("unsafe_text"),
+        "Tera delimiters must be rejected"
+    );
+    assert!(
+        fm.variables.contains_key("safe_text"),
+        "plain text must be accepted"
+    );
 }

@@ -17,12 +17,13 @@ fn main() -> Result<()> {
 
     println!("Performing handshake...");
     let info = transport.handshake()?;
-    println!("Device: {}x{}, PM={}, JPEG={}", info.width, info.height, info.pm, info.use_jpeg);
+    println!(
+        "Device: {}x{}, PM={}, JPEG={}",
+        info.width, info.height, info.pm, info.use_jpeg
+    );
 
     // Create a solid red image
-    let img = ImageBuffer::from_fn(info.width, info.height, |_x, _y| {
-        Rgb([255u8, 0u8, 0u8])
-    });
+    let img = ImageBuffer::from_fn(info.width, info.height, |_x, _y| Rgb([255u8, 0u8, 0u8]));
 
     // Encode to JPEG
     let mut jpeg_buf = Cursor::new(Vec::new());

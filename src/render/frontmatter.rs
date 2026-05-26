@@ -85,17 +85,25 @@ impl LayoutFrontmatter {
                 let key = key.trim();
                 let rest = rest.trim();
                 let (duration_str, hz) = if let Some((d, h)) = rest.split_once('@') {
-                    (d.trim(), h.trim().strip_suffix("hz").and_then(|s| s.parse::<f64>().ok()))
+                    (
+                        d.trim(),
+                        h.trim()
+                            .strip_suffix("hz")
+                            .and_then(|s| s.parse::<f64>().ok()),
+                    )
                 } else {
                     (rest, None)
                 };
-                if let Some(secs_str) = duration_str.strip_suffix('s') {
-                    if let Ok(secs) = secs_str.parse::<u64>() {
-                        self.history_configs.insert(key.to_string(), HistoryConfig {
+                if let Some(secs_str) = duration_str.strip_suffix('s')
+                    && let Ok(secs) = secs_str.parse::<u64>()
+                {
+                    self.history_configs.insert(
+                        key.to_string(),
+                        HistoryConfig {
                             duration: Duration::from_secs(secs),
                             sample_hz: hz,
-                        });
-                    }
+                        },
+                    );
                 }
             }
         }
@@ -129,8 +137,13 @@ impl LayoutFrontmatter {
                 continue;
             }
             match Self::parse_var_line(line) {
-                Some(parsed) => { self.variables.insert(parsed.0, parsed.1); }
-                None => log::warn!("frontmatter: skipping malformed or invalid var line: {:?}", line),
+                Some(parsed) => {
+                    self.variables.insert(parsed.0, parsed.1);
+                }
+                None => log::warn!(
+                    "frontmatter: skipping malformed or invalid var line: {:?}",
+                    line
+                ),
             }
         }
     }
@@ -169,14 +182,21 @@ impl LayoutFrontmatter {
             _ => return None,
         }
 
-        Some((name, VariableDecl { var_type, default, help }))
+        Some((
+            name,
+            VariableDecl {
+                var_type,
+                default,
+                help,
+            },
+        ))
     }
 }
 
 fn is_valid_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
-        Some(c) if matches!(c, 'a'..='z' | '_') => {}
+        Some('a'..='z' | '_') => {}
         _ => return false,
     }
     chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'))

@@ -1,16 +1,16 @@
 // Sensor system: SensorProvider trait and concrete sensor readers.
 // Providers read system metrics (CPU/GPU temps, power, RAM, FPS).
 
-pub mod hwmon;
 pub mod amdgpu;
-pub mod nvidia;
-pub mod sysinfo_provider;
-pub mod mangohud;
-pub mod rapl;
 pub mod history;
+pub mod hwmon;
+pub mod mangohud;
+pub mod nvidia;
+pub mod rapl;
+pub mod sysinfo_provider;
 
-use std::collections::HashMap;
 use anyhow::Result;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct SensorReading {
@@ -37,9 +37,17 @@ pub struct SensorHub {
     providers: Vec<Box<dyn SensorProvider>>,
 }
 
+impl Default for SensorHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SensorHub {
     pub fn new() -> Self {
-        Self { providers: Vec::new() }
+        Self {
+            providers: Vec::new(),
+        }
     }
 
     pub fn add_provider(&mut self, provider: Box<dyn SensorProvider>) {
@@ -65,6 +73,9 @@ impl SensorHub {
     }
 
     pub fn available_sensors(&self) -> Vec<SensorDescriptor> {
-        self.providers.iter().flat_map(|p| p.available_sensors()).collect()
+        self.providers
+            .iter()
+            .flat_map(|p| p.available_sensors())
+            .collect()
     }
 }

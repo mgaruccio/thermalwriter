@@ -13,16 +13,16 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
+use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
 use thermalwriter::sensor::SensorHub;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::service::tick::encode_jpeg;
 use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
@@ -34,7 +34,8 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
     if path.exists() && path.is_file() {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let display_name = path.file_stem()
+        let display_name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("custom")
             .to_string();
@@ -62,9 +63,21 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
 
     // Fall back to built-in layouts
     match name_or_path {
-        "system-stats" => Ok((include_str!("../layouts/system-stats.html").to_string(), "system-stats".to_string(), false)),
-        "gpu-focus" => Ok((include_str!("../layouts/gpu-focus.html").to_string(), "gpu-focus".to_string(), false)),
-        "minimal" => Ok((include_str!("../layouts/minimal.html").to_string(), "minimal".to_string(), false)),
+        "system-stats" => Ok((
+            include_str!("../layouts/system-stats.html").to_string(),
+            "system-stats".to_string(),
+            false,
+        )),
+        "gpu-focus" => Ok((
+            include_str!("../layouts/gpu-focus.html").to_string(),
+            "gpu-focus".to_string(),
+            false,
+        )),
+        "minimal" => Ok((
+            include_str!("../layouts/minimal.html").to_string(),
+            "minimal".to_string(),
+            false,
+        )),
         other => anyhow::bail!(
             "Layout not found: '{}'\n\nUsage: cargo run --example render_layout [name_or_path] [seconds] [--mock]",
             other
@@ -105,15 +118,14 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     let use_mock = args.iter().any(|a| a == "--mock");
-    let positional: Vec<&str> = args[1..].iter()
+    let positional: Vec<&str> = args[1..]
+        .iter()
         .filter(|a| !a.starts_with("--"))
         .map(|s| s.as_str())
         .collect();
 
     let name_or_path = positional.first().copied().unwrap_or("system-stats");
-    let duration_secs: u64 = positional.get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30);
+    let duration_secs: u64 = positional.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let (template, display_name, is_svg) = load_template(name_or_path)?;
 
@@ -133,17 +145,18 @@ fn main() -> Result<()> {
     let frontmatter = LayoutFrontmatter::parse(&template);
 
     // Create sensor history if any metrics are configured in frontmatter
-    let sensor_history: Option<Arc<Mutex<SensorHistory>>> = if is_svg && !frontmatter.history_configs.is_empty() {
-        let mut history = SensorHistory::new();
-        for (metric, cfg) in &frontmatter.history_configs {
-            history.configure_metric(metric, cfg.duration);
-        }
-        let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
-        println!("History tracking: {:?}", metrics);
-        Some(Arc::new(Mutex::new(history)))
-    } else {
-        None
-    };
+    let sensor_history: Option<Arc<Mutex<SensorHistory>>> =
+        if is_svg && !frontmatter.history_configs.is_empty() {
+            let mut history = SensorHistory::new();
+            for (metric, cfg) in &frontmatter.history_configs {
+                history.configure_metric(metric, cfg.duration);
+            }
+            let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
+            println!("History tracking: {:?}", metrics);
+            Some(Arc::new(Mutex::new(history)))
+        } else {
+            None
+        };
 
     let initial_sensors = if use_mock {
         let mock = mock_sensors();
@@ -179,10 +192,10 @@ fn main() -> Result<()> {
     };
 
     // Record initial sensors into history
-    if let Some(ref hist) = sensor_history {
-        if let Ok(mut h) = hist.lock() {
-            h.record(&initial_sensors);
-        }
+    if let Some(ref hist) = sensor_history
+        && let Ok(mut h) = hist.lock()
+    {
+        h.record(&initial_sensors);
     }
 
     let frame = renderer.render(&initial_sensors)?;
@@ -201,7 +214,10 @@ fn main() -> Result<()> {
     println!("Device: {}x{}, PM={}", info.width, info.height, info.pm);
 
     let mode = if use_mock { "mock" } else { "live" };
-    println!("Sending '{}' ({}) for {}s — go look at the display!", display_name, mode, duration_secs);
+    println!(
+        "Sending '{}' ({}) for {}s — go look at the display!",
+        display_name, mode, duration_secs
+    );
     let start = std::time::Instant::now();
     let mut iteration = 0u64;
     while start.elapsed() < Duration::from_secs(duration_secs) {
@@ -212,10 +228,10 @@ fn main() -> Result<()> {
         };
 
         // Record into history on each poll cycle
-        if let Some(ref hist) = sensor_history {
-            if let Ok(mut h) = hist.lock() {
-                h.record(&sensors);
-            }
+        if let Some(ref hist) = sensor_history
+            && let Ok(mut h) = hist.lock()
+        {
+            h.record(&sensors);
         }
 
         let frame = renderer.render(&sensors)?;
@@ -226,12 +242,12 @@ fn main() -> Result<()> {
     }
 
     // Print history stats
-    if let Some(ref hist) = sensor_history {
-        if let Ok(h) = hist.lock() {
-            for metric in h.configured_metrics() {
-                let count = h.query(&metric, 10000).len();
-                println!("Recorded {} samples for {}", count, metric);
-            }
+    if let Some(ref hist) = sensor_history
+        && let Ok(h) = hist.lock()
+    {
+        for metric in h.configured_metrics() {
+            let count = h.query(&metric, 10000).len();
+            println!("Recorded {} samples for {}", count, metric);
         }
     }
 

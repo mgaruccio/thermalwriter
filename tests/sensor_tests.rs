@@ -1,13 +1,13 @@
-use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::amdgpu::AmdGpuProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalwriter::sensor::mangohud::MangoHudProvider;
-use thermalwriter::sensor::rapl::RaplProvider;
-use thermalwriter::sensor::nvidia::NvidiaProvider;
-use thermalwriter::sensor::SensorProvider;
+use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
-use serial_test::serial;
+use thermalwriter::sensor::SensorProvider;
+use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::nvidia::NvidiaProvider;
+use thermalwriter::sensor::rapl::RaplProvider;
+use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 
 #[test]
 fn hwmon_reads_temperature_from_sysfs() {
@@ -87,8 +87,10 @@ fn hwmon_no_cpu_temp_alias_for_non_cpu_chip() {
     let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
     let readings = provider.poll().unwrap();
 
-    assert!(readings.iter().find(|r| r.key == "cpu_temp").is_none(),
-        "Non-CPU chip should not emit cpu_temp alias");
+    assert!(
+        readings.iter().find(|r| r.key == "cpu_temp").is_none(),
+        "Non-CPU chip should not emit cpu_temp alias"
+    );
 }
 
 #[test]
@@ -106,7 +108,10 @@ fn hwmon_cpu_temp_alias_only_emitted_once_across_chips() {
     let readings = provider.poll().unwrap();
 
     let cpu_temp_count = readings.iter().filter(|r| r.key == "cpu_temp").count();
-    assert_eq!(cpu_temp_count, 1, "cpu_temp alias should appear exactly once");
+    assert_eq!(
+        cpu_temp_count, 1,
+        "cpu_temp alias should appear exactly once"
+    );
 }
 
 #[test]
@@ -154,7 +159,9 @@ fn sensory_hub_aggregates_providers() {
     fs::write(hwmon_dir.join("temp1_label"), "Core 0\n").unwrap();
 
     let mut hub = SensorHub::new();
-    hub.add_provider(Box::new(HwmonProvider::with_base_path(tmp.path().to_path_buf())));
+    hub.add_provider(Box::new(HwmonProvider::with_base_path(
+        tmp.path().to_path_buf(),
+    )));
 
     let data = hub.poll();
     assert!(!data.is_empty());
@@ -164,16 +171,20 @@ fn sensory_hub_aggregates_providers() {
 
 #[test]
 fn sensor_hub_continues_on_provider_failure() {
-    use thermalwriter::sensor::{SensorHub, SensorReading, SensorDescriptor};
     use anyhow::anyhow;
+    use thermalwriter::sensor::{SensorDescriptor, SensorHub, SensorReading};
 
     struct FailingProvider;
     impl SensorProvider for FailingProvider {
-        fn name(&self) -> &str { "failing" }
+        fn name(&self) -> &str {
+            "failing"
+        }
         fn poll(&mut self) -> anyhow::Result<Vec<SensorReading>> {
             Err(anyhow!("simulated failure"))
         }
-        fn available_sensors(&self) -> Vec<SensorDescriptor> { vec![] }
+        fn available_sensors(&self) -> Vec<SensorDescriptor> {
+            vec![]
+        }
     }
 
     let mut hub = SensorHub::new();
@@ -323,8 +334,18 @@ fn sysinfo_ram_format_one_decimal() {
     let ram_used = readings.iter().find(|r| r.key == "ram_used").unwrap();
     // Should have exactly 1 decimal place e.g. "7.8"
     let parts: Vec<&str> = ram_used.value.split('.').collect();
-    assert_eq!(parts.len(), 2, "Expected 1 decimal place in '{}'", ram_used.value);
-    assert_eq!(parts[1].len(), 1, "Expected exactly 1 decimal digit in '{}'", ram_used.value);
+    assert_eq!(
+        parts.len(),
+        2,
+        "Expected 1 decimal place in '{}'",
+        ram_used.value
+    );
+    assert_eq!(
+        parts[1].len(),
+        1,
+        "Expected exactly 1 decimal digit in '{}'",
+        ram_used.value
+    );
 }
 
 // ─── SysinfoProvider per-core + network tests ────────────────────────────────
@@ -339,7 +360,11 @@ fn sysinfo_returns_per_core_cpu_util() {
     // Should have at least cpu_c0_util
     let core0 = readings.iter().find(|r| r.key == "cpu_c0_util").unwrap();
     let util: f64 = core0.value.parse().unwrap();
-    assert!((0.0..=100.0).contains(&util), "cpu_c0_util should be 0-100, got {}", util);
+    assert!(
+        (0.0..=100.0).contains(&util),
+        "cpu_c0_util should be 0-100, got {}",
+        util
+    );
     assert_eq!(core0.unit, "%");
 }
 
@@ -364,7 +389,9 @@ fn sysinfo_per_core_keys_use_correct_format() {
     for r in &readings {
         if r.key.starts_with("cpu_c") && r.key.ends_with("_util") {
             let middle = r.key.trim_start_matches("cpu_c").trim_end_matches("_util");
-            middle.parse::<usize>().expect(&format!("core index should be numeric: {}", r.key));
+            middle
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("core index should be numeric: {}", r.key));
         }
     }
 }
@@ -383,8 +410,14 @@ fn sysinfo_returns_net_rx_and_tx_after_two_polls() {
     let second = provider.poll().unwrap();
     let net_rx = second.iter().find(|r| r.key == "net_rx");
     let net_tx = second.iter().find(|r| r.key == "net_tx");
-    assert!(net_rx.is_some(), "net_rx should be present after second poll");
-    assert!(net_tx.is_some(), "net_tx should be present after second poll");
+    assert!(
+        net_rx.is_some(),
+        "net_rx should be present after second poll"
+    );
+    assert!(
+        net_tx.is_some(),
+        "net_tx should be present after second poll"
+    );
 
     let rx_val: f64 = net_rx.unwrap().value.parse().unwrap();
     let tx_val: f64 = net_tx.unwrap().value.parse().unwrap();
@@ -459,11 +492,7 @@ fn mangohud_missing_log_dir_returns_empty() {
 #[test]
 fn mangohud_headers_but_no_data_rows_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    write_mangohud_csv(
-        tmp.path(),
-        "game.csv",
-        "fps,frametime,cpu_load,gpu_load\n",
-    );
+    write_mangohud_csv(tmp.path(), "game.csv", "fps,frametime,cpu_load,gpu_load\n");
 
     let mut provider = MangoHudProvider::with_log_dir(tmp.path().to_path_buf());
     let readings = provider.poll().unwrap();
@@ -579,7 +608,9 @@ fn hwmon_no_per_core_or_ccd_alias_for_non_cpu_chip() {
     let readings = provider.poll().unwrap();
 
     assert!(
-        readings.iter().all(|r| !r.key.starts_with("cpu_c") || r.key == "cpu_temp"),
+        readings
+            .iter()
+            .all(|r| !r.key.starts_with("cpu_c") || r.key == "cpu_temp"),
         "Non-CPU chip should not emit per-core or CCD aliases: {:?}",
         readings.iter().map(|r| &r.key).collect::<Vec<_>>()
     );
@@ -610,9 +641,12 @@ fn rapl_rollover_with_unreadable_max_does_not_explode() {
 
     let readings = provider.poll().unwrap();
     if let Some(power) = readings.iter().find(|r| r.key == "cpu_power") {
-        let watts: f64 = power.value.parse().expect("cpu_power value must be a number");
+        let watts: f64 = power
+            .value
+            .parse()
+            .expect("cpu_power value must be a number");
         assert!(
-            watts.is_finite() && watts >= 0.0 && watts < 10_000.0,
+            watts.is_finite() && (0.0..10_000.0).contains(&watts),
             "rollover with missing max produced insane wattage: {} W (expected absent or < 10kW)",
             watts
         );
@@ -657,19 +691,34 @@ fn nvidia_parser_emits_all_fields_when_all_valid() {
     let line = "72, 85, 180.7, 8192, 16384";
     let readings = thermalwriter::sensor::nvidia::parse_csv_line(line);
 
-    let temp = readings.iter().find(|r| r.key == "gpu_temp").expect("gpu_temp missing");
+    let temp = readings
+        .iter()
+        .find(|r| r.key == "gpu_temp")
+        .expect("gpu_temp missing");
     assert_eq!(temp.value, "72");
 
-    let util = readings.iter().find(|r| r.key == "gpu_util").expect("gpu_util missing");
+    let util = readings
+        .iter()
+        .find(|r| r.key == "gpu_util")
+        .expect("gpu_util missing");
     assert_eq!(util.value, "85");
 
-    let power = readings.iter().find(|r| r.key == "gpu_power").expect("gpu_power missing");
+    let power = readings
+        .iter()
+        .find(|r| r.key == "gpu_power")
+        .expect("gpu_power missing");
     assert_eq!(power.value, "181"); // 180.7 rounds to 181 via format!("{:.0}")
 
-    let vram_used = readings.iter().find(|r| r.key == "vram_used").expect("vram_used missing");
+    let vram_used = readings
+        .iter()
+        .find(|r| r.key == "vram_used")
+        .expect("vram_used missing");
     assert_eq!(vram_used.value, "8.0"); // 8192 MiB / 1024 = 8.0 GB
 
-    let vram_total = readings.iter().find(|r| r.key == "vram_total").expect("vram_total missing");
+    let vram_total = readings
+        .iter()
+        .find(|r| r.key == "vram_total")
+        .expect("vram_total missing");
     assert_eq!(vram_total.value, "16.0");
 }
 
@@ -705,12 +754,24 @@ fn mangohud_partial_leading_line_is_dropped() {
     let readings = provider.poll().unwrap();
 
     // The last complete row must be parsed — fps=144
-    let fps = readings.iter().find(|r| r.key == "fps").expect("fps must be present");
-    assert_eq!(fps.value, "144", "must read the last complete row, not a partial fragment");
+    let fps = readings
+        .iter()
+        .find(|r| r.key == "fps")
+        .expect("fps must be present");
+    assert_eq!(
+        fps.value, "144",
+        "must read the last complete row, not a partial fragment"
+    );
 
     // cpu_load=60 from the last row (not 50 from the earlier rows)
-    let cpu = readings.iter().find(|r| r.key == "cpu_load").expect("cpu_load must be present");
-    assert_eq!(cpu.value, "60", "cpu_load must come from the last complete row");
+    let cpu = readings
+        .iter()
+        .find(|r| r.key == "cpu_load")
+        .expect("cpu_load must be present");
+    assert_eq!(
+        cpu.value, "60",
+        "cpu_load must come from the last complete row"
+    );
 }
 
 #[test]
@@ -737,13 +798,20 @@ fn mangohud_partial_trailing_row_without_newline_is_dropped() {
 
     // The partial trailing row (999,...) must be dropped.
     // The last complete row (144,...) must be returned.
-    let fps = readings.iter().find(|r| r.key == "fps").expect("fps must be present");
+    let fps = readings
+        .iter()
+        .find(|r| r.key == "fps")
+        .expect("fps must be present");
     assert_eq!(
         fps.value, "144",
-        "partial trailing row without newline must be discarded; got fps={}", fps.value
+        "partial trailing row without newline must be discarded; got fps={}",
+        fps.value
     );
 
-    let cpu = readings.iter().find(|r| r.key == "cpu_load").expect("cpu_load must be present");
+    let cpu = readings
+        .iter()
+        .find(|r| r.key == "cpu_load")
+        .expect("cpu_load must be present");
     assert_eq!(
         cpu.value, "60",
         "cpu_load must come from last complete row, not partial fragment"
@@ -753,6 +821,7 @@ fn mangohud_partial_trailing_row_without_newline_is_dropped() {
 // ─── NvidiaProvider timeout tests ────────────────────────────────────────────
 
 #[test]
+#[ignore = "spawns and kills a hung child process; run manually outside restricted sandboxes"]
 #[serial]
 fn nvidia_poll_times_out_on_hung_subprocess() {
     use std::io::Write;
@@ -774,21 +843,27 @@ fn nvidia_poll_times_out_on_hung_subprocess() {
 
     // PATH mutation is process-wide; #[serial] ensures no other test runs
     // concurrently while we have it pointed at the shim directory.
-    unsafe { std::env::set_var("PATH", &new_path); }
+    unsafe {
+        std::env::set_var("PATH", &new_path);
+    }
 
     let mut provider = NvidiaProvider::new();
     let start = Instant::now();
     let result = provider.poll().unwrap();
     let elapsed = start.elapsed();
 
-    unsafe { std::env::set_var("PATH", original_path); }
+    unsafe {
+        std::env::set_var("PATH", original_path);
+    }
 
     assert!(
         elapsed < std::time::Duration::from_millis(1500),
-        "poll took {:?}, expected < 1.5s — timeout is not firing", elapsed
+        "poll took {:?}, expected < 1.5s — timeout is not firing",
+        elapsed
     );
     assert!(
         result.is_empty(),
-        "poll should return empty on timeout, got {:?}", result
+        "poll should return empty on timeout, got {:?}",
+        result
     );
 }

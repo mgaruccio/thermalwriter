@@ -1,8 +1,8 @@
 // hwmon sensor provider: reads /sys/class/hwmon for CPU temperatures and power.
 
+use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
 
@@ -16,9 +16,17 @@ pub struct HwmonProvider {
     base_path: PathBuf,
 }
 
+impl Default for HwmonProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HwmonProvider {
     pub fn new() -> Self {
-        Self { base_path: PathBuf::from(DEFAULT_HWMON_PATH) }
+        Self {
+            base_path: PathBuf::from(DEFAULT_HWMON_PATH),
+        }
     }
 
     /// For testing with a fake sysfs tree.
@@ -56,43 +64,49 @@ impl SensorProvider for HwmonProvider {
             // Read temperatures (temp*_input files, millidegrees C)
             for i in 1..=16 {
                 let input = hwmon_dir.join(format!("temp{}_input", i));
-                if let Some(val_str) = Self::read_file_trimmed(&input) {
-                    if let Ok(millideg) = val_str.parse::<i64>() {
-                        let label = Self::read_file_trimmed(&hwmon_dir.join(format!("temp{}_label", i)))
+                if let Some(val_str) = Self::read_file_trimmed(&input)
+                    && let Ok(millideg) = val_str.parse::<i64>()
+                {
+                    let label =
+                        Self::read_file_trimmed(&hwmon_dir.join(format!("temp{}_label", i)))
                             .unwrap_or_else(|| format!("temp{}", i));
-                        let key = format!("{}_{}_temp{}", chip_name, label.to_lowercase().replace(' ', "_"), i);
-                        let deg = (millideg / 1000).to_string();
+                    let key = format!(
+                        "{}_{}_temp{}",
+                        chip_name,
+                        label.to_lowercase().replace(' ', "_"),
+                        i
+                    );
+                    let deg = (millideg / 1000).to_string();
+                    readings.push(SensorReading {
+                        key,
+                        value: deg.clone(),
+                        unit: "°C".to_string(),
+                    });
+                    // Emit canonical alias for templates
+                    if is_cpu_chip && !cpu_temp_aliased {
                         readings.push(SensorReading {
-                            key,
+                            key: "cpu_temp".to_string(),
                             value: deg.clone(),
                             unit: "°C".to_string(),
                         });
-                        // Emit canonical alias for templates
-                        if is_cpu_chip && !cpu_temp_aliased {
+                        cpu_temp_aliased = true;
+                    }
+                    // Per-core temp alias: "Core N" label → cpu_cN_temp
+                    if is_cpu_chip {
+                        if let Some(core_num) = parse_core_label(&label) {
                             readings.push(SensorReading {
-                                key: "cpu_temp".to_string(),
+                                key: format!("cpu_c{}_temp", core_num),
                                 value: deg.clone(),
                                 unit: "°C".to_string(),
                             });
-                            cpu_temp_aliased = true;
                         }
-                        // Per-core temp alias: "Core N" label → cpu_cN_temp
-                        if is_cpu_chip {
-                            if let Some(core_num) = parse_core_label(&label) {
-                                readings.push(SensorReading {
-                                    key: format!("cpu_c{}_temp", core_num),
-                                    value: deg.clone(),
-                                    unit: "°C".to_string(),
-                                });
-                            }
-                            // CCD temp alias: "TccdN" label → cpu_ccd{N-1}_temp
-                            if let Some(ccd_idx) = parse_ccd_label(&label) {
-                                readings.push(SensorReading {
-                                    key: format!("cpu_ccd{}_temp", ccd_idx),
-                                    value: deg,
-                                    unit: "°C".to_string(),
-                                });
-                            }
+                        // CCD temp alias: "TccdN" label → cpu_ccd{N-1}_temp
+                        if let Some(ccd_idx) = parse_ccd_label(&label) {
+                            readings.push(SensorReading {
+                                key: format!("cpu_ccd{}_temp", ccd_idx),
+                                value: deg,
+                                unit: "°C".to_string(),
+                            });
                         }
                     }
                 }
@@ -101,26 +115,31 @@ impl SensorProvider for HwmonProvider {
             // Read fan speeds (fan*_input files, RPM)
             for i in 1..=8 {
                 let input = hwmon_dir.join(format!("fan{}_input", i));
-                if let Some(val_str) = Self::read_file_trimmed(&input) {
-                    if let Ok(rpm) = val_str.parse::<u64>() {
-                        let label = Self::read_file_trimmed(&hwmon_dir.join(format!("fan{}_label", i)))
-                            .unwrap_or_else(|| format!("fan{}", i));
-                        let key = format!("{}_{}_fan{}", chip_name, label.to_lowercase().replace(' ', "_"), i);
-                        let rpm_str = rpm.to_string();
+                if let Some(val_str) = Self::read_file_trimmed(&input)
+                    && let Ok(rpm) = val_str.parse::<u64>()
+                {
+                    let label = Self::read_file_trimmed(&hwmon_dir.join(format!("fan{}_label", i)))
+                        .unwrap_or_else(|| format!("fan{}", i));
+                    let key = format!(
+                        "{}_{}_fan{}",
+                        chip_name,
+                        label.to_lowercase().replace(' ', "_"),
+                        i
+                    );
+                    let rpm_str = rpm.to_string();
+                    readings.push(SensorReading {
+                        key,
+                        value: rpm_str.clone(),
+                        unit: "RPM".to_string(),
+                    });
+                    // Emit canonical alias for templates
+                    if is_cpu_chip && !cpu_fan_aliased {
                         readings.push(SensorReading {
-                            key,
-                            value: rpm_str.clone(),
+                            key: "cpu_fan".to_string(),
+                            value: rpm_str,
                             unit: "RPM".to_string(),
                         });
-                        // Emit canonical alias for templates
-                        if is_cpu_chip && !cpu_fan_aliased {
-                            readings.push(SensorReading {
-                                key: "cpu_fan".to_string(),
-                                value: rpm_str,
-                                unit: "RPM".to_string(),
-                            });
-                            cpu_fan_aliased = true;
-                        }
+                        cpu_fan_aliased = true;
                     }
                 }
             }
@@ -133,11 +152,14 @@ impl SensorProvider for HwmonProvider {
         // Discover by polling once — use a mutable clone to avoid borrow issues
         let mut probe = HwmonProvider::with_base_path(self.base_path.clone());
         match probe.poll() {
-            Ok(readings) => readings.iter().map(|r| SensorDescriptor {
-                key: r.key.clone(),
-                name: r.key.clone(),
-                unit: r.unit.clone(),
-            }).collect(),
+            Ok(readings) => readings
+                .iter()
+                .map(|r| SensorDescriptor {
+                    key: r.key.clone(),
+                    name: r.key.clone(),
+                    unit: r.unit.clone(),
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -160,6 +182,8 @@ fn parse_ccd_label(label: &str) -> Option<u32> {
     let lower = label.to_lowercase();
     let rest = lower.strip_prefix("tccd")?;
     let n: u32 = rest.trim().parse().ok()?;
-    if n == 0 { return None; } // Tccd0 doesn't exist in practice; guard against underflow
+    if n == 0 {
+        return None;
+    } // Tccd0 doesn't exist in practice; guard against underflow
     Some(n - 1)
 }

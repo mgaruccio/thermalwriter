@@ -4,7 +4,10 @@ use thermalwriter::render::components::animation::AnimationSource;
 
 /// Create a minimal 2-frame 2x2 GIF for testing.
 fn make_test_gif() -> NamedTempFile {
-    use image::{GrayImage, codecs::gif::{GifEncoder, Repeat}, Frame};
+    use image::{
+        Frame, GrayImage,
+        codecs::gif::{GifEncoder, Repeat},
+    };
 
     let mut tmp = NamedTempFile::new().unwrap();
 
@@ -16,7 +19,8 @@ fn make_test_gif() -> NamedTempFile {
         let img1 = GrayImage::from_pixel(2, 2, image::Luma([255u8]));
         let frame1 = Frame::from_parts(
             image::DynamicImage::ImageLuma8(img1).into_rgba8(),
-            0, 0,
+            0,
+            0,
             image::Delay::from_numer_denom_ms(100, 1),
         );
         encoder.encode_frame(frame1).unwrap();
@@ -25,7 +29,8 @@ fn make_test_gif() -> NamedTempFile {
         let img2 = GrayImage::from_pixel(2, 2, image::Luma([0u8]));
         let frame2 = Frame::from_parts(
             image::DynamicImage::ImageLuma8(img2).into_rgba8(),
-            0, 0,
+            0,
+            0,
             image::Delay::from_numer_denom_ms(100, 1),
         );
         encoder.encode_frame(frame2).unwrap();
@@ -61,7 +66,10 @@ fn animation_frame_at_loops_back_to_start() {
     let frame = anim.frame_at(total + Duration::from_millis(10));
     assert!(frame.is_some(), "Should return frame after looping");
     let pixels = frame.unwrap();
-    assert_eq!(pixels[0], 255, "After loop, first frame should be white again");
+    assert_eq!(
+        pixels[0], 255,
+        "After loop, first frame should be white again"
+    );
 }
 
 #[test]
