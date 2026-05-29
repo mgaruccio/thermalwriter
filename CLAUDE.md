@@ -37,7 +37,7 @@ Rust daemon with:
 
 ```bash
 cargo build                              # build
-cargo test                               # run tests (214 tests)
+cargo test                               # run tests (~190 in main crate; GUI tests via `cd gui/src-tauri && cargo test`)
 cargo run --example preview_layout <name_or_path>  # render to PNG (no USB)
 cargo run --example render_layout <name_or_path> [secs] [--mock]  # push to device
 cargo run --example send_test_frame      # solid red hardware test
@@ -66,6 +66,8 @@ cargo run --example render_layout fps-hero 15 --mock
 See `skills/designing-layouts/SKILL.md` for the full design system.
 
 SVG is the primary layout format. HTML layouts still work via the legacy TemplateRenderer.
+
+Frontmatter var types (declared in the `{# vars: #}` block, surfaced as GUI controls): `color` (color picker), `text` (text field), `sensor` (sensor dropdown), `number` / `number(min,max,step)` (numeric field; renders as a slider in the GUI when min+max are given). Defaults are auto-injected into the Tera context, so `{{ var }}` always has a value even with no saved override. neon-dash-v2 exposes `panel_opacity: number(0,1,0.05)` driving the panel gradient's `stop-opacity` — the GUI-controllable knob for how much the global bg shows through the panels. Adding a new type means updating BOTH `frontmatter.rs` (parse/validate) and the GUI's `validate_vars` + App.svelte render branch; the daemon does NOT type-check vars (only the GUI does), but it must be rebuilt for its frontmatter parser to recognize a new type's default.
 
 Key gotchas:
 - LCD backlight washes out dim text — use opacity >= 0.7, colors >= #999999, labels >= 14px
@@ -107,7 +109,8 @@ Sub-project under `gui/` — Svelte 5 + Tauri 2. Talks to the daemon over D-Bus;
 
 - **Design system**: Tokyo Night Terminal HUD (see `gui/src/app.css`). Themes: Tokyo Night Storm (default), Tokyo Night, Catppuccin Mocha, Gruvbox Material, Nord — switched via `data-theme` on `<html>` and persisted in localStorage as `tw-theme`. Typography: Major Mono Display + IBM Plex Mono/Sans loaded from Google Fonts (CSP allows `fonts.googleapis.com`/`fonts.gstatic.com`).
 - **Dev mode**: `cd gui && npm run tauri:dev`. The MCP bridge (`tauri-plugin-mcp-bridge`) is wired up debug-only — once running, Claude's Tauri MCP can screenshot/inspect/drive the webview on `localhost:9223`.
-- **Backgrounds**: GUI fetches thumbnails through the `read_background` Tauri command (returns raw bytes; frontend wraps in a Blob URL).
+- **Live preview**: `render_preview` seeds the renderer with synthetic sensor history (mirroring `examples/preview_layout.rs`) whenever the layout's frontmatter declares history metrics — without it, layouts using `graph(data=…_history)` (e.g. neon-dash-v2) error out in Tera, since the GUI has no live daemon feeding real history.
+- **Backgrounds**: GUI fetches thumbnails through the `read_background` Tauri command (returns raw bytes; frontend wraps in a Blob URL). BgGallery's "Import" tile lets users add a PNG/JPEG without touching the filesystem — the file's bytes go to the `import_background` command, which validates the extension + decodes via `render::background::decode_to_pixmap` (rejecting non-images and >8 MB files), then atomically writes a non-clobbering filename into `backgrounds/` and returns it so the gallery refreshes and selects it.
 
 ## Key Dependencies
 

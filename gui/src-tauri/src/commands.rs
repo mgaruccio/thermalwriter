@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Response;
@@ -9,6 +9,7 @@ use thermalwriter::dbus_types::DisplayProxy;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, SensorData};
+use thermalwriter::sensor::history::SensorHistory;
 
 use crate::error::AppError;
 
@@ -61,6 +62,10 @@ pub struct VariableDecl {
     pub default: String,
     pub help: String,
     pub value: String,
+    // Slider bounds for "number" vars; null for other types.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +127,9 @@ pub fn get_layout_vars(
                 .and_then(|m| m.get(name))
                 .cloned()
                 .unwrap_or_else(|| decl.default.clone()),
+            min: decl.min,
+            max: decl.max,
+            step: decl.step,
         })
         .collect::<Vec<_>>();
     vars.sort_by(|a, b| a.name.cmp(&b.name));
@@ -170,8 +178,21 @@ pub fn render_preview(
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
     if cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none() {
-        let renderer =
+        let mut renderer =
             SvgRenderer::new(&content, 480, 480).map_err(|e| AppError::Render(e.to_string()))?;
+        // Layouts that declare history metrics reference history arrays via
+        // graph(data=...); Tera errors on the undefined arg if they're absent.
+        // Seed synthetic history (same approach as the preview_layout example)
+        // so the live preview matches what the daemon renders instead of failing.
+        if !frontmatter.history_configs.is_empty() {
+            let mut history = SensorHistory::new();
+            for (metric, cfg) in &frontmatter.history_configs {
+                history.configure_metric(metric, cfg.duration);
+            }
+            let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
+            fill_synthetic_history(&mut history, &metrics, &mock_sensors());
+            renderer.set_history(Arc::new(Mutex::new(history)));
+        }
         cache.renderer = Some(renderer);
         cache.current_layout = Some(layout.clone());
     }
@@ -329,6 +350,21 @@ pub fn get_active_background(
     Ok(config.background.image)
 }
 
+/// Import raw image bytes (from a file the user picked in the GUI) into the
+/// backgrounds directory so it appears in the gallery. Validates the extension
+/// and that the bytes actually decode as an image, then writes atomically under
+/// a non-clobbering filename. Returns the stored filename so the caller can
+/// select it. The daemon resizes to 480×480 at SetBackground time, so the
+/// original resolution is preserved on disk.
+#[tauri::command]
+pub fn import_background(
+    filename: String,
+    data: Vec<u8>,
+    state: tauri::State<'_, RendererState>,
+) -> Result<String, AppError> {
+    import_background_impl(&state.background_dir, &filename, &data)
+}
+
 // ---- helpers ----
 
 fn list_layout_names(layout_dir: &Path) -> Vec<String> {
@@ -405,6 +441,71 @@ fn has_background_ext(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("png") | Some("jpg") | Some("jpeg")
     )
+}
+
+/// Max byte size accepted for an imported background. Matches the daemon's own
+/// 8 MB file-size pre-check in `render::background`.
+const MAX_IMPORT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Core of `import_background`, factored out so it can be unit-tested without a
+/// Tauri runtime/`State`.
+fn import_background_impl(bg_dir: &Path, filename: &str, data: &[u8]) -> Result<String, AppError> {
+    if data.len() > MAX_IMPORT_BYTES {
+        return Err(AppError::BackgroundIo(format!(
+            "image too large: {} bytes (max {MAX_IMPORT_BYTES})",
+            data.len()
+        )));
+    }
+
+    // Keep only the final path component — strips any directory the browser may
+    // have included and rejects names with no real filename (e.g. "..").
+    let base = Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AppError::InvalidBackground(filename.to_string()))?;
+    if !has_background_ext(Path::new(base)) {
+        return Err(AppError::InvalidBackground(format!(
+            "{base}: unsupported extension (use .png, .jpg, or .jpeg)"
+        )));
+    }
+
+    // Validate the bytes really are a decodable image. Reuses the daemon's
+    // decoder, which also enforces dimension/allocation limits — so we never
+    // write a corrupt or maliciously-oversized file into the gallery.
+    thermalwriter::render::background::decode_to_pixmap(data)
+        .map_err(|e| AppError::BackgroundIo(format!("{base}: not a valid image ({e})")))?;
+
+    std::fs::create_dir_all(bg_dir).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+
+    let stored = dedupe_background_name(bg_dir, base);
+    let dest = bg_dir.join(&stored);
+    // Atomic write: temp sibling (hidden, .tmp suffix so list_backgrounds skips
+    // it) then rename into place.
+    let tmp = bg_dir.join(format!(".{stored}.tmp"));
+    std::fs::write(&tmp, data).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+    std::fs::rename(&tmp, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        AppError::BackgroundIo(e.to_string())
+    })?;
+    Ok(stored)
+}
+
+/// Resolve a non-clobbering filename within `bg_dir`. If `name` is free it is
+/// returned as-is; otherwise a `-1`, `-2`, … suffix is appended to the stem.
+fn dedupe_background_name(bg_dir: &Path, name: &str) -> String {
+    if !bg_dir.join(name).exists() {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    for i in 1..10_000 {
+        let candidate = format!("{stem}-{i}.{ext}");
+        if !bg_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem}-import.{ext}")
 }
 
 /// Resolve a background filename relative to the background directory, rejecting
@@ -489,6 +590,21 @@ fn validate_vars(
                     "{name} must select a sensor"
                 )));
             }
+            "number" => {
+                let n = value
+                    .parse::<f64>()
+                    .map_err(|_| AppError::InvalidVariable(format!("{name} must be a number")))?;
+                if let Some(min) = decl.min
+                    && n < min
+                {
+                    return Err(AppError::InvalidVariable(format!("{name} must be ≥ {min}")));
+                }
+                if let Some(max) = decl.max
+                    && n > max
+                {
+                    return Err(AppError::InvalidVariable(format!("{name} must be ≤ {max}")));
+                }
+            }
             "color" | "text" | "sensor" => {}
             other => {
                 return Err(AppError::InvalidVariable(format!(
@@ -509,6 +625,30 @@ fn is_valid_color(value: &str) -> bool {
 
 fn contains_template_syntax(value: &str) -> bool {
     value.contains("{{") || value.contains("}}") || value.contains("{%") || value.contains("%}")
+}
+
+/// Pre-fill `history` with a deterministic sinusoidal wave per metric so the
+/// GUI live-preview can render history-graph layouts (e.g. neon-dash-v2) without
+/// a running daemon. Mirrors `examples/preview_layout.rs::fill_synthetic_history`.
+fn fill_synthetic_history(
+    history: &mut SensorHistory,
+    metrics: &[String],
+    sensor_data: &SensorData,
+) {
+    const SAMPLE_COUNT: usize = 60;
+    for metric in metrics {
+        let base: f64 = sensor_data
+            .get(metric)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50.0);
+        for i in 0..SAMPLE_COUNT {
+            let phase = (i as f64 / SAMPLE_COUNT as f64) * std::f64::consts::TAU;
+            let value = (base + base * 0.2 * phase.sin()).max(0.0);
+            let mut data = HashMap::new();
+            data.insert(metric.clone(), format!("{value:.1}"));
+            history.record(&data);
+        }
+    }
 }
 
 fn mock_sensors() -> SensorData {
@@ -634,6 +774,48 @@ mod tests {
         let rgb = vec![10, 20, 30, 40, 50, 60];
         let rgba = rgb_to_rgba(&rgb);
         assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    // A graph layout that references a history array, like neon-dash-v2. Tera
+    // errors on graph(data=undef) unless history is injected.
+    const HISTORY_SVG: &str = r##"{# history: cpu_temp=60s #}
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480">
+<rect width="480" height="480" fill="#101820"/>
+{{ graph(data=cpu_temp_history, x=16, y=100, w=448, h=88, style="area", fill="#53d8fb22", stroke="#53d8fb", stroke_width=1) }}
+</svg>
+"##;
+
+    #[test]
+    fn render_without_history_fails_for_graph_layout() {
+        // Regression guard documenting the pre-existing failure that history
+        // seeding fixes: a graph layout rendered with no history errors in Tera.
+        let mut renderer = SvgRenderer::new(HISTORY_SVG, 480, 480).unwrap();
+        assert!(
+            renderer.render(&mock_sensors()).is_err(),
+            "graph(data=undef) must error without seeded history"
+        );
+    }
+
+    #[test]
+    fn render_with_seeded_history_succeeds_for_graph_layout() {
+        let fm = LayoutFrontmatter::parse(HISTORY_SVG);
+        assert!(
+            !fm.history_configs.is_empty(),
+            "frontmatter declares history"
+        );
+        let mut history = SensorHistory::new();
+        for (metric, cfg) in &fm.history_configs {
+            history.configure_metric(metric, cfg.duration);
+        }
+        let metrics: Vec<String> = fm.history_configs.keys().cloned().collect();
+        fill_synthetic_history(&mut history, &metrics, &mock_sensors());
+
+        let mut renderer = SvgRenderer::new(HISTORY_SVG, 480, 480).unwrap();
+        renderer.set_history(Arc::new(Mutex::new(history)));
+        let frame = renderer
+            .render(&mock_sensors())
+            .expect("graph layout must render once history is seeded");
+        assert_eq!(frame.data.len(), 480 * 480 * 3);
     }
 
     #[test]
@@ -933,5 +1115,130 @@ mod tests {
         assert!(contains_template_syntax("hello {{ x }}"));
         assert!(contains_template_syntax("{% if x %}"));
         assert!(!contains_template_syntax("plain text"));
+    }
+
+    fn number_decl(min: Option<f64>, max: Option<f64>) -> HashMap<String, FrontmatterVar> {
+        HashMap::from([(
+            "panel_opacity".to_string(),
+            FrontmatterVar {
+                var_type: "number".to_string(),
+                default: "0.5".to_string(),
+                help: String::new(),
+                min,
+                max,
+                step: Some(0.05),
+            },
+        )])
+    }
+
+    #[test]
+    fn validate_vars_number_accepts_in_range() {
+        let decls = number_decl(Some(0.0), Some(1.0));
+        let vars = HashMap::from([("panel_opacity".to_string(), "0.7".to_string())]);
+        assert!(validate_vars(&decls, &vars).is_ok());
+    }
+
+    #[test]
+    fn validate_vars_number_rejects_out_of_range() {
+        let decls = number_decl(Some(0.0), Some(1.0));
+        let too_high = HashMap::from([("panel_opacity".to_string(), "1.5".to_string())]);
+        assert!(matches!(
+            validate_vars(&decls, &too_high).unwrap_err(),
+            AppError::InvalidVariable(_)
+        ));
+        let too_low = HashMap::from([("panel_opacity".to_string(), "-0.2".to_string())]);
+        assert!(matches!(
+            validate_vars(&decls, &too_low).unwrap_err(),
+            AppError::InvalidVariable(_)
+        ));
+    }
+
+    #[test]
+    fn validate_vars_number_rejects_non_numeric() {
+        let decls = number_decl(None, None);
+        let vars = HashMap::from([("panel_opacity".to_string(), "opaque".to_string())]);
+        assert!(matches!(
+            validate_vars(&decls, &vars).unwrap_err(),
+            AppError::InvalidVariable(_)
+        ));
+    }
+
+    // ---- background import ----
+
+    fn tiny_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([10, 20, 30]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn import_background_writes_decodable_png() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let stored = import_background_impl(&bg_dir, "my photo.png", &tiny_png(8, 8))
+            .expect("valid PNG must import");
+        assert_eq!(stored, "my photo.png");
+        assert!(bg_dir.join("my photo.png").exists());
+        // No stray temp file left behind.
+        assert!(!bg_dir.join(".my photo.png.tmp").exists());
+    }
+
+    #[test]
+    fn import_background_strips_directory_components() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let stored = import_background_impl(&bg_dir, "/etc/evil/../shot.png", &tiny_png(4, 4))
+            .expect("only the file name is used");
+        assert_eq!(stored, "shot.png");
+        assert!(bg_dir.join("shot.png").exists());
+    }
+
+    #[test]
+    fn import_background_dedupes_on_collision() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let png = tiny_png(4, 4);
+        let first = import_background_impl(&bg_dir, "bg.png", &png).unwrap();
+        let second = import_background_impl(&bg_dir, "bg.png", &png).unwrap();
+        assert_eq!(first, "bg.png");
+        assert_eq!(second, "bg-1.png");
+        assert!(bg_dir.join("bg.png").exists());
+        assert!(bg_dir.join("bg-1.png").exists());
+    }
+
+    #[test]
+    fn import_background_rejects_bad_extension() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let err = import_background_impl(&bg_dir, "notes.txt", &tiny_png(4, 4)).unwrap_err();
+        assert!(matches!(err, AppError::InvalidBackground(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn import_background_rejects_non_image_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let err = import_background_impl(&bg_dir, "fake.png", b"not really a png").unwrap_err();
+        assert!(matches!(err, AppError::BackgroundIo(_)), "got {err:?}");
+        // Nothing should have been written.
+        assert!(!bg_dir.join("fake.png").exists());
+    }
+
+    #[test]
+    fn import_background_rejects_oversized() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let big = vec![0u8; MAX_IMPORT_BYTES + 1];
+        let err = import_background_impl(&bg_dir, "huge.png", &big).unwrap_err();
+        assert!(matches!(err, AppError::BackgroundIo(_)), "got {err:?}");
     }
 }

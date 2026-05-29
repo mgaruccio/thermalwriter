@@ -8,9 +8,14 @@ pub struct HistoryConfig {
 
 #[derive(Debug, Clone)]
 pub struct VariableDecl {
-    pub var_type: String, // "color", "text", "sensor"
+    pub var_type: String, // "color", "text", "sensor", "number"
     pub default: String,
     pub help: String,
+    // Optional bounds for "number" vars, parsed from `number(min,max,step)`.
+    // None for all other types (and for `number` declared without bounds).
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
 }
 
 pub struct LayoutFrontmatter {
@@ -128,9 +133,10 @@ impl LayoutFrontmatter {
         //   name: type = "default" "help text"
         // Validation:
         //   - name: [a-z_][a-z0-9_]*
-        //   - type: "color" | "text" | "sensor"
+        //   - type: "color" | "text" | "sensor" | "number" | "number(min,max,step)"
         //   - color default: ^#[0-9a-fA-F]{6,8}$
         //   - text default: must not contain {{ }} {% %}
+        //   - number default: must parse as f64; optional (min,max,step) slider bounds
         for line in spec.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -154,33 +160,56 @@ impl LayoutFrontmatter {
         let rest = rest.trim();
 
         // Split name and type: `name: type`
-        let (name, var_type) = name_type.split_once(':')?;
+        let (name, var_type_raw) = name_type.split_once(':')?;
         let name = name.trim().to_string();
-        let var_type = var_type.trim().to_string();
+        let var_type_raw = var_type_raw.trim();
 
         // Validate name: [a-z_][a-z0-9_]*
         if !is_valid_var_name(&name) {
             return None;
         }
 
+        // Split off optional `(min,max,step)` bounds from the type token.
+        let (var_type, bounds) = match var_type_raw.split_once('(') {
+            Some((base, params)) => {
+                let inner = params.strip_suffix(')')?;
+                (base.trim().to_string(), Some(parse_bounds(inner)?))
+            }
+            None => (var_type_raw.to_string(), None),
+        };
+
         // Parse two quoted strings: "default" "help"
         let (default, help) = parse_two_quoted_strings(rest)?;
 
-        // Validate by type
-        match var_type.as_str() {
+        // Validate by type. Only "number" accepts bounds; bounds on any other
+        // type is a malformed declaration.
+        let (min, max, step) = match var_type.as_str() {
             "color" => {
-                if !is_valid_color(&default) {
+                if bounds.is_some() || !is_valid_color(&default) {
                     return None;
                 }
+                (None, None, None)
             }
             "text" => {
-                if contains_template_syntax(&default) {
+                if bounds.is_some() || contains_template_syntax(&default) {
                     return None;
                 }
+                (None, None, None)
             }
-            "sensor" => {}
+            "sensor" => {
+                if bounds.is_some() {
+                    return None;
+                }
+                (None, None, None)
+            }
+            "number" => {
+                if default.parse::<f64>().is_err() {
+                    return None;
+                }
+                bounds.unwrap_or((None, None, None))
+            }
             _ => return None,
-        }
+        };
 
         Some((
             name,
@@ -188,9 +217,30 @@ impl LayoutFrontmatter {
                 var_type,
                 default,
                 help,
+                min,
+                max,
+                step,
             },
         ))
     }
+}
+
+/// Parse the inner text of a `number(min,max,step)` bounds spec. Each field is
+/// optional (empty → None), but at most three comma-separated fields are allowed
+/// and every present field must parse as f64.
+fn parse_bounds(inner: &str) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    // Each present (non-empty) field must parse as f64; empty/absent → None.
+    let parse_at = |i: usize| -> Option<Option<f64>> {
+        match parts.get(i) {
+            None | Some(&"") => Some(None),
+            Some(p) => p.parse::<f64>().ok().map(Some),
+        }
+    };
+    Some((parse_at(0)?, parse_at(1)?, parse_at(2)?))
 }
 
 fn is_valid_var_name(name: &str) -> bool {

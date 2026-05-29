@@ -66,6 +66,44 @@ temp_sensor: sensor = "cpu_temp" "Temperature sensor to display"
 }
 
 #[test]
+fn parse_number_var_with_bounds() {
+    let svg = r#"{# vars:
+panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity"
+plain_num: number = "12" "Unbounded number"
+#}
+<svg viewBox="0 0 480 480">...</svg>"#;
+
+    let fm = LayoutFrontmatter::parse(svg);
+    let op = &fm.variables["panel_opacity"];
+    assert_eq!(op.var_type, "number");
+    assert_eq!(op.default, "0.5");
+    assert_eq!(op.min, Some(0.0));
+    assert_eq!(op.max, Some(1.0));
+    assert_eq!(op.step, Some(0.05));
+
+    let plain = &fm.variables["plain_num"];
+    assert_eq!(plain.var_type, "number");
+    assert_eq!(plain.min, None);
+    assert_eq!(plain.max, None);
+}
+
+#[test]
+fn parse_number_var_rejects_non_numeric_default_and_bad_bounds() {
+    let svg = r##"{# vars:
+not_a_number: number = "abc" "Bad default"
+bad_bounds: number(0,oops) = "0.5" "Bad bound"
+color_with_bounds: color(0,1) = "#ffffff" "Bounds not allowed on color"
+good: number(0,1) = "0.5" "Valid"
+#}
+<svg/>"##;
+    let fm = LayoutFrontmatter::parse(svg);
+    assert!(!fm.variables.contains_key("not_a_number"));
+    assert!(!fm.variables.contains_key("bad_bounds"));
+    assert!(!fm.variables.contains_key("color_with_bounds"));
+    assert!(fm.variables.contains_key("good"));
+}
+
+#[test]
 fn parse_vars_coexists_with_history() {
     let svg = r##"{# history: cpu_temp=60s, cpu_util=120s #}
 {# vars:

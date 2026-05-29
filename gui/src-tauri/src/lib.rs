@@ -54,6 +54,7 @@ pub fn run() {
             commands::set_background,
             commands::save_background,
             commands::get_active_background,
+            commands::import_background,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

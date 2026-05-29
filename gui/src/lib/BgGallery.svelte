@@ -6,9 +6,38 @@
     backgrounds: string[];
     selected: string | null;
     onselect: (name: string | null) => void;
+    onimported: (name: string) => void;
   };
 
-  let { backgrounds, selected, onselect }: Props = $props();
+  let { backgrounds, selected, onselect, onimported }: Props = $props();
+
+  let fileInput: HTMLInputElement | undefined = $state();
+  let importing = $state(false);
+  let importError = $state("");
+
+  async function onFilePicked(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    // Reset so picking the same file again re-fires the change event.
+    input.value = "";
+    if (!file) return;
+    importing = true;
+    importError = "";
+    try {
+      const buffer = await file.arrayBuffer();
+      // Vec<u8> on the Rust side; a plain number array round-trips reliably.
+      const data = Array.from(new Uint8Array(buffer));
+      const stored = await invoke<string>("import_background", {
+        filename: file.name,
+        data,
+      });
+      onimported(stored);
+    } catch (err) {
+      importError = String(err);
+    } finally {
+      importing = false;
+    }
+  }
 
   // Cache filename → object URL so we don't refetch on every selection change.
   // Object URLs need an explicit revoke when the component unmounts.
@@ -83,4 +112,29 @@
       <span class="bg-tile-label">{displayName(name)}</span>
     </button>
   {/each}
+
+  <button
+    type="button"
+    class="bg-tile import"
+    onclick={() => fileInput?.click()}
+    disabled={importing}
+    title="Import a PNG or JPEG"
+  >
+    <div class="bg-tile-thumb import">
+      <span>{importing ? "…" : "+"}</span>
+    </div>
+    <span class="bg-tile-label">{importing ? "Importing" : "Import"}</span>
+  </button>
+
+  <input
+    bind:this={fileInput}
+    type="file"
+    accept="image/png,image/jpeg"
+    style="display: none"
+    onchange={onFilePicked}
+  />
 </div>
+
+{#if importError}
+  <p class="bg-import-error">{importError}</p>
+{/if}

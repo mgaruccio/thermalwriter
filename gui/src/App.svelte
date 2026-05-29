@@ -11,10 +11,13 @@
 
   type VariableDecl = {
     name: string;
-    type: "color" | "text" | "sensor";
+    type: "color" | "text" | "sensor" | "number";
     default: string;
     help: string;
     value: string;
+    min: number | null;
+    max: number | null;
+    step: number | null;
   };
 
   type SensorDescriptor = {
@@ -121,6 +124,16 @@
 
   function setValue(name: string, value: string) {
     values = { ...values, [name]: value };
+  }
+
+  // Re-read the gallery after an import and select the freshly added file.
+  async function refreshBackgrounds(selectName?: string) {
+    try {
+      backgrounds = await invoke<string[]>("list_backgrounds");
+      if (selectName) selectedBackground = selectName;
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   function schedulePreview() {
@@ -295,16 +308,15 @@
             </div>
           {/if}
 
-          {#if backgrounds.length > 0}
-            <div class="section-label">
-              <span>Background</span>
-            </div>
-            <BgGallery
-              {backgrounds}
-              selected={selectedBackground}
-              onselect={(name) => { selectedBackground = name; }}
-            />
-          {/if}
+          <div class="section-label">
+            <span>Background</span>
+          </div>
+          <BgGallery
+            {backgrounds}
+            selected={selectedBackground}
+            onselect={(name) => { selectedBackground = name; }}
+            onimported={(name) => refreshBackgrounds(name)}
+          />
         {/if}
       </div>
     </section>
@@ -390,6 +402,28 @@
                       value={values[variable.name] ?? variable.default}
                       oninput={(event) => setValue(variable.name, event.currentTarget.value)}
                     />
+                  {:else if variable.type === "number"}
+                    <div class="number-control">
+                      {#if variable.min !== null && variable.max !== null}
+                        <input
+                          type="range"
+                          min={variable.min}
+                          max={variable.max}
+                          step={variable.step ?? "any"}
+                          value={values[variable.name] ?? variable.default}
+                          oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+                        />
+                      {/if}
+                      <input
+                        type="number"
+                        class="number-field"
+                        min={variable.min ?? undefined}
+                        max={variable.max ?? undefined}
+                        step={variable.step ?? "any"}
+                        value={values[variable.name] ?? variable.default}
+                        oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+                      />
+                    </div>
                   {:else if variable.type === "sensor"}
                     <select
                       value={values[variable.name] ?? variable.default}

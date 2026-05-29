@@ -823,6 +823,26 @@ select {
   color: var(--text-primary);
 }
 
+.bg-tile.import:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.bg-tile-thumb.import {
+  border: 1px dashed var(--line-strong);
+  background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
+  font-size: 26px;
+  color: var(--accent);
+}
+
+.bg-import-error {
+  margin: 8px 0 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--red);
+}
+
 /* ─────────────────────── Config pane / variables ─────────────────────── */
 
 .config-pane .panel-header {
@@ -890,6 +910,26 @@ select {
 .var-control .color-hex {
   flex: 1;
   font-family: var(--font-mono);
+}
+
+/* — Number / slider control — */
+.var-control .number-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.var-control .number-control input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.var-control .number-control .number-field {
+  flex: 0 0 88px;
+  font-family: var(--font-mono);
+  text-align: right;
 }
 
 /* — Apply button (primary action) — */
