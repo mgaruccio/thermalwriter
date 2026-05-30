@@ -246,8 +246,17 @@
         return;
       }
       await invoke<void>("apply_stream", { argv });
+      // Push the desired tick rate. The daemon auto-restores the prior rate on
+      // stop_stream, so we don't need to track or restore it here.
+      try {
+        await invoke<void>("set_tick_rate", { rate: fps });
+      } catch (rateErr) {
+        // Non-fatal: stream is running but may not be at the requested FPS.
+        // Surface as a warning rather than rolling back.
+        status = `Streaming ${preset.label} (FPS set failed: ${rateErr})`;
+      }
       streaming = true;
-      status = `Streaming ${preset.label} at ${fps} FPS`;
+      if (!status) status = `Streaming ${preset.label} at ${fps} FPS`;
       onDaemonStateChange?.();
       startPoll();
     } catch (e) {
