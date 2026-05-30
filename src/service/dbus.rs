@@ -40,6 +40,21 @@ pub enum ModeChange {
         /// the new XvfbSource is confirmed sent to the tick loop.
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
+    /// Switch to xvfb capture mode using a structured argv (no shell).
+    ///
+    /// Unlike `Xvfb` (which wraps the command in `sh -c`), this variant passes
+    /// `argv[0]` directly to `Command::new` with `argv[1..]` as arguments —
+    /// no shell word-splitting. Used by preset launches (conky, cava, btop)
+    /// where arguments may contain paths with spaces.
+    ///
+    /// `env_extra` is a list of `(key, value)` pairs injected into the child's
+    /// environment. The cava preset must set `SDL_VIDEODRIVER=x11` here.
+    XvfbArgv {
+        argv: Vec<String>,
+        env_extra: Vec<(String, String)>,
+        /// Confirmation channel: listener sends Ok once Xvfb + child are live.
+        ack: oneshot::Sender<anyhow::Result<()>>,
+    },
     /// Set or clear the global background image.
     Background {
         image: Option<tiny_skia::Pixmap>,
@@ -62,6 +77,11 @@ impl std::fmt::Debug for ModeChange {
             ModeChange::Xvfb { command, .. } => f
                 .debug_struct("ModeChange::Xvfb")
                 .field("command", command)
+                .finish_non_exhaustive(),
+            ModeChange::XvfbArgv { argv, env_extra, .. } => f
+                .debug_struct("ModeChange::XvfbArgv")
+                .field("argv", argv)
+                .field("env_extra_keys", &env_extra.iter().map(|(k, _)| k).collect::<Vec<_>>())
                 .finish_non_exhaustive(),
             ModeChange::Background { image, .. } => f
                 .debug_struct("ModeChange::Background")
@@ -95,6 +115,9 @@ pub struct ServiceState {
     pub mode_change_tx: tokio::sync::mpsc::Sender<ModeChange>,
     /// Directory containing background image files.
     pub background_dir: PathBuf,
+    /// Directory containing Xvfb wrapper configs (conky-480.conf, cava-480.conf).
+    /// Used by start_stream_preset to build absolute config paths for preset argv.
+    pub wrapper_dir: PathBuf,
     /// Currently active decoded background pixmap (premultiplied RGBA 480x480).
     pub current_background: Option<tiny_skia::Pixmap>,
     /// Serializes all writes to config.toml so concurrent D-Bus calls don't lose
@@ -480,6 +503,109 @@ impl DisplayInterface {
         }
 
         Ok(format!("Mode set to: {} ({})", mode, command))
+    }
+
+    /// Launch a named streaming preset (conky | cava | btop) via structured argv.
+    ///
+    /// Preset commands use `Command::new(argv[0]).args(...)` — no shell — so
+    /// arguments containing spaces (e.g. config paths) are not word-split.
+    /// The custom-command path (`set_mode("xvfb", ...)`) remains available for
+    /// arbitrary shell commands.
+    ///
+    /// Presets:
+    ///   - `conky`: `conky -c <wrapper_dir>/conky-480.conf`
+    ///   - `cava`:  `cava --config <wrapper_dir>/cava-480.conf` + `SDL_VIDEODRIVER=x11`
+    ///   - `btop`:  `btop`
+    ///
+    /// Returns the same `mode_change_lock`-serialized semantics as `set_mode`:
+    /// tick_rate is pushed on start, session-only (never persisted).
+    async fn start_stream_preset(&self, preset: String) -> zbus::fdo::Result<String> {
+        // Build argv + env_extra from the preset name, then route through the
+        // same mode_change_lock + ack path as set_mode to avoid code duplication.
+        let mode_lock = {
+            let state = self.state.lock().await;
+            state.mode_change_lock.clone()
+        };
+        let _mode_guard = mode_lock.lock().await;
+
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+
+        let (tx, wrapper_dir_snap, current_tick_rate, xvfb_tick_rate) = {
+            let state = self.state.lock().await;
+            (
+                state.mode_change_tx.clone(),
+                state.wrapper_dir.clone(),
+                state.tick_rate,
+                state.config.xvfb.tick_rate,
+            )
+        };
+
+        let (argv, env_extra): (Vec<String>, Vec<(String, String)>) = match preset.as_str() {
+            "conky" => {
+                let config_path = wrapper_dir_snap.join("conky-480.conf");
+                (
+                    vec![
+                        "conky".to_string(),
+                        "-c".to_string(),
+                        config_path.to_string_lossy().to_string(),
+                    ],
+                    vec![],
+                )
+            }
+            "cava" => {
+                let config_path = wrapper_dir_snap.join("cava-480.conf");
+                (
+                    vec![
+                        "cava".to_string(),
+                        "--config".to_string(),
+                        config_path.to_string_lossy().to_string(),
+                    ],
+                    // cava uses SDL; the daemon env carries WAYLAND_DISPLAY so
+                    // SDL auto-probes Wayland and crashes. Force x11 backend.
+                    vec![("SDL_VIDEODRIVER".to_string(), "x11".to_string())],
+                )
+            }
+            "btop" => (vec!["btop".to_string()], vec![]),
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "Unknown preset: {} (expected conky, cava, or btop)",
+                    preset
+                )));
+            }
+        };
+
+        tx.send(ModeChange::XvfbArgv {
+            argv: argv.clone(),
+            env_extra: env_extra.clone(),
+            ack: ack_tx,
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("mode_change channel closed: {}", e)))?;
+
+        let ack_result = ack_rx
+            .await
+            .map_err(|_| {
+                zbus::fdo::Error::Failed(
+                    "mode transition listener dropped ack channel without replying".to_string(),
+                )
+            })?
+            .map_err(|e| zbus::fdo::Error::Failed(format!("preset start failed: {}", e)))?;
+        let _ = ack_result;
+
+        // Commit state mirror — session-only, never persisted.
+        {
+            let mut state = self.state.lock().await;
+            state.mode = "xvfb".to_string();
+            state.pre_stream_tick_rate = Some(current_tick_rate);
+            state.tick_rate = xvfb_tick_rate;
+            let _ = state.tick_rate_tx.send(xvfb_tick_rate);
+            info!(
+                "Preset '{}' started: tick_rate {} → {} FPS",
+                preset, current_tick_rate, xvfb_tick_rate
+            );
+        }
+
+        Ok(format!("Preset '{}' started ({} FPS)", preset, xvfb_tick_rate))
     }
 
     /// Return a snapshot of service status as key→value pairs.

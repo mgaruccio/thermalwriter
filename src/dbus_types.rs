@@ -32,4 +32,8 @@ pub trait Display {
     async fn clear_background(&self) -> zbus::Result<()>;
     async fn list_backgrounds(&self) -> zbus::Result<Vec<String>>;
     async fn set_default_layout(&self, name: &str) -> zbus::Result<()>;
+    /// Launch a named streaming preset (conky | cava | btop) via structured argv.
+    /// The preset binary is launched without a shell — no word-splitting occurs
+    /// on config paths with spaces. The cava preset injects SDL_VIDEODRIVER=x11.
+    async fn start_stream_preset(&self, preset: &str) -> zbus::Result<String>;
 }

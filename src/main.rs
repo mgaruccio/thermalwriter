@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
         mode_change_tx: mode_tx,
         background_dir: background_dir.clone(),
+        wrapper_dir: wrapper_dir.clone(),
         current_background: initial_background.clone(),
         config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         bg_change_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -341,6 +342,45 @@ async fn main() -> Result<()> {
                         },
                         Err(e) => {
                             let msg = format!("Failed to start xvfb for command '{}': {}", command, e);
+                            log::warn!("{}", msg);
+                            let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                        }
+                    }
+                }
+                ModeChange::XvfbArgv { argv, env_extra, ack } => {
+                    // Argv-based preset launch (no shell). Mirror the Xvfb arm:
+                    // start FIRST, then drop old handle only after new source is live.
+                    let env_refs: Vec<(&str, &str)> = env_extra
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    match xvfb_manager::start_argv(&argv, &env_refs, 480, 480) {
+                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480) {
+                            Ok(source) => {
+                                if source_tx.send(Box::new(source)).await.is_err() {
+                                    let msg = "Failed to send argv xvfb frame source to tick loop — receiver dropped".to_string();
+                                    log::warn!("{}", msg);
+                                    let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                    continue;
+                                }
+                                if let Some(h) = xvfb_handle.take() {
+                                    drop(h);
+                                }
+                                xvfb_handle = Some(new_handle);
+                                info!(
+                                    "Switched to xvfb mode (argv): {:?} ({}fps)",
+                                    argv, xvfb_tick_rate_cfg
+                                );
+                                let _ = ack.send(Ok(()));
+                            }
+                            Err(e) => {
+                                let msg = format!("Failed to create XvfbSource for argv {:?}: {}", argv, e);
+                                log::warn!("{}", msg);
+                                let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                            }
+                        },
+                        Err(e) => {
+                            let msg = format!("Failed to start xvfb for argv {:?}: {}", argv, e);
                             log::warn!("{}", msg);
                             let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                         }

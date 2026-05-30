@@ -61,6 +61,12 @@ pub enum CtlCommand {
         /// Shell command to run inside the virtual display.
         command: String,
     },
+    /// Launch a named streaming preset via structured argv (no shell).
+    /// preset: conky | cava | btop
+    Stream {
+        /// Preset name (conky, cava, or btop).
+        preset: String,
+    },
 }
 
 /// Execute a `ctl` subcommand against the running daemon over D-Bus.
@@ -128,6 +134,13 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
                 .set_mode("xvfb", &command)
                 .await
                 .context("Failed to set mirror mode")?;
+            println!("{}", result);
+        }
+        CtlCommand::Stream { preset } => {
+            let result = proxy
+                .start_stream_preset(&preset)
+                .await
+                .context("Failed to start streaming preset")?;
             println!("{}", result);
         }
     }

@@ -322,6 +322,164 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     Ok(handle)
 }
 
+/// Start Xvfb and a child application specified as a structured argv (no shell).
+///
+/// Unlike [`start`] (which wraps the command in `sh -c`), this function passes
+/// `argv[0]` directly to `Command::new` and `argv[1..]` as arguments. This
+/// prevents shell word-splitting on arguments that contain spaces (e.g.
+/// `-c /path with space/conky.conf`).
+///
+/// `env_extra` is a list of `(key, value)` pairs injected into the child's
+/// environment in addition to the inherited daemon environment. The cava preset
+/// must pass `SDL_VIDEODRIVER=x11` here to prevent SDL from auto-probing
+/// Wayland (the daemon environment carries `WAYLAND_DISPLAY`).
+///
+/// All invariants from [`start`] are preserved:
+/// - Display allocation starts at `DISPLAY_BASE` (`:100`) to avoid collisions
+///   with the live desktop X server.
+/// - `DISPLAY` is set in the child's environment.
+/// - `.process_group(0)` is set on the child so `Drop` can kill the entire
+///   process group (including grandchildren).
+/// - The child-liveness check (150 ms grace + `try_wait`) is applied — an
+///   immediately-dying child returns `Err` so the D-Bus caller sees failure and
+///   daemon state is left unchanged.
+pub fn start_argv(
+    argv: &[String],
+    env_extra: &[(&str, &str)],
+    width: u32,
+    height: u32,
+) -> Result<XvfbHandle> {
+    if argv.is_empty() {
+        bail!("start_argv: argv must not be empty");
+    }
+
+    let screen_spec = format!("{}x{}x24", width, height);
+
+    // Scan for a free display starting from DISPLAY_BASE. Mirrors start().
+    let mut xvfb_process: Option<Child> = None;
+    let mut display_num = 0u32;
+
+    for candidate in DISPLAY_BASE..(DISPLAY_BASE + DISPLAY_MAX_TRIES) {
+        let tmp_fbdir = std::env::temp_dir().join(format!(
+            "thermalwriter-xvfb-tmp-{}-{}",
+            std::process::id(),
+            candidate
+        ));
+        std::fs::create_dir_all(&tmp_fbdir)
+            .with_context(|| format!("Failed to create tmp fbdir: {}", tmp_fbdir.display()))?;
+
+        match try_start_xvfb_on(candidate, &tmp_fbdir, &screen_spec)? {
+            None => {
+                let _ = std::fs::remove_dir_all(&tmp_fbdir);
+                info!("Display :{} taken, trying :{}", candidate, candidate + 1);
+                continue;
+            }
+            Some((proc, reported)) => {
+                let fbdir =
+                    std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
+                let _ = std::fs::remove_dir_all(&fbdir);
+                std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
+                    format!(
+                        "Failed to rename fbdir {} → {}",
+                        tmp_fbdir.display(),
+                        fbdir.display()
+                    )
+                })?;
+                xvfb_process = Some(proc);
+                display_num = reported;
+                break;
+            }
+        }
+    }
+
+    let xvfb_process = xvfb_process.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No free X display found in range :{}–:{} (tried {} candidates)",
+            DISPLAY_BASE,
+            DISPLAY_BASE + DISPLAY_MAX_TRIES - 1,
+            DISPLAY_MAX_TRIES
+        )
+    })?;
+
+    let display = format!(":{}", display_num);
+    let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", display_num));
+    let screen_file = fbdir.join("Xvfb_screen0");
+
+    info!(
+        "Spawned Xvfb on display {} (pid {})",
+        display,
+        xvfb_process.id()
+    );
+
+    let mut handle = XvfbHandle {
+        xvfb_process,
+        child_process: None,
+        display_num,
+        fbdir: fbdir.clone(),
+        screen_file: screen_file.clone(),
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !screen_file.exists() {
+        if Instant::now() > deadline {
+            bail!(
+                "Xvfb screen file did not appear within 5 seconds: {}",
+                screen_file.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    info!("Xvfb screen file ready: {}", screen_file.display());
+
+    // Spawn the child using a structured argv (no shell).
+    // argv[0] is the binary; argv[1..] are its arguments, passed verbatim —
+    // no shell word-splitting occurs on spaces within any element.
+    let mut cmd = Command::new(&argv[0]);
+    if argv.len() > 1 {
+        cmd.args(&argv[1..]);
+    }
+    cmd.env("DISPLAY", &display);
+    // Inject extra env vars (e.g. SDL_VIDEODRIVER=x11 for cava).
+    for (key, val) in env_extra {
+        cmd.env(key, val);
+    }
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+
+    let child_process = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn child argv: {:?}", argv))?;
+
+    let child_pid = child_process.id();
+    info!(
+        "Spawned child application (argv): {:?} (pid {})",
+        argv,
+        child_pid
+    );
+    handle.child_process = Some(child_process);
+
+    // Child-liveness check — same 150 ms grace as start(). Preserves the
+    // Phase 1 contract: an immediately-dying child returns Err so the D-Bus
+    // caller sees failure and daemon state is left unchanged.
+    std::thread::sleep(Duration::from_millis(150));
+
+    if let Some(child_ref) = handle.child_process.as_mut() {
+        if let Ok(Some(status)) = child_ref.try_wait() {
+            drop(handle);
+            bail!(
+                "Streamed child (argv) exited immediately (argv: {:?}, status: {}); \
+                 refusing to report mode=xvfb with a dead stream",
+                argv,
+                status
+            );
+        }
+    }
+
+    Ok(handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +489,135 @@ mod tests {
     fn pid_alive(pid: u32) -> bool {
         let rc = unsafe { libc::kill(pid as i32, 0) };
         rc == 0
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 7 tests: start_argv — no shell, no word-splitting, env injection
+    // ---------------------------------------------------------------------------
+
+    /// [DO-CONFIRM checklist item 1]:
+    ///
+    /// A preset argv element containing a space must reach the child process as
+    /// a single argument — no shell word-splitting. We invoke
+    /// `start_argv(["sleep", "5"], [], ...)` and also a path-with-space variant
+    /// by spawning a sentinel that reads its own argv[1] and writes it to a
+    /// temp file, then asserting the full string arrived intact.
+    ///
+    /// This test FAILS TO COMPILE until `start_argv` is defined.
+    #[test]
+    #[serial]
+    fn argv_arg_with_space_not_word_split() {
+        // Build a one-shot script: write argv[1] to a temp file, then exit.
+        // We use `sh -c` for the *script body* (it's our controlled payload),
+        // but the *outer launch* is via start_argv with a structured argv so
+        // the argument with a space is passed verbatim to sh -c as a single $1.
+        //
+        // argv: ["sh", "-c", "printf '%s' \"$1\" > $2; exit 0", "--", "arg with space", "<file>"]
+        // If start_argv word-splits, sh receives "arg", "with", "space" as $1/$2/$3;
+        // if it doesn't, sh receives "arg with space" as $1.
+        let out_file = tempfile::NamedTempFile::new().expect("tempfile");
+        let out_path = out_file.path().to_string_lossy().to_string();
+        let argv: Vec<String> = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s' \"$1\" > {}; exec sleep 5", out_path),
+            "--".to_string(),
+            "arg with space".to_string(),
+        ];
+
+        let handle = start_argv(&argv, &[], 480, 480)
+            .expect("start_argv must succeed for sh with a space-containing arg");
+
+        // Give the child a moment to write the file.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let written = std::fs::read_to_string(&out_path).unwrap_or_default();
+        drop(handle);
+
+        assert_eq!(
+            written.trim(),
+            "arg with space",
+            "arg-with-space must arrive as a single arg (no word-splitting): got {:?}",
+            written
+        );
+    }
+
+    /// [DO-CONFIRM checklist item 4 + 5]:
+    ///
+    /// start_argv must set .process_group(0) on the child and pass the
+    /// liveness check (child survives 150 ms grace period).
+    /// Also verifies that display_num >= DISPLAY_BASE (no regression).
+    #[test]
+    #[serial]
+    fn start_argv_liveness_check_and_display_base() {
+        let argv: Vec<String> = vec!["sleep".to_string(), "10".to_string()];
+        let handle = start_argv(&argv, &[], 480, 480)
+            .expect("start_argv(sleep 10) must succeed");
+
+        assert!(
+            handle.display_num() >= DISPLAY_BASE,
+            "display_num {} below DISPLAY_BASE {} — regression in display allocation",
+            handle.display_num(),
+            DISPLAY_BASE
+        );
+        assert!(
+            handle.screen_file().exists(),
+            "screen file must exist for a live start_argv handle"
+        );
+        drop(handle);
+    }
+
+    /// [DO-CONFIRM checklist item 1 variant]:
+    ///
+    /// A child that dies immediately in start_argv must return Err, same as
+    /// the existing sh -c liveness check (Phase 1 contract preserved in argv path).
+    #[test]
+    #[serial]
+    fn start_argv_dying_child_returns_err() {
+        let argv: Vec<String> = vec!["false".to_string()];
+        let result = start_argv(&argv, &[], 480, 480);
+        assert!(
+            result.is_err(),
+            "start_argv(false) must return Err when child dies immediately — \
+             liveness check must be preserved in argv path"
+        );
+    }
+
+    /// [DO-CONFIRM: env injection]:
+    ///
+    /// Extra env vars passed to start_argv must be visible to the child.
+    /// We write the env var value to a temp file via sh, then assert it arrived.
+    #[test]
+    #[serial]
+    fn start_argv_env_extra_is_injected() {
+        let out_file = tempfile::NamedTempFile::new().expect("tempfile");
+        let out_path = out_file.path().to_string_lossy().to_string();
+        let sentinel = "THERMALWRITER_TEST_SENTINEL_XYZ";
+        let sentinel_val = "injected_ok";
+
+        // sh reads the env var and writes it to the output file, then stays alive.
+        let argv: Vec<String> = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' \"${}\" > {}; exec sleep 5",
+                sentinel, out_path
+            ),
+        ];
+
+        let handle = start_argv(&argv, &[(sentinel, sentinel_val)], 480, 480)
+            .expect("start_argv with env_extra must succeed");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let written = std::fs::read_to_string(&out_path).unwrap_or_default();
+        drop(handle);
+
+        assert_eq!(
+            written.trim(),
+            sentinel_val,
+            "env_extra var must be visible in child: got {:?}",
+            written
+        );
     }
 
     /// `-displayfd` with high-base retry must allocate a display in the
