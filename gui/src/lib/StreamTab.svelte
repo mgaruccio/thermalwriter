@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { configDir } from "@tauri-apps/api/path";
+  import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
   import {
     STREAM_PRESETS,
     TERMINAL_BINARIES,
@@ -33,10 +34,11 @@
   let status = $state("");
   let error = $state("");
 
-  // Live preview canvas
-  let previewCanvas = $state<HTMLCanvasElement | undefined>();
+  // Live preview: current Blob URL for the <img> element.
+  // Revoked before each new frame and in onDestroy to avoid memory leaks.
+  let frameBlobUrl = $state<string | null>(null);
   let pollInterval: ReturnType<typeof setInterval> | undefined;
-  // Track whether a poll tick is already in flight to avoid queuing.
+  // Guard: prevents stacking invoke calls when a tick takes > 333ms.
   let pollInFlight = false;
 
   // Resolved binary paths — subset of allBinariesToResolve() keys that are present.
@@ -46,11 +48,8 @@
 
   // Per-preset field values keyed by field.kind.
   let fieldValues = $state<Record<string, string>>({});
-  // Resolved config dir base path for wrapper defaults (set once in onMount).
+  // Wrapper config dir base path for defaults (set once in onMount).
   let wrapperDir = $state("~/.config/thermalwriter/wrappers");
-
-  // Hidden file input for custom-path presets
-  let fileInput: HTMLInputElement | undefined = $state();
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -114,21 +113,18 @@
       custom_path: "",
     };
 
-    // Probe for an already-running stream (started before this GUI opened).
-    // read_frame succeeds iff the daemon is actively writing xvfb frames.
+    // Probe the daemon for its current mode. If mode === "xvfb", a stream was
+    // started before this GUI opened — auto-attach to it.
     try {
-      const bytes = await invoke<ArrayBuffer>("read_frame");
-      streaming = true;
-      status = "Stream already running — attached to live feed.";
-      await paintFrame(bytes);
-      startPoll();
-    } catch (e) {
-      const msg = String(e);
-      if (!msg.includes(NO_FRAME_PREFIX)) {
-        // Unexpected error (not "no frame yet") — surface it but don't block.
-        error = `Frame probe: ${msg}`;
+      const s = await invoke<{ mode: string; tick_rate: number }>("get_status");
+      if (s.mode === "xvfb") {
+        streaming = true;
+        fps = s.tick_rate || fps;
+        status = "Stream already running — attached to live feed.";
+        startPoll();
       }
-      // NO_FRAME_PREFIX means daemon is running but no xvfb stream active — normal.
+    } catch {
+      // Daemon offline or get_status unavailable — not streaming.
     }
 
     await doResolve();
@@ -136,6 +132,7 @@
 
   onDestroy(() => {
     stopPoll();
+    revokeBlobUrl();
   });
 
   // When the preset changes, update fps default and reset config_path hint.
@@ -174,7 +171,7 @@
     pollInFlight = true;
     try {
       const bytes = await invoke<ArrayBuffer>("read_frame");
-      await paintFrame(bytes);
+      paintFrame(bytes);
     } catch (e) {
       const msg = String(e);
       if (msg.includes(NO_FRAME_PREFIX)) {
@@ -182,8 +179,9 @@
         streaming = false;
         status = "Stream ended externally.";
         stopPoll();
+        revokeBlobUrl();
       }
-      // Other errors (e.g. transient IPC) — silently skip this tick.
+      // Other errors (transient IPC) — silently skip this tick.
     } finally {
       pollInFlight = false;
     }
@@ -192,30 +190,23 @@
   // ── Rendering ─────────────────────────────────────────────────────────────
 
   /**
-   * Paint a JPEG ArrayBuffer onto the preview canvas, rotated 180°.
+   * Update the live preview img with fresh JPEG bytes.
    *
-   * The daemon writes frames post-rotation (already rotated for the physical
-   * LCD which is mounted 180° inverted). The GUI must un-rotate 180° so the
-   * preview shows the image right-side-up.
+   * The daemon writes frames post-rotation (180° for the physical LCD mount).
+   * The <img> carries CSS `transform: rotate(180deg)` to display right-side-up.
+   * The previous Blob URL is revoked before creating a new one to prevent leaks.
    */
-  async function paintFrame(bytes: ArrayBuffer) {
-    if (!previewCanvas) return;
-    const ctx = previewCanvas.getContext("2d");
-    if (!ctx) return;
-
+  function paintFrame(bytes: ArrayBuffer) {
+    revokeBlobUrl();
     const blob = new Blob([bytes], { type: "image/jpeg" });
-    const bitmap = await createImageBitmap(blob);
+    frameBlobUrl = URL.createObjectURL(blob);
+  }
 
-    const w = previewCanvas.width;
-    const h = previewCanvas.height;
-
-    // Rotate 180°: translate to centre, rotate π, translate back.
-    ctx.save();
-    ctx.translate(w / 2, h / 2);
-    ctx.rotate(Math.PI);
-    ctx.drawImage(bitmap, -w / 2, -h / 2, w, h);
-    ctx.restore();
-    bitmap.close();
+  function revokeBlobUrl() {
+    if (frameBlobUrl) {
+      URL.revokeObjectURL(frameBlobUrl);
+      frameBlobUrl = null;
+    }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -275,6 +266,7 @@
       status = `Stopped. Returned to ${selectedLayout}.`;
       onDaemonStateChange?.();
       stopPoll();
+      revokeBlobUrl();
     } catch (e) {
       error = `Stop failed: ${e}`;
     } finally {
@@ -282,15 +274,20 @@
     }
   }
 
-  function onFilePicked(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
-    // `file.name` is the basename; the user can edit the full path in the text
-    // field.  A native file dialog (tauri-plugin-dialog) would give the full
-    // path — wire that up when the plugin dep is available in package.json.
-    fieldValues = { ...fieldValues, custom_path: file.name };
+  async function browseForCustomPath() {
+    try {
+      const selected = await dialogOpen({
+        title: "Select executable",
+        multiple: false,
+        directory: false,
+      });
+      // dialogOpen returns string | string[] | null
+      if (typeof selected === "string" && selected) {
+        fieldValues = { ...fieldValues, custom_path: selected };
+      }
+    } catch {
+      // User cancelled or dialog unavailable — leave field unchanged.
+    }
   }
 
   function resolvedClass(binary: string): string {
@@ -300,15 +297,26 @@
 </script>
 
 <div class="stream-tab">
-  <!-- ── Live preview canvas (only while streaming) ── -->
+  <!-- ── Live preview (only while streaming) ── -->
   {#if streaming}
     <div class="preview-wrap">
-      <canvas
-        bind:this={previewCanvas}
-        width="480"
-        height="480"
-        class="stream-canvas"
-      ></canvas>
+      {#if frameBlobUrl}
+        <!--
+          The daemon writes frames post-rotation (180° for the physical LCD mount).
+          CSS transform: rotate(180deg) un-rotates for right-side-up display here.
+          Blob URL is revoked on each new frame and in onDestroy (no leaks).
+        -->
+        <img
+          src={frameBlobUrl}
+          alt="Live stream preview"
+          class="stream-preview"
+          style="transform: rotate(180deg)"
+        />
+      {:else}
+        <div class="preview-placeholder">
+          <span class="preview-wait">Waiting for first frame…</span>
+        </div>
+      {/if}
       <div class="preview-badge">LIVE</div>
     </div>
   {/if}
@@ -379,16 +387,10 @@
                 type="button"
                 class="btn-browse"
                 disabled={streaming}
-                onclick={() => fileInput?.click()}
+                onclick={browseForCustomPath}
                 title="Browse for executable"
               >Browse</button>
             </div>
-            <input
-              bind:this={fileInput}
-              type="file"
-              style="display: none"
-              onchange={onFilePicked}
-            />
           </div>
         {/if}
       {/each}
@@ -523,11 +525,10 @@
     position: relative;
     display: flex;
     justify-content: center;
-    align-items: center;
   }
 
-  .stream-canvas {
-    /* Scale down from 480px source to fit the 320px-wide config pane. */
+  /* Scale down from 480px source to fit the ~320px-wide config pane. */
+  .stream-preview {
     width: 100%;
     max-width: 280px;
     height: auto;
@@ -538,8 +539,33 @@
     box-shadow:
       inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent),
       0 0 24px -8px color-mix(in srgb, var(--amber) 45%, transparent);
-    image-rendering: auto;
     display: block;
+    object-fit: cover;
+  }
+
+  .preview-placeholder {
+    width: 100%;
+    max-width: 280px;
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg-deep) 60%, transparent);
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-md);
+  }
+
+  .preview-wait {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    animation: pulse-text 1.6s ease-in-out infinite;
+  }
+
+  @keyframes pulse-text {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 
   .preview-badge {

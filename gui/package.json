@@ -12,7 +12,8 @@
     "tauri:dev": "tauri dev --features devtools"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0"
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
