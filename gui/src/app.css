@@ -849,6 +849,49 @@ select {
   flex-wrap: wrap;
 }
 
+/* — Tab navigation (Variables | Stream) — */
+
+.tab-nav {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.tab-btn {
+  padding: 0.28rem 0.7rem;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.tab-btn:hover:not(:disabled) {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-hover) 60%, transparent);
+  border-color: var(--line-soft);
+  box-shadow: none;
+  transform: none;
+}
+
+.tab-btn.active {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--bg-elev));
+  border-color: var(--accent);
+}
+
+/* Stream tab button uses the xvfb amber accent when active */
+.tab-btn.kind-xvfb.active {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, var(--bg-elev));
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+}
+
 .var-list {
   display: flex;
   flex-direction: column;

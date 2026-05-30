@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import BgGallery from "./lib/BgGallery.svelte";
+  import StreamTab from "./lib/StreamTab.svelte";
 
   type LayoutSummary = {
     name: string;
@@ -56,6 +57,7 @@
   let canvas = $state<HTMLCanvasElement | undefined>();
   let previewTimer: number | undefined;
   let daemonState = $state<"unknown" | "ok" | "down">("unknown");
+  let activeTab = $state<"variables" | "stream">("variables");
   let theme = $state<ThemeId>(
     (localStorage.getItem("tw-theme") as ThemeId) || "tokyo-night-storm",
   );
@@ -354,103 +356,126 @@
       </div>
     </section>
 
-    <!-- ───────── Config ───────── -->
+    <!-- ───────── Config / Stream ───────── -->
     <section class="panel config-pane">
       <div class="panel-header">
         <div class="panel-title">
           <span class="marker">&#x2699;</span>
-          <span>Variables</span>
+          <nav class="tab-nav">
+            <button
+              type="button"
+              class="tab-btn"
+              class:active={activeTab === "variables"}
+              onclick={() => { activeTab = "variables"; }}
+            >Variables</button>
+            <button
+              type="button"
+              class="tab-btn kind-xvfb"
+              class:active={activeTab === "stream"}
+              onclick={() => { activeTab = "stream"; }}
+            >Stream</button>
+          </nav>
         </div>
-        <button
-          type="button"
-          class="btn-apply"
-          onclick={apply}
-          disabled={applying || !selectedLayout}
-        >
-          {applying ? "Applying…" : "Apply ↳"}
-        </button>
+        {#if activeTab === "variables"}
+          <button
+            type="button"
+            class="btn-apply"
+            onclick={apply}
+            disabled={applying || !selectedLayout}
+          >
+            {applying ? "Applying…" : "Apply ↳"}
+          </button>
+        {/if}
       </div>
       <div class="panel-body">
-        {#if !selectedLayout}
-          <div class="empty">Select a layout to edit its variables.</div>
-        {:else if variables.length === 0}
-          <div class="empty">
-            <strong>{selectedLayout}</strong> declares no editable variables. The layout
-            renders as-authored; only the background can be changed.
-          </div>
-        {:else}
-          <form class="var-list" onsubmit={(event) => event.preventDefault()}>
-            {#each variables as variable}
-              <div class="var-row">
-                <div class="var-row-head">
-                  <span class="var-name">{variable.name}</span>
-                  <span class="var-type">{variable.type}</span>
-                </div>
-                {#if variable.help}
-                  <span class="var-help">{variable.help}</span>
-                {/if}
-                <div class="var-control">
-                  {#if variable.type === "color"}
-                    <input
-                      type="color"
-                      value={values[variable.name] ?? variable.default}
-                      oninput={(event) => setValue(variable.name, event.currentTarget.value)}
-                    />
-                    <input
-                      type="text"
-                      class="color-hex"
-                      value={values[variable.name] ?? variable.default}
-                      oninput={(event) => setValue(variable.name, event.currentTarget.value)}
-                    />
-                  {:else if variable.type === "number"}
-                    <div class="number-control">
-                      {#if variable.min !== null && variable.max !== null}
+        {#if activeTab === "variables"}
+          {#if !selectedLayout}
+            <div class="empty">Select a layout to edit its variables.</div>
+          {:else if variables.length === 0}
+            <div class="empty">
+              <strong>{selectedLayout}</strong> declares no editable variables. The layout
+              renders as-authored; only the background can be changed.
+            </div>
+          {:else}
+            <form class="var-list" onsubmit={(event) => event.preventDefault()}>
+              {#each variables as variable}
+                <div class="var-row">
+                  <div class="var-row-head">
+                    <span class="var-name">{variable.name}</span>
+                    <span class="var-type">{variable.type}</span>
+                  </div>
+                  {#if variable.help}
+                    <span class="var-help">{variable.help}</span>
+                  {/if}
+                  <div class="var-control">
+                    {#if variable.type === "color"}
+                      <input
+                        type="color"
+                        value={values[variable.name] ?? variable.default}
+                        oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+                      />
+                      <input
+                        type="text"
+                        class="color-hex"
+                        value={values[variable.name] ?? variable.default}
+                        oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+                      />
+                    {:else if variable.type === "number"}
+                      <div class="number-control">
+                        {#if variable.min !== null && variable.max !== null}
+                          <input
+                            type="range"
+                            min={variable.min}
+                            max={variable.max}
+                            step={variable.step ?? "any"}
+                            value={values[variable.name] ?? variable.default}
+                            oninput={(event) => setValue(variable.name, event.currentTarget.value)}
+                          />
+                        {/if}
                         <input
-                          type="range"
-                          min={variable.min}
-                          max={variable.max}
+                          type="number"
+                          class="number-field"
+                          min={variable.min ?? undefined}
+                          max={variable.max ?? undefined}
                           step={variable.step ?? "any"}
                           value={values[variable.name] ?? variable.default}
                           oninput={(event) => setValue(variable.name, event.currentTarget.value)}
                         />
-                      {/if}
+                      </div>
+                    {:else if variable.type === "sensor"}
+                      <select
+                        value={values[variable.name] ?? variable.default}
+                        onchange={(event) => setValue(variable.name, event.currentTarget.value)}
+                      >
+                        {#each sensors as sensor}
+                          <option value={sensor.key}>{sensor.name} ({sensor.unit})</option>
+                        {/each}
+                      </select>
+                    {:else}
                       <input
-                        type="number"
-                        class="number-field"
-                        min={variable.min ?? undefined}
-                        max={variable.max ?? undefined}
-                        step={variable.step ?? "any"}
+                        type="text"
                         value={values[variable.name] ?? variable.default}
                         oninput={(event) => setValue(variable.name, event.currentTarget.value)}
                       />
-                    </div>
-                  {:else if variable.type === "sensor"}
-                    <select
-                      value={values[variable.name] ?? variable.default}
-                      onchange={(event) => setValue(variable.name, event.currentTarget.value)}
-                    >
-                      {#each sensors as sensor}
-                        <option value={sensor.key}>{sensor.name} ({sensor.unit})</option>
-                      {/each}
-                    </select>
-                  {:else}
-                    <input
-                      type="text"
-                      value={values[variable.name] ?? variable.default}
-                      oninput={(event) => setValue(variable.name, event.currentTarget.value)}
-                    />
-                  {/if}
+                    {/if}
+                  </div>
                 </div>
-              </div>
-            {/each}
-          </form>
-        {/if}
+              {/each}
+            </form>
+          {/if}
 
-        {#if status}
-          <p class="status">{status}</p>
-        {/if}
-        {#if error}
-          <p class="error">{error}</p>
+          {#if status}
+            <p class="status">{status}</p>
+          {/if}
+          {#if error}
+            <p class="error">{error}</p>
+          {/if}
+        {:else}
+          <!-- Stream tab -->
+          <StreamTab
+            {selectedLayout}
+            onDaemonStateChange={probeDaemon}
+          />
         {/if}
       </div>
     </section>
