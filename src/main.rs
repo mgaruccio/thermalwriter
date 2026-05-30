@@ -347,14 +347,12 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                ModeChange::XvfbArgv { argv, env_extra, ack } => {
-                    // Argv-based preset launch (no shell). Mirror the Xvfb arm:
-                    // start FIRST, then drop old handle only after new source is live.
-                    let env_refs: Vec<(&str, &str)> = env_extra
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                        .collect();
-                    match xvfb_manager::start_argv(&argv, &env_refs, 480, 480) {
+                ModeChange::XvfbArgv { argv, ack } => {
+                    // Argv-based launch (no shell). SDL_VIDEODRIVER=x11 is injected
+                    // unconditionally by start_argv — no per-variant env_extra needed.
+                    // Mirror the Xvfb arm: start FIRST, drop old handle only after
+                    // new source is confirmed sent to the tick loop.
+                    match xvfb_manager::start_argv(&argv, 480, 480) {
                         Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480) {
                             Ok(source) => {
                                 if source_tx.send(Box::new(source)).await.is_err() {

@@ -32,9 +32,14 @@ pub trait Display {
     async fn clear_background(&self) -> zbus::Result<()>;
     async fn list_backgrounds(&self) -> zbus::Result<Vec<String>>;
     async fn set_default_layout(&self, name: &str) -> zbus::Result<()>;
+    /// Launch a streaming session with a fully-specified argv (no shell).
+    /// The GUI uses this to pass custom preset configs, terminal wrappers, etc.
+    /// SDL_VIDEODRIVER=x11 is injected unconditionally by the daemon.
+    /// Session-only: never persisted.
+    async fn set_mode_argv(&self, argv: Vec<String>) -> zbus::Result<String>;
     /// Launch a named streaming preset (conky | cava | btop) via structured argv.
     /// The preset binary is launched without a shell — no word-splitting occurs
-    /// on config paths with spaces. The cava preset injects SDL_VIDEODRIVER=x11.
+    /// on config paths with spaces. SDL_VIDEODRIVER=x11 is set unconditionally.
     async fn start_stream_preset(&self, preset: &str) -> zbus::Result<String>;
     /// Resolve binary names to absolute paths using the daemon's PATH.
     /// Missing binaries map to an empty string. Returns absolute paths so

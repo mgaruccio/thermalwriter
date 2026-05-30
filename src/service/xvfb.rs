@@ -274,9 +274,15 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     // Spawn the child application in its own process group with DISPLAY set.
     // process_group(0) makes child.id() == child's pgid, so killpg(child.id())
     // kills the entire subtree (sh + any grandchildren it spawns).
+    //
+    // SDL_VIDEODRIVER=x11 is set unconditionally: the daemon environment carries
+    // WAYLAND_DISPLAY, which causes SDL to auto-probe Wayland and crash for any
+    // SDL-based child (e.g. cava). Every streamed child runs inside a Xvfb X11
+    // virtual display, so forcing x11 is always correct and harmless for non-SDL apps.
     let child_process = Command::new("sh")
         .args(["-c", command])
         .env("DISPLAY", &display)
+        .env("SDL_VIDEODRIVER", "x11")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
@@ -329,10 +335,10 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 /// prevents shell word-splitting on arguments that contain spaces (e.g.
 /// `-c /path with space/conky.conf`).
 ///
-/// `env_extra` is a list of `(key, value)` pairs injected into the child's
-/// environment in addition to the inherited daemon environment. The cava preset
-/// must pass `SDL_VIDEODRIVER=x11` here to prevent SDL from auto-probing
-/// Wayland (the daemon environment carries `WAYLAND_DISPLAY`).
+/// `SDL_VIDEODRIVER=x11` is set unconditionally so SDL-based apps (e.g. cava)
+/// do not auto-probe Wayland. The daemon environment carries `WAYLAND_DISPLAY`;
+/// every streamed child runs inside a Xvfb X11 virtual display so forcing x11
+/// is always correct and harmless for non-SDL apps.
 ///
 /// All invariants from [`start`] are preserved:
 /// - Display allocation starts at `DISPLAY_BASE` (`:100`) to avoid collisions
@@ -345,7 +351,6 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 ///   daemon state is left unchanged.
 pub fn start_argv(
     argv: &[String],
-    env_extra: &[(&str, &str)],
     width: u32,
     height: u32,
 ) -> Result<XvfbHandle> {
@@ -435,16 +440,15 @@ pub fn start_argv(
     // Spawn the child using a structured argv (no shell).
     // argv[0] is the binary; argv[1..] are its arguments, passed verbatim —
     // no shell word-splitting occurs on spaces within any element.
+    //
+    // SDL_VIDEODRIVER=x11 is set unconditionally (same rationale as start()).
     let mut cmd = Command::new(&argv[0]);
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
-    cmd.env("DISPLAY", &display);
-    // Inject extra env vars (e.g. SDL_VIDEODRIVER=x11 for cava).
-    for (key, val) in env_extra {
-        cmd.env(key, val);
-    }
-    cmd.stdout(Stdio::null())
+    cmd.env("DISPLAY", &display)
+        .env("SDL_VIDEODRIVER", "x11")
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
 
@@ -525,7 +529,7 @@ mod tests {
             "arg with space".to_string(),
         ];
 
-        let handle = start_argv(&argv, &[], 480, 480)
+        let handle = start_argv(&argv, 480, 480)
             .expect("start_argv must succeed for sh with a space-containing arg");
 
         // Give the child a moment to write the file.
@@ -551,7 +555,7 @@ mod tests {
     #[serial]
     fn start_argv_liveness_check_and_display_base() {
         let argv: Vec<String> = vec!["sleep".to_string(), "10".to_string()];
-        let handle = start_argv(&argv, &[], 480, 480)
+        let handle = start_argv(&argv, 480, 480)
             .expect("start_argv(sleep 10) must succeed");
 
         assert!(
@@ -575,7 +579,7 @@ mod tests {
     #[serial]
     fn start_argv_dying_child_returns_err() {
         let argv: Vec<String> = vec!["false".to_string()];
-        let result = start_argv(&argv, &[], 480, 480);
+        let result = start_argv(&argv, 480, 480);
         assert!(
             result.is_err(),
             "start_argv(false) must return Err when child dies immediately — \
@@ -583,30 +587,28 @@ mod tests {
         );
     }
 
-    /// [DO-CONFIRM: env injection]:
+    /// [DO-CONFIRM: SDL_VIDEODRIVER=x11 injected unconditionally in argv path]:
     ///
-    /// Extra env vars passed to start_argv must be visible to the child.
-    /// We write the env var value to a temp file via sh, then assert it arrived.
+    /// start_argv must set SDL_VIDEODRIVER=x11 for all streamed children so
+    /// SDL-based apps (e.g. cava) work inside the Xvfb X11 virtual display even
+    /// when the daemon environment carries WAYLAND_DISPLAY.
+    ///
+    /// We write the env var value to a temp file and assert it equals "x11".
     #[test]
     #[serial]
-    fn start_argv_env_extra_is_injected() {
+    fn start_argv_sdl_videodriver_set_unconditionally() {
         let out_file = tempfile::NamedTempFile::new().expect("tempfile");
         let out_path = out_file.path().to_string_lossy().to_string();
-        let sentinel = "THERMALWRITER_TEST_SENTINEL_XYZ";
-        let sentinel_val = "injected_ok";
 
-        // sh reads the env var and writes it to the output file, then stays alive.
+        // sh reads SDL_VIDEODRIVER and writes it to the output file, then stays alive.
         let argv: Vec<String> = vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!(
-                "printf '%s' \"${}\" > {}; exec sleep 5",
-                sentinel, out_path
-            ),
+            format!("printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5", out_path),
         ];
 
-        let handle = start_argv(&argv, &[(sentinel, sentinel_val)], 480, 480)
-            .expect("start_argv with env_extra must succeed");
+        let handle = start_argv(&argv, 480, 480)
+            .expect("start_argv with SDL check must succeed");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
         let written = std::fs::read_to_string(&out_path).unwrap_or_default();
@@ -614,8 +616,34 @@ mod tests {
 
         assert_eq!(
             written.trim(),
-            sentinel_val,
-            "env_extra var must be visible in child: got {:?}",
+            "x11",
+            "SDL_VIDEODRIVER must be 'x11' in argv child env, got: {:?}",
+            written
+        );
+    }
+
+    /// [DO-CONFIRM: SDL_VIDEODRIVER=x11 injected unconditionally in sh -c path]:
+    ///
+    /// start() (shell path) must also set SDL_VIDEODRIVER=x11 unconditionally.
+    #[test]
+    #[serial]
+    fn start_sh_sdl_videodriver_set_unconditionally() {
+        let out_file = tempfile::NamedTempFile::new().expect("tempfile");
+        let out_path = out_file.path().to_string_lossy().to_string();
+
+        let handle = start(
+            &format!("printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5", out_path),
+            480, 480,
+        ).expect("start with SDL check must succeed");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let written = std::fs::read_to_string(&out_path).unwrap_or_default();
+        drop(handle);
+
+        assert_eq!(
+            written.trim(),
+            "x11",
+            "SDL_VIDEODRIVER must be 'x11' in sh -c child env, got: {:?}",
             written
         );
     }
