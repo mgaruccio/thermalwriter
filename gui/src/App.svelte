@@ -4,6 +4,11 @@
   import BgGallery from "./lib/BgGallery.svelte";
   import StreamTab from "./lib/StreamTab.svelte";
 
+  // Canonical prefix of AppError::DaemonUnavailable's serialized Display string.
+  // AppError serializes to a plain string; this prefix is guaranteed by the
+  // thiserror #[error("daemon is not running…")] template in error.rs.
+  const DAEMON_OFFLINE_PREFIX = "daemon is not running";
+
   type LayoutSummary = {
     name: string;
     kind: string;
@@ -180,7 +185,7 @@
         daemonState = "ok";
       } catch (e) {
         const message = String(e);
-        if (message.includes("daemon is not running")) {
+        if (message.includes(DAEMON_OFFLINE_PREFIX)) {
           await invoke<void>("save_config", {
             layout: selectedLayout,
             vars: values,
@@ -470,13 +475,19 @@
           {#if error}
             <p class="error">{error}</p>
           {/if}
-        {:else}
-          <!-- Stream tab -->
+        {/if}
+
+        <!-- Stream tab — always mounted so the poll loop and streaming state
+             survive tab switches. Hidden with display:none when inactive so
+             onDestroy only fires on full component teardown, not tab switches.
+             This prevents the interval from being cleared and re-created on
+             every Variables ↔ Stream switch. -->
+        <div style:display={activeTab === "stream" ? "contents" : "none"}>
           <StreamTab
             {selectedLayout}
             onDaemonStateChange={probeDaemon}
           />
-        {/if}
+        </div>
       </div>
     </section>
   </main>

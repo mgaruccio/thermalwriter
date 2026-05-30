@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { configDir } from "@tauri-apps/api/path";
   import {
@@ -8,6 +8,11 @@
     allBinariesToResolve,
     buildArgv,
   } from "./streamPresets";
+
+  // Prefix of AppError::NoFrame's serialized Display string.
+  // AppError serializes to a plain string (not a structured object), so we
+  // match on the canonical prefix from the thiserror #[error("...")] template.
+  const NO_FRAME_PREFIX = "no stream frame available:";
 
   // Props
   type Props = {
@@ -28,12 +33,18 @@
   let status = $state("");
   let error = $state("");
 
+  // Live preview canvas
+  let previewCanvas = $state<HTMLCanvasElement | undefined>();
+  let pollInterval: ReturnType<typeof setInterval> | undefined;
+  // Track whether a poll tick is already in flight to avoid queuing.
+  let pollInFlight = false;
+
   // Resolved binary paths — subset of allBinariesToResolve() keys that are present.
   // Absent key = binary not found on system.
   let resolved = $state<Record<string, string>>({});
   let resolving = $state(true);
 
-  // Per-preset field values. keyed by field.kind.
+  // Per-preset field values keyed by field.kind.
   let fieldValues = $state<Record<string, string>>({});
   // Resolved config dir base path for wrapper defaults (set once in onMount).
   let wrapperDir = $state("~/.config/thermalwriter/wrappers");
@@ -91,9 +102,7 @@
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   onMount(async () => {
-    // Pre-populate config_path fields with the seeded wrapper paths.
-    // configDir() returns ~/.config on Linux; wrapper configs live under
-    // ~/.config/thermalwriter/wrappers/ (seeded by seed_wrapper_dir on daemon start).
+    // Resolve the wrapper config directory.
     try {
       const cfg = await configDir();
       wrapperDir = `${cfg}/thermalwriter/wrappers`;
@@ -104,15 +113,38 @@
       config_path: `${wrapperDir}/${preset.id}-480.conf`,
       custom_path: "",
     };
+
+    // Probe for an already-running stream (started before this GUI opened).
+    // read_frame succeeds iff the daemon is actively writing xvfb frames.
+    try {
+      const bytes = await invoke<ArrayBuffer>("read_frame");
+      streaming = true;
+      status = "Stream already running — attached to live feed.";
+      await paintFrame(bytes);
+      startPoll();
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes(NO_FRAME_PREFIX)) {
+        // Unexpected error (not "no frame yet") — surface it but don't block.
+        error = `Frame probe: ${msg}`;
+      }
+      // NO_FRAME_PREFIX means daemon is running but no xvfb stream active — normal.
+    }
+
     await doResolve();
+  });
+
+  onDestroy(() => {
+    stopPoll();
   });
 
   // When the preset changes, update fps default and reset config_path hint.
   $effect(() => {
     fps = preset.default_fps;
-    const suffix = preset.id === "conky" || preset.id === "cava"
-      ? `${preset.id}-480.conf`
-      : "";
+    const suffix =
+      preset.id === "conky" || preset.id === "cava"
+        ? `${preset.id}-480.conf`
+        : "";
     if (suffix) {
       fieldValues = {
         ...fieldValues,
@@ -121,13 +153,77 @@
     }
   });
 
+  // ── Poll loop ─────────────────────────────────────────────────────────────
+
+  function startPoll() {
+    if (pollInterval !== undefined) return; // already running
+    // ~3 FPS for the GUI preview (independent of the LCD tick rate).
+    pollInterval = setInterval(pollFrame, 333);
+  }
+
+  function stopPoll() {
+    if (pollInterval !== undefined) {
+      clearInterval(pollInterval);
+      pollInterval = undefined;
+    }
+    pollInFlight = false;
+  }
+
+  async function pollFrame() {
+    if (pollInFlight) return; // don't stack if a tick takes >333ms
+    pollInFlight = true;
+    try {
+      const bytes = await invoke<ArrayBuffer>("read_frame");
+      await paintFrame(bytes);
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes(NO_FRAME_PREFIX)) {
+        // Frame cleared — stream ended externally; sync UI state.
+        streaming = false;
+        status = "Stream ended externally.";
+        stopPoll();
+      }
+      // Other errors (e.g. transient IPC) — silently skip this tick.
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  // ── Rendering ─────────────────────────────────────────────────────────────
+
+  /**
+   * Paint a JPEG ArrayBuffer onto the preview canvas, rotated 180°.
+   *
+   * The daemon writes frames post-rotation (already rotated for the physical
+   * LCD which is mounted 180° inverted). The GUI must un-rotate 180° so the
+   * preview shows the image right-side-up.
+   */
+  async function paintFrame(bytes: ArrayBuffer) {
+    if (!previewCanvas) return;
+    const ctx = previewCanvas.getContext("2d");
+    if (!ctx) return;
+
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+    const bitmap = await createImageBitmap(blob);
+
+    const w = previewCanvas.width;
+    const h = previewCanvas.height;
+
+    // Rotate 180°: translate to centre, rotate π, translate back.
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(Math.PI);
+    ctx.drawImage(bitmap, -w / 2, -h / 2, w, h);
+    ctx.restore();
+    bitmap.close();
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   async function doResolve() {
     resolving = true;
     error = "";
     try {
-      // Include Xvfb so we can gate the whole panel on its availability.
       const names = [...allBinariesToResolve(), "Xvfb"];
       resolved = await invoke<Record<string, string>>("resolve_binaries", { names });
     } catch (e) {
@@ -153,6 +249,7 @@
       streaming = true;
       status = `Streaming ${preset.label} at ${fps} FPS`;
       onDaemonStateChange?.();
+      startPoll();
     } catch (e) {
       error = `Start failed: ${e}`;
     } finally {
@@ -168,6 +265,7 @@
       streaming = false;
       status = `Stopped. Returned to ${selectedLayout}.`;
       onDaemonStateChange?.();
+      stopPoll();
     } catch (e) {
       error = `Stop failed: ${e}`;
     } finally {
@@ -193,6 +291,19 @@
 </script>
 
 <div class="stream-tab">
+  <!-- ── Live preview canvas (only while streaming) ── -->
+  {#if streaming}
+    <div class="preview-wrap">
+      <canvas
+        bind:this={previewCanvas}
+        width="480"
+        height="480"
+        class="stream-canvas"
+      ></canvas>
+      <div class="preview-badge">LIVE</div>
+    </div>
+  {/if}
+
   <!-- ── Xvfb gate banner ── -->
   {#if !resolving && !xvfbResolved}
     <div class="gate-banner">
@@ -396,6 +507,51 @@
     flex-direction: column;
     gap: 14px;
     padding: 4px 0;
+  }
+
+  /* ── Live preview ── */
+  .preview-wrap {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .stream-canvas {
+    /* Scale down from 480px source to fit the 320px-wide config pane. */
+    width: 100%;
+    max-width: 280px;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    border-radius: 8px;
+    background: #050608;
+    border: 1px solid var(--line-strong);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent),
+      0 0 24px -8px color-mix(in srgb, var(--amber) 45%, transparent);
+    image-rendering: auto;
+    display: block;
+  }
+
+  .preview-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 140px + 6px);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3em;
+    padding: 2px 6px;
+    background: color-mix(in srgb, var(--amber) 90%, transparent);
+    color: var(--bg-deep);
+    border-radius: 3px;
+    text-transform: uppercase;
+    animation: live-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
   }
 
   /* ── Gate banner ── */
