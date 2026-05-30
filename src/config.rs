@@ -564,6 +564,16 @@ mod tests {
                 val
             );
         }
+        // mono channels: prevents stereo splitting spectrum to edges
+        assert!(
+            conf.contains("channels = mono"),
+            "cava must use channels=mono to fill all bars across 480px width"
+        );
+        // bar_width set so bars fill the frame (not sparse edge-only rendering)
+        assert!(
+            conf.contains("bar_width"),
+            "cava must set bar_width to control fill at 480px"
+        );
         // SDL_VIDEODRIVER requirement must be documented
         assert!(
             conf.contains("SDL_VIDEODRIVER"),
