@@ -124,6 +124,12 @@ impl XvfbSource {
 }
 
 impl FrameSource for XvfbSource {
+    /// This source is an Xvfb capture stream — signal the tick loop to dump
+    /// each encoded frame to tmpfs for GUI preview.
+    fn is_streaming(&self) -> bool {
+        true
+    }
+
     fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
         let pixel_data = &self.mmap[self.header.pixel_data_offset..];
         let rgb = bgrx_to_rgb(

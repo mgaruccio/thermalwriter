@@ -72,6 +72,12 @@ pub trait FrameSource: Send {
     fn set_template(&mut self, _template: &str) {}
     /// Set or clear the global background image. Default no-op — only SvgRenderer overrides.
     fn set_background(&mut self, _bg: Option<Pixmap>) {}
+    /// Returns true when this source is an Xvfb capture stream.
+    /// Used by the tick loop to decide whether to dump the last frame to tmpfs
+    /// for GUI preview.  Default false — only XvfbSource overrides.
+    fn is_streaming(&self) -> bool {
+        false
+    }
 }
 
 /// Renders HTML/CSS templates with sensor data substitution.

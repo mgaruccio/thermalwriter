@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
 use crate::sensor::history::SensorHistory;
+use crate::service::frame_dump;
 use crate::transport::Transport;
 
 /// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
@@ -135,9 +136,16 @@ pub async fn run_tick_loop(
                 "Frame source swapped to: {} (queue drained)",
                 new_source.name()
             );
+            let leaving_streaming = frame_source.is_streaming();
             frame_source = new_source;
             frame_source.set_background(cached_background.clone());
             cached_sensors.clear();
+
+            // If we just left xvfb mode, remove the stale last.jpg so the GUI
+            // doesn't display a frozen frame from a previous streaming session.
+            if leaving_streaming && !frame_source.is_streaming() {
+                frame_dump::clear_frame(&frame_dump::frame_dir());
+            }
         }
 
         // Apply template update if one arrived since last tick
@@ -172,6 +180,20 @@ pub async fn run_tick_loop(
                 match encode_jpeg(&frame, jpeg_quality, rotation) {
                     Ok(jpeg) => {
                         debug!("Frame rendered: {} bytes JPEG", jpeg.len());
+
+                        // Dump last xvfb frame to tmpfs so the GUI Stream tab can
+                        // display a live preview.  block_in_place keeps the async
+                        // runtime responsive during the file write (same pattern as
+                        // the USB send below).
+                        if frame_source.is_streaming() {
+                            let dir = frame_dump::frame_dir();
+                            if let Err(e) = tokio::task::block_in_place(|| {
+                                frame_dump::write_frame_atomic(&dir, &jpeg)
+                            }) {
+                                warn!("frame_dump write failed: {}", e);
+                            }
+                        }
+
                         // block_in_place yields the runtime thread pool during the USB
                         // syscall so D-Bus and other async tasks remain responsive even
                         // when a write stalls for the full WRITE_TIMEOUT (5s).
