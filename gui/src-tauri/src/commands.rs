@@ -432,6 +432,32 @@ pub fn read_frame() -> Result<Response, AppError> {
     Ok(Response::new(bytes))
 }
 
+/// Set the daemon tick rate (1–60 FPS). Validates range locally before calling
+/// D-Bus so the GUI gets a fast, descriptive error without a round-trip.
+///
+/// Intended use: dev-2's Stream tab calls `apply_stream(argv)` then
+/// `set_tick_rate(fps)` to start streaming at the desired frame rate. The
+/// daemon's existing restore_from_streaming path resets the rate on stop.
+#[tauri::command]
+pub async fn set_tick_rate(rate: u32) -> Result<(), AppError> {
+    validate_tick_rate(rate)?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+    proxy
+        .set_tick_rate(rate)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("set_tick_rate failed: {e}")))?;
+    Ok(())
+}
+
 /// Resolve binary names to absolute paths using the daemon's PATH.
 /// Delegates to `DisplayProxy::resolve_binaries` so the GUI can detect which
 /// preset binaries are installed before offering them.
@@ -454,6 +480,17 @@ pub async fn resolve_binaries(names: Vec<String>) -> Result<HashMap<String, Stri
 }
 
 // ---- helpers ----
+
+/// Validate that `rate` is within the daemon's accepted range [1, 60].
+/// Extracted so tests can call it without a running D-Bus session.
+fn validate_tick_rate(rate: u32) -> Result<(), AppError> {
+    if rate == 0 || rate > 60 {
+        return Err(AppError::DaemonCall(format!(
+            "tick rate {rate} out of range — must be 1–60"
+        )));
+    }
+    Ok(())
+}
 
 /// Return the directory where the daemon writes the last-frame JPEG.
 ///
@@ -1379,5 +1416,41 @@ mod tests {
             matches!(err, AppError::NoFrame(_)),
             "missing last.jpg must yield NoFrame, got: {err:?}"
         );
+    }
+
+    // ---- set_tick_rate validation ----
+
+    /// set_tick_rate_validated rejects 0 and values > 60 with DaemonCall error.
+    #[test]
+    fn set_tick_rate_rejects_out_of_range() {
+        assert!(
+            matches!(
+                validate_tick_rate(0),
+                Err(AppError::DaemonCall(_))
+            ),
+            "rate=0 must be rejected"
+        );
+        assert!(
+            matches!(
+                validate_tick_rate(61),
+                Err(AppError::DaemonCall(_))
+            ),
+            "rate=61 must be rejected"
+        );
+        assert!(
+            matches!(
+                validate_tick_rate(100),
+                Err(AppError::DaemonCall(_))
+            ),
+            "rate=100 must be rejected"
+        );
+    }
+
+    /// set_tick_rate_validated accepts boundary values 1 and 60.
+    #[test]
+    fn set_tick_rate_accepts_boundary_values() {
+        assert!(validate_tick_rate(1).is_ok(), "rate=1 must be accepted");
+        assert!(validate_tick_rate(15).is_ok(), "rate=15 must be accepted");
+        assert!(validate_tick_rate(60).is_ok(), "rate=60 must be accepted");
     }
 }

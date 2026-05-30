@@ -45,4 +45,11 @@ pub trait Display {
     /// Missing binaries map to an empty string. Returns absolute paths so
     /// the GUI can bake them into preset argv without exec-time re-resolution.
     async fn resolve_binaries(&self, names: Vec<String>) -> zbus::Result<HashMap<String, String>>;
+    /// Read the current tick rate (FPS).
+    /// Note: zbus property accessors in proxy traits must be non-async.
+    #[zbus(property)]
+    fn tick_rate(&self) -> zbus::Result<u32>;
+    /// Set the daemon tick rate (1–60 FPS). The daemon also validates the range.
+    #[zbus(property)]
+    fn set_tick_rate(&self, rate: u32) -> zbus::Result<()>;
 }
