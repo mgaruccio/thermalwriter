@@ -57,6 +57,7 @@ pub fn run() {
             commands::get_active_background,
             commands::import_background,
             // stream commands (Phase 3)
+            commands::get_status,
             commands::apply_stream,
             commands::stop_stream,
             commands::read_frame,

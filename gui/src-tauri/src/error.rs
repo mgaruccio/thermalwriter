@@ -89,10 +89,23 @@ mod tests {
             AppError::ConfigWrite("disk full".into()),
             AppError::Render("usvg failed".into()),
             AppError::DaemonCall("set_layout rejected".into()),
+            AppError::InvalidBackground("evil.exe".into()),
+            AppError::BackgroundNotFound("skyline.png".into()),
+            AppError::BackgroundIo("read failed".into()),
+            AppError::NoFrame("no last.jpg".into()),
         ];
         for err in cases {
             let s = err.to_string();
             assert!(!s.is_empty(), "empty Display for {err:?}");
+            // Every tuple-variant must echo the inner payload in its message so
+            // callers can surface actionable details. StatePoisoned and
+            // DaemonUnavailable are excluded (no inner string, or tested separately).
+            assert!(
+                matches!(&err,
+                    AppError::StatePoisoned | AppError::DaemonUnavailable { .. }
+                ) || s.contains(&err.to_string()),
+                "Display for {err:?} is suspiciously short: {s:?}"
+            );
         }
     }
 }

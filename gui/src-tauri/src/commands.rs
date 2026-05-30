@@ -365,6 +365,64 @@ pub fn import_background(
     import_background_impl(&state.background_dir, &filename, &data)
 }
 
+// ---- daemon status ----
+
+/// Snapshot of the daemon's runtime state, returned by `get_status`.
+///
+/// Field names match the keys the daemon inserts in its `GetStatus` D-Bus
+/// response so nothing is silently dropped when the raw HashMap is parsed.
+/// dev-2: check `.mode == "xvfb"` to determine whether streaming is active.
+#[derive(Debug, serde::Serialize)]
+pub struct DaemonStatus {
+    /// Current display mode: "svg", "html", or "xvfb".
+    pub mode: String,
+    /// Current tick rate in FPS (may be the streaming rate while in xvfb mode).
+    pub tick_rate: u32,
+    /// Whether the USB display is connected.
+    pub connected: bool,
+    /// Active layout filename (e.g. "svg/neon-dash-v2.svg"). Empty in xvfb mode.
+    pub active_layout: String,
+    /// Display resolution as "WxH" string (e.g. "480x480").
+    pub resolution: String,
+}
+
+/// Query the daemon for its current runtime status. Returns a typed struct so
+/// the frontend doesn't need to parse string fields from the raw D-Bus map.
+///
+/// Returns `DaemonUnavailable` if the daemon is not running — callers should
+/// treat that as "offline / no status available" rather than an error to show.
+#[tauri::command]
+pub async fn get_status() -> Result<DaemonStatus, AppError> {
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+    let raw = proxy
+        .get_status()
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("get_status failed: {e}")))?;
+
+    Ok(DaemonStatus {
+        mode: raw.get("mode").cloned().unwrap_or_default(),
+        tick_rate: raw
+            .get("tick_rate")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        connected: raw
+            .get("connected")
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        active_layout: raw.get("active_layout").cloned().unwrap_or_default(),
+        resolution: raw.get("resolution").cloned().unwrap_or_default(),
+    })
+}
+
 // ---- stream commands ----
 
 /// Start streaming: send a fully-formed argv to the daemon's generic
