@@ -365,7 +365,118 @@ pub fn import_background(
     import_background_impl(&state.background_dir, &filename, &data)
 }
 
+// ---- stream commands ----
+
+/// Start streaming: send a fully-formed argv to the daemon's generic
+/// `set_mode_argv` method.  The GUI builds the argv from its preset registry
+/// (resolved binary paths, custom config paths, terminal wrappers) — the daemon
+/// just executes it inside a Xvfb virtual display.
+///
+/// Mirrors the `apply_to_daemon` pattern: connect to D-Bus, call the proxy.
+#[tauri::command]
+pub async fn apply_stream(argv: Vec<String>) -> Result<(), AppError> {
+    if argv.is_empty() {
+        return Err(AppError::DaemonCall("apply_stream: argv must not be empty".to_string()));
+    }
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+    proxy
+        .set_mode_argv(argv)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("set_mode_argv failed: {e}")))?;
+    Ok(())
+}
+
+/// Stop streaming: return to a layout by calling `set_mode("svg"|"html", layout)`.
+/// The daemon restores tick_rate and kills the xvfb child automatically.
+#[tauri::command]
+pub async fn stop_stream(layout: String) -> Result<(), AppError> {
+    let mode = if layout.ends_with(".html") { "html" } else { "svg" };
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+    proxy
+        .set_mode(mode, &layout)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("set_mode failed: {e}")))?;
+    Ok(())
+}
+
+/// Read the last JPEG frame written by the daemon's tick loop for the GUI preview.
+///
+/// Path: `$XDG_RUNTIME_DIR/thermalwriter/last.jpg` (falls back to
+/// `/tmp/thermalwriter/last.jpg` when XDG_RUNTIME_DIR is unset). Returns raw
+/// JPEG bytes; the frontend wraps them in a Blob URL for display.
+///
+/// Returns `AppError::NoFrame` — not a panic — if no frame has been written yet
+/// (stream not started, or file was cleared when mode left xvfb).
+#[tauri::command]
+pub fn read_frame() -> Result<Response, AppError> {
+    let dir = frame_dir();
+    let bytes = read_frame_impl(&dir)?;
+    Ok(Response::new(bytes))
+}
+
+/// Resolve binary names to absolute paths using the daemon's PATH.
+/// Delegates to `DisplayProxy::resolve_binaries` so the GUI can detect which
+/// preset binaries are installed before offering them.
+#[tauri::command]
+pub async fn resolve_binaries(names: Vec<String>) -> Result<HashMap<String, String>, AppError> {
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("session bus unavailable: {e}"),
+        })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonUnavailable {
+            reason: format!("daemon proxy not reachable: {e}"),
+        })?;
+    proxy
+        .resolve_binaries(names)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("resolve_binaries failed: {e}")))
+}
+
 // ---- helpers ----
+
+/// Return the directory where the daemon writes the last-frame JPEG.
+///
+/// Mirrors `thermalwriter::service::frame_dump::frame_dir()` — the GUI builds
+/// with `default-features = false` (no `daemon` feature), so the daemon's
+/// `service` module is not available here; the path logic is replicated inline.
+/// Path contract: `$XDG_RUNTIME_DIR/thermalwriter` (fallback `/tmp/thermalwriter`).
+fn frame_dir() -> PathBuf {
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime).join("thermalwriter")
+    } else {
+        PathBuf::from("/tmp/thermalwriter")
+    }
+}
+
+/// Core of `read_frame`, factored out so it can be tested without a Tauri runtime.
+/// Reads `dir/last.jpg`; returns `AppError::NoFrame` if the file is absent.
+fn read_frame_impl(dir: &Path) -> Result<Vec<u8>, AppError> {
+    let path = dir.join("last.jpg");
+    std::fs::read(&path).map_err(|e| {
+        AppError::NoFrame(format!("{}: {e}", path.display()))
+    })
+}
 
 fn list_layout_names(layout_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -1240,5 +1351,33 @@ mod tests {
         let big = vec![0u8; MAX_IMPORT_BYTES + 1];
         let err = import_background_impl(&bg_dir, "huge.png", &big).unwrap_err();
         assert!(matches!(err, AppError::BackgroundIo(_)), "got {err:?}");
+    }
+
+    // ---- read_frame ----
+
+    /// read_frame_impl with an existing last.jpg returns its raw bytes.
+    #[test]
+    fn read_frame_returns_bytes_when_file_exists() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("thermalwriter");
+        fs::create_dir_all(&frame_dir).unwrap();
+        let expected = b"\xff\xd8\xff\xe0FAKEJPEG";
+        fs::write(frame_dir.join("last.jpg"), expected).unwrap();
+
+        let bytes = read_frame_impl(&frame_dir).expect("must return bytes for existing file");
+        assert_eq!(bytes, expected, "returned bytes must match written JPEG");
+    }
+
+    /// read_frame_impl with no last.jpg returns NoFrame error, not a panic.
+    #[test]
+    fn read_frame_returns_no_frame_error_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("thermalwriter"); // dir doesn't even exist
+
+        let err = read_frame_impl(&frame_dir).unwrap_err();
+        assert!(
+            matches!(err, AppError::NoFrame(_)),
+            "missing last.jpg must yield NoFrame, got: {err:?}"
+        );
     }
 }

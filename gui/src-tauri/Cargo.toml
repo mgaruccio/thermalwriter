@@ -36,6 +36,7 @@ env_logger = "0.11"
 # src/lib.rs ensures `init()` is only called in dev builds, so release builds
 # never start the WebSocket server even though the crate is linked.
 tauri-plugin-mcp-bridge = "0.11"
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 tempfile = "3"

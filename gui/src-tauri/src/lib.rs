@@ -29,7 +29,8 @@ pub fn run() {
     builtin_layouts::seed_background_dir(&background_dir)
         .expect("failed to seed built-in backgrounds");
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init());
     #[cfg(debug_assertions)]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
@@ -55,6 +56,11 @@ pub fn run() {
             commands::save_background,
             commands::get_active_background,
             commands::import_background,
+            // stream commands (Phase 3)
+            commands::apply_stream,
+            commands::stop_stream,
+            commands::read_frame,
+            commands::resolve_binaries,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

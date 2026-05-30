@@ -42,6 +42,9 @@ pub enum AppError {
 
     #[error("failed to read/write background: {0}")]
     BackgroundIo(String),
+
+    #[error("no stream frame available: {0}")]
+    NoFrame(String),
 }
 
 impl serde::Serialize for AppError {

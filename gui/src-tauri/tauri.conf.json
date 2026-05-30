@@ -32,5 +32,8 @@
     "active": false,
     "targets": "all",
     "icon": []
+  },
+  "plugins": {
+    "dialog": {}
   }
 }
