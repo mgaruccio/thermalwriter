@@ -248,75 +248,41 @@ async fn main() -> Result<()> {
         while let Some(change) = mode_rx.recv().await {
             match change {
                 ModeChange::Layout { name, vars, ack } => {
-                    // Drop any running xvfb before switching back to layout mode
-                    if let Some(h) = xvfb_handle.take() {
-                        drop(h);
-                    }
-                    let path = layout_dir_clone.join(&name);
-                    match std::fs::read_to_string(&path) {
-                        Ok(template) => {
-                            // Parse frontmatter and register any new history metrics.
-                            // configure_metric is idempotent — existing buffers are preserved.
-                            let new_fm = LayoutFrontmatter::parse(&template);
-                            if let Some(ref hist) = reload_history
-                                && let Ok(mut h) = hist.lock()
-                            {
-                                for (metric, cfg) in &new_fm.history_configs {
-                                    h.configure_metric(metric, cfg.duration);
-                                }
-                            }
-                            let is_svg = name.ends_with(".svg");
-                            let new_source: Box<dyn FrameSource> = if is_svg {
-                                match SvgRenderer::new(&template, 480, 480) {
-                                    Ok(mut r) => {
-                                        r.set_theme(reload_theme.clone());
-                                        if let Some(ref hist) = reload_history {
-                                            r.set_history(hist.clone());
-                                        }
-                                        r.set_layout_vars(vars);
-                                        // Preserve background across layout switches
-                                        r.set_background(current_background.clone());
-                                        Box::new(r)
-                                    }
-                                    Err(e) => {
-                                        let msg = format!(
-                                            "Failed to create SvgRenderer for {}: {}",
-                                            name, e
-                                        );
-                                        log::warn!("{}", msg);
-                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                match TemplateRenderer::new(&template, 480, 480) {
-                                    Ok(r) => Box::new(r),
-                                    Err(e) => {
-                                        let msg = format!(
-                                            "Failed to create TemplateRenderer for {}: {}",
-                                            name, e
-                                        );
-                                        log::warn!("{}", msg);
-                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
-                                        continue;
-                                    }
-                                }
-                            };
+                    // Build the new source FIRST — before touching the existing handle.
+                    // If build_layout_source fails (bad path, render error), the old
+                    // source keeps streaming and the handle is left intact.
+                    let layout_path = layout_dir_clone.join(&name);
+                    match thermalwriter::service::mode_handler::build_layout_source(
+                        &layout_path,
+                        vars,
+                        current_background.clone(),
+                        reload_history.clone(),
+                        reload_theme.clone(),
+                        480,
+                        480,
+                    ) {
+                        Ok(new_source) => {
                             if source_tx.send(new_source).await.is_err() {
                                 let msg = "Failed to send new frame source to tick loop — receiver dropped".to_string();
                                 log::warn!("{}", msg);
                                 let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                                 continue;
                             }
-                            // Also push raw template for set_template hot-swap path
-                            let _ = template_tx.send(template);
+                            // Source confirmed sent — NOW it is safe to drop the old handle.
+                            if let Some(h) = xvfb_handle.take() {
+                                drop(h);
+                            }
+                            // Push raw template for the set_template hot-swap path.
+                            if let Ok(template) = std::fs::read_to_string(&layout_path) {
+                                let _ = template_tx.send(template);
+                            }
                             info!("Switched to layout: {}", name);
                             let _ = ack.send(Ok(()));
                         }
                         Err(e) => {
-                            let msg = format!("Failed to read layout {}: {}", name, e);
-                            log::warn!("{}", msg);
-                            let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                            // Build failed — old handle stays live; stream keeps rendering.
+                            log::warn!("Layout transition failed for '{}': {}", name, e);
+                            let _ = ack.send(Err(e));
                         }
                     }
                 }
@@ -334,20 +300,23 @@ async fn main() -> Result<()> {
                     let _ = ack.send(Ok(()));
                 }
                 ModeChange::Xvfb { command, ack } => {
-                    // Drop previous xvfb handle before starting a new one
-                    if let Some(h) = xvfb_handle.take() {
-                        drop(h);
-                    }
+                    // Start the new Xvfb process FIRST — before dropping the existing handle.
+                    // If start or source-creation fails, the old source/handle stays live.
                     match xvfb_manager::start(&command, 480, 480) {
-                        Ok(handle) => match XvfbSource::new(handle.screen_file(), 480, 480) {
+                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480) {
                             Ok(source) => {
                                 if source_tx.send(Box::new(source)).await.is_err() {
                                     let msg = "Failed to send xvfb frame source to tick loop — receiver dropped".to_string();
                                     log::warn!("{}", msg);
+                                    // new_handle drops here (Xvfb killed) — old handle still in place.
                                     let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                                     continue;
                                 }
-                                xvfb_handle = Some(handle);
+                                // New source confirmed sent — NOW drop the old handle.
+                                if let Some(h) = xvfb_handle.take() {
+                                    drop(h);
+                                }
+                                xvfb_handle = Some(new_handle);
                                 info!(
                                     "Switched to xvfb mode: {} ({}fps)",
                                     command, xvfb_tick_rate_cfg
@@ -355,7 +324,8 @@ async fn main() -> Result<()> {
                                 let _ = ack.send(Ok(()));
                             }
                             Err(e) => {
-                                let msg = format!("Failed to create XvfbSource: {}", e);
+                                // new_handle drops here, killing the new Xvfb.
+                                let msg = format!("Failed to create XvfbSource for '{}': {}", command, e);
                                 log::warn!("{}", msg);
                                 let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                             }

@@ -2,5 +2,6 @@
 // Coordinates sensor polling, frame rendering, and USB transport.
 
 pub mod dbus;
+pub mod mode_handler;
 pub mod tick;
 pub mod xvfb;
