@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
 
         while let Some(change) = mode_rx.recv().await {
             match change {
-                ModeChange::Layout { name, vars } => {
+                ModeChange::Layout { name, vars, ack } => {
                     // Drop any running xvfb before switching back to layout mode
                     if let Some(h) = xvfb_handle.take() {
                         drop(h);
@@ -279,11 +279,12 @@ async fn main() -> Result<()> {
                                         Box::new(r)
                                     }
                                     Err(e) => {
-                                        log::warn!(
+                                        let msg = format!(
                                             "Failed to create SvgRenderer for {}: {}",
-                                            name,
-                                            e
+                                            name, e
                                         );
+                                        log::warn!("{}", msg);
+                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                                         continue;
                                     }
                                 }
@@ -291,28 +292,35 @@ async fn main() -> Result<()> {
                                 match TemplateRenderer::new(&template, 480, 480) {
                                     Ok(r) => Box::new(r),
                                     Err(e) => {
-                                        log::warn!(
+                                        let msg = format!(
                                             "Failed to create TemplateRenderer for {}: {}",
-                                            name,
-                                            e
+                                            name, e
                                         );
+                                        log::warn!("{}", msg);
+                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                                         continue;
                                     }
                                 }
                             };
                             if source_tx.send(new_source).await.is_err() {
-                                log::warn!(
-                                    "Failed to send new frame source to tick loop — receiver dropped"
-                                );
+                                let msg = "Failed to send new frame source to tick loop — receiver dropped".to_string();
+                                log::warn!("{}", msg);
+                                let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                continue;
                             }
                             // Also push raw template for set_template hot-swap path
                             let _ = template_tx.send(template);
                             info!("Switched to layout: {}", name);
+                            let _ = ack.send(Ok(()));
                         }
-                        Err(e) => log::warn!("Failed to read layout {}: {}", name, e),
+                        Err(e) => {
+                            let msg = format!("Failed to read layout {}: {}", name, e);
+                            log::warn!("{}", msg);
+                            let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                        }
                     }
                 }
-                ModeChange::Background { image } => {
+                ModeChange::Background { image, ack } => {
                     current_background = image.clone();
                     // Push to tick loop immediately so the running renderer updates
                     // without waiting for a layout switch.
@@ -321,8 +329,11 @@ async fn main() -> Result<()> {
                         "Background updated ({})",
                         if image.is_some() { "set" } else { "cleared" }
                     );
+                    // Background changes use their own bg_change_lock for ordering;
+                    // ack here satisfies the contract for callers that await it.
+                    let _ = ack.send(Ok(()));
                 }
-                ModeChange::Xvfb { command } => {
+                ModeChange::Xvfb { command, ack } => {
                     // Drop previous xvfb handle before starting a new one
                     if let Some(h) = xvfb_handle.take() {
                         drop(h);
@@ -331,19 +342,29 @@ async fn main() -> Result<()> {
                         Ok(handle) => match XvfbSource::new(handle.screen_file(), 480, 480) {
                             Ok(source) => {
                                 if source_tx.send(Box::new(source)).await.is_err() {
-                                    log::warn!(
-                                        "Failed to send xvfb frame source to tick loop — receiver dropped"
-                                    );
+                                    let msg = "Failed to send xvfb frame source to tick loop — receiver dropped".to_string();
+                                    log::warn!("{}", msg);
+                                    let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                    continue;
                                 }
                                 xvfb_handle = Some(handle);
                                 info!(
                                     "Switched to xvfb mode: {} ({}fps)",
                                     command, xvfb_tick_rate_cfg
                                 );
+                                let _ = ack.send(Ok(()));
                             }
-                            Err(e) => log::warn!("Failed to create XvfbSource: {}", e),
+                            Err(e) => {
+                                let msg = format!("Failed to create XvfbSource: {}", e);
+                                log::warn!("{}", msg);
+                                let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                            }
                         },
-                        Err(e) => log::warn!("Failed to start xvfb: {}", e),
+                        Err(e) => {
+                            let msg = format!("Failed to start xvfb for command '{}': {}", command, e);
+                            log::warn!("{}", msg);
+                            let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                        }
                     }
                 }
             }

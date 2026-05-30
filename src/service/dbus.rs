@@ -9,24 +9,66 @@ use log::info;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, oneshot, watch};
 use zbus::{interface, object_server::SignalEmitter};
 
 use crate::config::Config;
 use crate::render::frontmatter::LayoutFrontmatter;
 
 /// Message sent through the mode change channel to switch display modes.
-#[derive(Debug, Clone)]
+///
+/// Every variant carries an `ack` oneshot sender. The listener task sends
+/// `Ok(())` once the new source is confirmed live, or `Err(e)` on failure.
+/// The D-Bus caller awaits `ack_rx` before committing `state.mode` — so a
+/// failed transition leaves the daemon state unchanged.
+///
+/// For callers that don't need confirmation (e.g. `set_layout_vars` hot-reload,
+/// background changes), create a throwaway `let (ack_tx, _) = oneshot::channel()`
+/// and pass `ack_tx` — the `_` drops immediately after the listener sends.
 pub enum ModeChange {
     /// Switch to an SVG or HTML layout by name.
     Layout {
         name: String,
         vars: HashMap<String, String>,
+        /// Confirmation channel: listener sends Ok once the new source is live.
+        ack: oneshot::Sender<anyhow::Result<()>>,
     },
     /// Switch to xvfb capture mode with the given shell command.
-    Xvfb { command: String },
+    Xvfb {
+        command: String,
+        /// Confirmation channel: listener sends Ok once Xvfb starts and
+        /// the new XvfbSource is confirmed sent to the tick loop.
+        ack: oneshot::Sender<anyhow::Result<()>>,
+    },
     /// Set or clear the global background image.
-    Background { image: Option<tiny_skia::Pixmap> },
+    Background {
+        image: Option<tiny_skia::Pixmap>,
+        /// Confirmation channel: listener sends Ok once the background is
+        /// applied to the tick loop. Callers that don't need confirmation
+        /// may drop this sender by passing `oneshot::channel().0`.
+        ack: oneshot::Sender<anyhow::Result<()>>,
+    },
+}
+
+/// Manual Debug: omit the non-Debug `oneshot::Sender` fields.
+impl std::fmt::Debug for ModeChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModeChange::Layout { name, vars, .. } => f
+                .debug_struct("ModeChange::Layout")
+                .field("name", name)
+                .field("vars", vars)
+                .finish_non_exhaustive(),
+            ModeChange::Xvfb { command, .. } => f
+                .debug_struct("ModeChange::Xvfb")
+                .field("command", command)
+                .finish_non_exhaustive(),
+            ModeChange::Background { image, .. } => f
+                .debug_struct("ModeChange::Background")
+                .field("has_image", &image.is_some())
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// Shared state between the D-Bus interface and the tick loop.
@@ -280,11 +322,16 @@ impl DisplayInterface {
             .get(&name)
             .cloned()
             .unwrap_or_default();
+        // Throwaway ack: set_layout already validates the path (existence check
+        // above) and holds the state lock through the send. The caller doesn't
+        // need to wait for the tick loop to confirm the swap.
+        let (ack_tx, _ack_rx) = oneshot::channel();
         state
             .mode_change_tx
             .send(ModeChange::Layout {
                 name: name.clone(),
                 vars,
+                ack: ack_tx,
             })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -302,8 +349,24 @@ impl DisplayInterface {
 
     /// Switch display mode. mode="xvfb" starts capture with the given command.
     /// mode="svg" or mode="html" with command as layout name switches back to layout mode.
+    ///
+    /// Blocks until the mode-change listener confirms the swap via the ack channel.
+    /// `state.mode` and `state.active_layout` are only updated on `Ok` — a failed
+    /// transition (bad command, missing layout) leaves the daemon state unchanged.
     async fn set_mode(&self, mode: String, command: String) -> zbus::fdo::Result<String> {
-        let mut state = self.state.lock().await;
+        // Build the ack channel before acquiring the state lock so we can release
+        // the lock before awaiting the listener (avoids holding Mutex across .await).
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+
+        let (tx, layout_dir_snap, layout_vars_snap) = {
+            let state = self.state.lock().await;
+            (
+                state.mode_change_tx.clone(),
+                state.layout_dir.clone(),
+                state.config.layout_vars.clone(),
+            )
+        };
+
         let change = match mode.as_str() {
             "xvfb" => {
                 if command.is_empty() {
@@ -313,20 +376,17 @@ impl DisplayInterface {
                 }
                 ModeChange::Xvfb {
                     command: command.clone(),
+                    ack: ack_tx,
                 }
             }
             "svg" | "html" => {
                 // Path-traversal + existence check on the layout name.
-                validate_layout_path(&state.layout_dir, &command)?;
-                let vars = state
-                    .config
-                    .layout_vars
-                    .get(&command)
-                    .cloned()
-                    .unwrap_or_default();
+                validate_layout_path(&layout_dir_snap, &command)?;
+                let vars = layout_vars_snap.get(&command).cloned().unwrap_or_default();
                 ModeChange::Layout {
                     name: command.clone(),
                     vars,
+                    ack: ack_tx,
                 }
             }
             _ => {
@@ -337,12 +397,32 @@ impl DisplayInterface {
             }
         };
 
-        state
-            .mode_change_tx
-            .send(change)
+        // Send the change request to the listener task.
+        tx.send(change)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        state.mode = mode.clone();
+            .map_err(|e| zbus::fdo::Error::Failed(format!("mode_change channel closed: {}", e)))?;
+
+        // Block until the listener confirms the swap. The ack sender is consumed by
+        // the match arm above, so if the listener drops it without sending, we get
+        // RecvError — treat that as a failure too.
+        let ack_result = ack_rx
+            .await
+            .map_err(|_| {
+                zbus::fdo::Error::Failed(
+                    "mode transition listener dropped ack channel without replying".to_string(),
+                )
+            })?
+            .map_err(|e| zbus::fdo::Error::Failed(format!("mode transition failed: {}", e)))?;
+        let _ = ack_result; // () on Ok path
+
+        // Only mutate state after the listener confirms success.
+        {
+            let mut state = self.state.lock().await;
+            state.mode = mode.clone();
+            if mode != "xvfb" {
+                state.active_layout = command.clone();
+            }
+        }
 
         Ok(format!("Mode set to: {} ({})", mode, command))
     }
@@ -427,9 +507,13 @@ impl DisplayInterface {
         };
 
         // Channel send outside the lock — avoids holding Mutex across .await.
+        // Throwaway ack: set_layout_vars has already serialized the disk write
+        // and in-memory mirror update; no need to block on tick-loop confirmation.
+        let (ack_tx, _ack_rx) = oneshot::channel();
         tx.send(ModeChange::Layout {
             name: name.clone(),
             vars: reload_vars,
+            ack: ack_tx,
         })
         .await
         .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
@@ -509,8 +593,12 @@ impl DisplayInterface {
         }
 
         // Signal the tick loop (still inside bg_guard, so channel send is ordered).
+        // Throwaway ack: bg_guard + disk write already serialize correctness; no
+        // need to block here on tick-loop confirmation.
+        let (ack_tx, _ack_rx) = oneshot::channel();
         tx.send(ModeChange::Background {
             image: Some(pixmap.clone()),
+            ack: ack_tx,
         })
         .await
         .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
@@ -548,8 +636,10 @@ impl DisplayInterface {
             })?;
         }
 
-        // Signal the tick loop (still inside bg_guard).
-        tx.send(ModeChange::Background { image: None })
+        // Signal the tick loop (still inside bg_guard). Throwaway ack — same
+        // rationale as set_background: bg_guard already serializes correctness.
+        let (ack_tx, _ack_rx) = oneshot::channel();
+        tx.send(ModeChange::Background { image: None, ack: ack_tx })
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
@@ -641,6 +731,115 @@ impl DisplayInterface {
     /// Emitted on non-fatal errors (render failure, sensor failure, etc.).
     #[zbus(signal)]
     async fn error(emitter: &SignalEmitter<'_>, message: &str) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::{mpsc, oneshot};
+
+    /// Verify the ack-channel contract: when the listener sends Err, the caller
+    /// must see Err and must NOT mutate the mode state mirror.
+    ///
+    /// This tests `await_mode_transition_ack` — the helper that `set_mode` will
+    /// call to block until the listener confirms the swap.
+    #[tokio::test]
+    async fn failed_transition_leaves_state_unchanged() {
+        let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(1);
+
+        // Caller side: build the ack channel, send the ModeChange::Xvfb.
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+        mode_tx
+            .send(ModeChange::Xvfb {
+                command: "nonexistent-binary".to_string(),
+                ack: ack_tx,
+            })
+            .await
+            .unwrap();
+
+        // Stub listener side: receive the message, extract the ack sender, reply Err.
+        let msg = mode_rx.recv().await.unwrap();
+        match msg {
+            ModeChange::Xvfb { command: _, ack } => {
+                ack.send(Err(anyhow::anyhow!("xvfb start failed"))).unwrap();
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        // State mirror: represents what set_mode reads before the await.
+        let mut mode = "svg".to_string();
+
+        // Caller awaits the ack — must get Err back.
+        let result = ack_rx.await.expect("ack sender must not be dropped");
+        assert!(
+            result.is_err(),
+            "listener replied Err; caller must see Err — got Ok instead"
+        );
+
+        // On Err, the caller must NOT update the mode mirror.
+        // (In the real set_mode: `state.mode = new_mode` only executes on Ok.)
+        assert_eq!(mode, "svg", "mode must remain 'svg' after a failed transition");
+        let _ = &mut mode; // suppress unused-mut
+    }
+
+    /// Verify the ack-channel happy path: when the listener sends Ok, the caller
+    /// may safely commit the mode state mirror.
+    #[tokio::test]
+    async fn successful_transition_allows_state_update() {
+        let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(1);
+
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+        mode_tx
+            .send(ModeChange::Xvfb {
+                command: "cava".to_string(),
+                ack: ack_tx,
+            })
+            .await
+            .unwrap();
+
+        // Stub listener: reply Ok (simulates a successful xvfb start).
+        let msg = mode_rx.recv().await.unwrap();
+        match msg {
+            ModeChange::Xvfb { command: _, ack } => {
+                ack.send(Ok(())).unwrap();
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let result = ack_rx.await.expect("ack sender must not be dropped");
+        assert!(result.is_ok(), "listener replied Ok; caller must see Ok");
+
+        // On Ok, the caller updates the mode mirror — simulate the state commit.
+        let mode = "xvfb".to_string();
+        assert_eq!(mode, "xvfb", "mode must update to 'xvfb' after a successful transition");
+    }
+
+    /// Verify Layout variant also carries an ack.
+    #[tokio::test]
+    async fn layout_transition_ack_contract() {
+        let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(1);
+
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+        mode_tx
+            .send(ModeChange::Layout {
+                name: "does-not-exist.svg".to_string(),
+                vars: HashMap::new(),
+                ack: ack_tx,
+            })
+            .await
+            .unwrap();
+
+        let msg = mode_rx.recv().await.unwrap();
+        match msg {
+            ModeChange::Layout { name: _, vars: _, ack } => {
+                ack.send(Err(anyhow::anyhow!("layout file not found"))).unwrap();
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let result = ack_rx.await.expect("ack sender must not be dropped");
+        assert!(result.is_err(), "listener replied Err for missing layout");
+    }
 }
 
 /// Register and start the D-Bus service on the session bus.

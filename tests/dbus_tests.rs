@@ -522,7 +522,8 @@ fn background_save_sets_all_three_effects() {
 
         Config::save_background_image(&config_path, Some("dark.png"))
             .expect("save_background_image must succeed");
-        tx.send(ModeChange::Background { image: None })
+        let (ack_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(ModeChange::Background { image: None, ack: ack_tx })
             .await
             .expect("channel send must succeed");
 
@@ -559,7 +560,8 @@ fn background_save_none_clears_all_three_effects() {
 
         Config::save_background_image(&config_path, None)
             .expect("save_background_image(None) must succeed");
-        tx.send(ModeChange::Background { image: None })
+        let (ack_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(ModeChange::Background { image: None, ack: ack_tx })
             .await
             .expect("channel send must succeed");
 
@@ -577,10 +579,10 @@ fn background_save_none_clears_all_three_effects() {
             "image key must be absent on disk after clear"
         );
 
-        // Effect 3: ModeChange::Background { image: None } sent
+        // Effect 3: ModeChange::Background { image: None } sent (ack is internal)
         let msg = rx.try_recv().expect("ModeChange::Background must be sent");
         assert!(
-            matches!(msg, ModeChange::Background { image: None }),
+            matches!(msg, ModeChange::Background { image: None, .. }),
             "expected ModeChange::Background {{image: None}}, got {:?}",
             msg
         );
@@ -604,7 +606,8 @@ fn background_save_outside_lock_sets_disk_and_channel() {
 
         Config::save_background_image(&config_path, Some("dark.png"))
             .expect("save_background_image must succeed");
-        tx.send(ModeChange::Background { image: None })
+        let (ack_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(ModeChange::Background { image: None, ack: ack_tx })
             .await
             .expect("channel send must succeed");
 
@@ -643,7 +646,8 @@ fn background_save_outside_lock_none_clears_disk_and_channel() {
 
         Config::save_background_image(&config_path, None)
             .expect("save_background_image(None) must succeed");
-        tx.send(ModeChange::Background { image: None })
+        let (ack_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(ModeChange::Background { image: None, ack: ack_tx })
             .await
             .expect("channel send must succeed");
 
@@ -658,10 +662,10 @@ fn background_save_outside_lock_none_clears_disk_and_channel() {
             "image key must be absent after clear, disk: {on_disk}"
         );
 
-        // Channel: ModeChange::Background { image: None }
+        // Channel: ModeChange::Background { image: None } (ack is internal)
         let msg = rx.try_recv().expect("ModeChange::Background must be sent");
         assert!(
-            matches!(msg, ModeChange::Background { image: None }),
+            matches!(msg, ModeChange::Background { image: None, .. }),
             "expected Background{{image:None}}, got {:?}",
             msg
         );
