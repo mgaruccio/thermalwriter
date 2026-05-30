@@ -396,6 +396,10 @@ pub mod builtin_layouts {
     pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
     pub const SVG_NEON_DASH_V2: &str = include_str!("../layouts/svg/neon-dash-v2.svg");
 
+    // Xvfb wrapper configs (conky + cava starter presets for LCD streaming)
+    pub const WRAPPER_CONKY: &str = include_str!("../layouts/wrappers/conky-480.conf");
+    pub const WRAPPER_CAVA: &str = include_str!("../layouts/wrappers/cava-480.conf");
+
     // Seed background images (tiny PNGs, decoded + resized to 480×480 at runtime)
     pub const BG_DARK_SOLID: &[u8] = include_bytes!("../assets/backgrounds/dark-solid.png");
     pub const BG_DARK_GRADIENT: &[u8] = include_bytes!("../assets/backgrounds/dark-gradient.png");
@@ -415,6 +419,31 @@ pub mod builtin_layouts {
             if !dest.exists() {
                 std::fs::write(&dest, content).with_context(|| {
                     format!("Failed to write built-in background: {}", dest.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy built-in Xvfb wrapper configs (conky + cava) to `wrapper_dir` if they
+    /// don't already exist.  Mirrors `seed_layout_dir` — only writes if
+    /// `!dest.exists()` so user edits are never clobbered.
+    ///
+    /// `wrapper_dir` is typically `~/.config/thermalwriter/wrappers/`.
+    pub fn seed_wrapper_dir(wrapper_dir: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let wrappers: &[(&str, &str)] = &[
+            ("conky-480.conf", WRAPPER_CONKY),
+            ("cava-480.conf", WRAPPER_CAVA),
+        ];
+        std::fs::create_dir_all(wrapper_dir).with_context(|| {
+            format!("Failed to create wrappers dir: {}", wrapper_dir.display())
+        })?;
+        for (name, content) in wrappers {
+            let dest = wrapper_dir.join(name);
+            if !dest.exists() {
+                std::fs::write(&dest, content).with_context(|| {
+                    format!("Failed to write built-in wrapper: {}", dest.display())
                 })?;
             }
         }
@@ -448,5 +477,99 @@ pub mod builtin_layouts {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtin_layouts;
+
+    #[test]
+    fn seed_wrapper_dir_creates_both_configs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wrapper_dir = tmp.path().join("wrappers");
+        builtin_layouts::seed_wrapper_dir(&wrapper_dir).unwrap();
+
+        assert!(wrapper_dir.join("conky-480.conf").exists());
+        assert!(wrapper_dir.join("cava-480.conf").exists());
+    }
+
+    #[test]
+    fn seed_wrapper_dir_does_not_clobber_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wrapper_dir = tmp.path().join("wrappers");
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+
+        // Write a user-customised version
+        let user_content = b"# user edit";
+        std::fs::write(wrapper_dir.join("conky-480.conf"), user_content).unwrap();
+
+        // Seed should leave the user file untouched
+        builtin_layouts::seed_wrapper_dir(&wrapper_dir).unwrap();
+
+        let content = std::fs::read(wrapper_dir.join("conky-480.conf")).unwrap();
+        assert_eq!(content, user_content, "seed_wrapper_dir clobbered user edit");
+    }
+
+    #[test]
+    fn wrapper_conky_content_has_required_keys() {
+        let conf = builtin_layouts::WRAPPER_CONKY;
+        // Foreground operation
+        assert!(conf.contains("background        = false"), "conky must be foreground");
+        // Window setup
+        assert!(conf.contains("own_window        = true"));
+        assert!(conf.contains("own_window_type   = 'desktop'"));
+        assert!(conf.contains("double_buffer     = true"));
+        // 480x480
+        assert!(conf.contains("minimum_width     = 480"));
+        assert!(conf.contains("minimum_height    = 480"));
+        assert!(conf.contains("maximum_width     = 480"));
+        // Alignment / gap
+        assert!(conf.contains("alignment         = 'top_left'"));
+        assert!(conf.contains("gap_x             = 0"));
+        assert!(conf.contains("gap_y             = 0"));
+        // Opaque own_window_colour
+        assert!(conf.contains("own_window_colour = '#"));
+        // Font >= 14px
+        assert!(
+            conf.contains("size=14") || conf.contains("size=16") || conf.contains("size=18"),
+            "conky font must be >= 14px"
+        );
+    }
+
+    #[test]
+    fn wrapper_cava_content_has_required_keys() {
+        let conf = builtin_layouts::WRAPPER_CAVA;
+        // SDL backend
+        assert!(conf.contains("method = sdl"), "cava must use sdl output");
+        // 480x480
+        assert!(conf.contains("width = 480"));
+        assert!(conf.contains("height = 480"));
+        // bars must NOT be 24 (crashes at 480px); accept 0 (auto) or <= 22
+        if conf.contains("bars = ") {
+            let bars_line = conf.lines().find(|l| l.trim().starts_with("bars =")).unwrap();
+            let val: u32 = bars_line
+                .split('=')
+                .nth(1)
+                .unwrap()
+                .split('#')
+                .next()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            assert!(
+                val == 0 || val <= 22,
+                "cava bars={} would abort at 480px (max safe=22, or 0=auto)",
+                val
+            );
+        }
+        // SDL_VIDEODRIVER requirement must be documented
+        assert!(
+            conf.contains("SDL_VIDEODRIVER"),
+            "cava config must document SDL_VIDEODRIVER=x11 requirement"
+        );
+        // Pulse audio input
+        assert!(conf.contains("method = pulse"));
     }
 }
