@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { configDir } from "@tauri-apps/api/path";
   import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
@@ -150,6 +150,10 @@
   });
 
   // When the preset changes, update fps default and reset config_path hint.
+  // `untrack` wraps the fieldValues read so the effect only subscribes to
+  // `preset` and `wrapperDir` — not to fieldValues itself, which would create
+  // a self-referential dependency (read + write same state → infinite loop →
+  // Svelte aborts with effect_update_depth_exceeded).
   $effect(() => {
     fps = preset.default_fps;
     const suffix =
@@ -158,7 +162,7 @@
         : "";
     if (suffix) {
       fieldValues = {
-        ...fieldValues,
+        ...untrack(() => fieldValues),
         config_path: `${wrapperDir}/${suffix}`,
       };
     }
