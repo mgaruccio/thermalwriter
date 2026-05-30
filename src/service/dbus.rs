@@ -923,172 +923,236 @@ mod tests {
     // Task 6 tests: mode_change_lock + tick-rate push/restore + no-persist
     // ---------------------------------------------------------------------------
 
-    /// Helper that simulates the set_mode state-commit path for xvfb start:
-    ///   1. Acquire mode_change_lock
-    ///   2. Push xvfb tick_rate into tick_rate_tx
-    ///   3. Commit state.mode = "xvfb" + save pre_stream_tick_rate
+    /// Build a minimal ServiceState for unit tests. Spawns a stub listener task
+    /// that drains the mode_change channel and immediately acks Ok for every
+    /// message, so set_mode callers don't block indefinitely.
     ///
-    /// Returns the final mode string and the pre-stream tick_rate saved.
-    async fn simulate_start_xvfb(
-        lock: Arc<tokio::sync::Mutex<()>>,
-        tick_rate_tx: &watch::Sender<u32>,
-        current_rate: u32,
-        xvfb_rate: u32,
-    ) -> (String, u32) {
-        let _guard = lock.lock().await;
-        let _ = tick_rate_tx.send(xvfb_rate);
-        ("xvfb".to_string(), current_rate)
-    }
+    /// Returns (Arc<Mutex<ServiceState>>, layout_dir TempDir). The TempDir must
+    /// be kept alive for the duration of the test (dropped at end of scope).
+    async fn make_test_state(
+        xvfb_tick_rate: u32,
+        display_tick_rate: u32,
+    ) -> (Arc<tokio::sync::Mutex<ServiceState>>, tempfile::TempDir) {
+        use crate::config::{Config, DisplayConfig, XvfbConfig};
 
-    /// Helper that simulates the set_mode state-commit path for xvfb stop:
-    ///   1. Acquire mode_change_lock
-    ///   2. Restore pre_stream tick_rate into tick_rate_tx
-    ///   3. Commit state.mode = "svg" + state.active_layout = layout_name
-    async fn simulate_stop_xvfb(
-        lock: Arc<tokio::sync::Mutex<()>>,
-        tick_rate_tx: &watch::Sender<u32>,
-        pre_stream_rate: u32,
-        layout_name: &str,
-    ) -> (String, String) {
-        let _guard = lock.lock().await;
-        let _ = tick_rate_tx.send(pre_stream_rate);
-        ("svg".to_string(), layout_name.to_string())
-    }
+        // Create a temp layout dir and seed a minimal SVG file for path validation.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let layout_dir = dir.path().join("layouts");
+        std::fs::create_dir_all(&layout_dir).unwrap();
+        // A real file so validate_layout_path can canonicalize it.
+        std::fs::write(layout_dir.join("test.svg"), "<svg/>").unwrap();
 
-    /// [DO-CONFIRM checklist item 1 + 6]:
-    ///
-    /// Two concurrent callers (start-xvfb + stop-xvfb) that race on the
-    /// mode_change_lock must leave the state in a consistent, non-interleaved
-    /// final state. The lock serializes them — we assert that the final outcome
-    /// matches exactly one of the two valid terminal states:
-    ///   - "xvfb"  (start won)
-    ///   - "svg"   (stop won)
-    ///
-    /// Also asserts that the tick_rate_rx reflects the rate consistent with the
-    /// winning transition, and that active_layout is set correctly (not empty
-    /// on the stop-wins path).
-    ///
-    /// This test will FAIL before mode_change_lock is added because the helpers
-    /// don't serialize the state commit — the channel send and the state mirror
-    /// update would interleave, producing inconsistent mode + tick_rate.
-    #[tokio::test]
-    async fn concurrent_start_stop_leaves_consistent_state() {
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(2);
+        let (shutdown_tx, _) = watch::channel(false);
+        let (tick_rate_tx, _) = watch::channel::<u32>(display_tick_rate);
+        let (mode_tx, mut mode_rx) = tokio::sync::mpsc::channel::<ModeChange>(8);
 
-        let lock1 = lock.clone();
-        let lock2 = lock.clone();
-        let (tx1, tx2) = (tick_rate_tx.clone(), tick_rate_tx.clone());
-
-        // Spawn both transitions concurrently.
-        let start_task = tokio::spawn(async move {
-            simulate_start_xvfb(lock1, &tx1, 2, 15).await
-        });
-        let stop_task = tokio::spawn(async move {
-            simulate_stop_xvfb(lock2, &tx2, 2, "svg/neon-dash-v2.svg").await
+        // Stub listener: drain the channel and always ack Ok, so set_mode
+        // callers don't block. This is intentionally minimal — it stands in
+        // for the real tick-loop listener from main.rs.
+        tokio::spawn(async move {
+            while let Some(msg) = mode_rx.recv().await {
+                let ack = match msg {
+                    ModeChange::Layout { ack, .. } => ack,
+                    ModeChange::Xvfb { ack, .. } => ack,
+                    ModeChange::XvfbArgv { ack, .. } => ack,
+                    ModeChange::Background { ack, .. } => ack,
+                };
+                let _ = ack.send(Ok(()));
+            }
         });
 
-        let (start_result, stop_result) = tokio::join!(start_task, stop_task);
-        let (start_mode, _pre_rate) = start_result.unwrap();
-        let (stop_mode, stop_layout) = stop_result.unwrap();
-
-        // Both completed — final tick_rate must be consistent with whichever ran last.
-        let final_rate = *tick_rate_rx.borrow();
-        let final_mode = if *tick_rate_rx.borrow() == 15 {
-            &start_mode // xvfb won
-        } else {
-            &stop_mode  // layout won
+        let mut config = Config::default();
+        config.display = DisplayConfig {
+            tick_rate: display_tick_rate,
+            default_layout: "test.svg".to_string(),
+            jpeg_quality: 85,
+            rotation: 180,
+            mode: "svg".to_string(),
+        };
+        config.xvfb = XvfbConfig {
+            command: String::new(),
+            tick_rate: xvfb_tick_rate,
         };
 
-        // The mode must be one of the two valid terminal values — never something
-        // in between. Interleaving without the lock could produce mode="svg" with
-        // tick_rate=15 (stop committed mode, start committed tick_rate).
-        let valid_states = [
-            ("xvfb", 15u32),
-            ("svg", 2u32),
-        ];
-        assert!(
-            valid_states.iter().any(|(m, r)| m == final_mode && *r == final_rate),
-            "concurrent start+stop produced inconsistent state: mode={}, tick_rate={} \
-             (valid states: xvfb/15, svg/2) — mode_change_lock not serializing",
-            final_mode,
-            final_rate,
-        );
+        let state = Arc::new(tokio::sync::Mutex::new(ServiceState {
+            active_layout: "test.svg".to_string(),
+            mode: "svg".to_string(),
+            connected: true,
+            resolution: (480, 480),
+            tick_rate: display_tick_rate,
+            jpeg_quality: 85,
+            shutdown_tx,
+            tick_rate_tx,
+            layout_dir: layout_dir.clone(),
+            config_path: dir.path().join("config.toml"),
+            sensor_descriptors: vec![],
+            config,
+            mode_change_tx: mode_tx,
+            background_dir: dir.path().join("backgrounds"),
+            wrapper_dir: dir.path().join("wrappers"),
+            current_background: None,
+            config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bg_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mode_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pre_stream_tick_rate: None,
+        }));
 
-        // The stop path must always set a non-empty layout name.
-        assert!(
-            !stop_layout.is_empty(),
-            "active_layout must not be empty after xvfb stop"
-        );
+        (state, dir)
     }
 
-    /// [DO-CONFIRM checklist item 4]:
+    /// [DO-CONFIRM checklist items 1 + 4 + 6]: Concurrent set_mode calls on the
+    /// real DisplayInterface + real ServiceState + real mode_change_lock.
     ///
-    /// On xvfb start: tick_rate_tx is pushed with xvfb.tick_rate.
-    /// On xvfb stop:  tick_rate_tx is restored to the pre-stream display rate.
+    /// Two callers race: one calls set_mode("xvfb", ...) and one calls
+    /// set_mode("svg", "test.svg"). The mode_change_lock serializes them so
+    /// the final (mode, tick_rate, active_layout) is always one of the two
+    /// valid terminal states — never an interleaving.
+    ///
+    /// Valid terminal states:
+    ///   - xvfb won:  mode="xvfb", tick_rate=15, active_layout unchanged
+    ///   - svg won:   mode="svg",  tick_rate=2,  active_layout="test.svg"
+    ///
+    /// Without mode_change_lock the two callers could interleave their state
+    /// commits, producing e.g. mode="svg" with tick_rate=15 (svg wrote mode
+    /// after xvfb wrote tick_rate).
+    #[tokio::test]
+    async fn concurrent_set_mode_on_real_state_leaves_consistent_state() {
+        let (state, _dir) = make_test_state(15, 2).await;
+        let iface = DisplayInterface::new(state.clone());
+        let iface = Arc::new(iface);
+
+        // Set mode=xvfb first so the "svg" caller can exercise the stop path
+        // (restores pre_stream_tick_rate). Without an initial xvfb transition
+        // pre_stream_tick_rate is None and the stop path falls back to current_tick_rate.
+        // We do this sequentially to establish the initial condition.
+        iface.set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .await
+            .expect("initial xvfb set_mode must succeed");
+
+        // Snapshot state before the concurrent race.
+        let mode_before = state.lock().await.mode.clone();
+        assert_eq!(mode_before, "xvfb", "sanity: mode must be xvfb after initial set");
+
+        // Now race: one caller switches back to svg, the other re-enters xvfb.
+        let iface1 = iface.clone();
+        let iface2 = iface.clone();
+
+        let svg_task = tokio::spawn(async move {
+            iface1.set_mode("svg".to_string(), "test.svg".to_string()).await
+        });
+        let xvfb_task = tokio::spawn(async move {
+            iface2.set_mode("xvfb".to_string(), "sleep 99".to_string()).await
+        });
+
+        let (svg_result, xvfb_result) = tokio::join!(svg_task, xvfb_task);
+        svg_result.unwrap().expect("svg set_mode must not return Err");
+        xvfb_result.unwrap().expect("xvfb set_mode must not return Err");
+
+        // Read final state.
+        let final_state = state.lock().await;
+        let final_mode = &final_state.mode;
+        let final_rate = final_state.tick_rate;
+
+        // The final (mode, tick_rate) must be one of the two valid terminal pairs.
+        // An interleaving without the lock could produce: mode="svg", tick_rate=15
+        // (the svg caller wrote mode, the xvfb caller wrote tick_rate last).
+        let valid_pairs = [("xvfb", 15u32), ("svg", 2u32)];
+        assert!(
+            valid_pairs.iter().any(|(m, r)| m == final_mode && *r == final_rate),
+            "concurrent set_mode produced inconsistent state: mode={:?}, tick_rate={} \
+             (valid pairs: xvfb/15, svg/2) — mode_change_lock is not serializing the state commit",
+            final_mode, final_rate,
+        );
+
+        // When svg won, active_layout must be set.
+        if final_mode == "svg" {
+            assert_eq!(
+                final_state.active_layout, "test.svg",
+                "active_layout must be updated when returning to svg mode"
+            );
+        }
+    }
+
+    /// [DO-CONFIRM checklist item 4]: tick_rate_tx is pushed on xvfb start and
+    /// restored on stop, exercised through the real set_mode on a real ServiceState.
     #[tokio::test]
     async fn tick_rate_pushed_on_start_restored_on_stop() {
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
         let display_rate: u32 = 2;
         let xvfb_rate: u32 = 15;
-
-        let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(display_rate);
+        let (state, _dir) = make_test_state(xvfb_rate, display_rate).await;
+        let iface = DisplayInterface::new(state.clone());
 
         // Start streaming: tick_rate must change to xvfb_rate.
-        let (_mode, pre_stream_rate) =
-            simulate_start_xvfb(lock.clone(), &tick_rate_tx, display_rate, xvfb_rate).await;
-        assert_eq!(
-            *tick_rate_rx.borrow(),
-            xvfb_rate,
-            "tick_rate must be pushed to xvfb_rate on stream start"
-        );
-        assert_eq!(
-            pre_stream_rate, display_rate,
-            "pre_stream_rate must capture the display tick_rate before streaming"
-        );
+        iface.set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .await
+            .expect("xvfb set_mode must succeed");
+        {
+            let s = state.lock().await;
+            assert_eq!(s.tick_rate, xvfb_rate, "tick_rate must be xvfb_rate after start");
+            assert_eq!(
+                s.pre_stream_tick_rate,
+                Some(display_rate),
+                "pre_stream_tick_rate must be saved on start"
+            );
+        }
 
         // Stop streaming: tick_rate must be restored to display_rate.
-        let (_mode, _layout) =
-            simulate_stop_xvfb(lock.clone(), &tick_rate_tx, pre_stream_rate, "svg/neon-dash-v2.svg").await;
-        assert_eq!(
-            *tick_rate_rx.borrow(),
-            display_rate,
-            "tick_rate must be restored to display.tick_rate on stream stop"
-        );
+        iface.set_mode("svg".to_string(), "test.svg".to_string())
+            .await
+            .expect("svg set_mode must succeed");
+        {
+            let s = state.lock().await;
+            assert_eq!(
+                s.tick_rate, display_rate,
+                "tick_rate must be restored to display_rate after stop"
+            );
+            assert!(
+                s.pre_stream_tick_rate.is_none(),
+                "pre_stream_tick_rate must be cleared after stop"
+            );
+            assert_eq!(s.active_layout, "test.svg", "active_layout must be set after stop");
+        }
     }
 
-    /// [DO-CONFIRM checklist item 3]:
+    /// [DO-CONFIRM checklist item 3]: session-only — xvfb mode must NEVER be
+    /// written to the on-disk config. This test actually calls
+    /// `save_default_layout_impl` (the only code path that writes display.mode
+    /// to disk) and asserts the resulting TOML does not contain `mode = "xvfb"`.
     ///
-    /// save_display_layout must NEVER be called with mode="xvfb". This test
-    /// verifies the property by calling save_default_layout_impl with a known
-    /// SVG layout (which should produce mode="svg") and confirming that no
-    /// code path in set_mode for xvfb calls the disk-persist function.
-    ///
-    /// Since we can't intercept the real call in a unit test without mocking,
-    /// this is a negative-path compile check: we grep for the absence of a
-    /// save_display_layout call in the xvfb arm of set_mode. The real guard is
-    /// the implementation review — this documents the contract.
-    ///
-    /// (The grep is done in the confirm checklist; here we just assert the
-    /// invariant textually and verify save_default_layout_impl rejects "xvfb"
-    /// as a mode by checking it never inserts "xvfb" into the config.)
+    /// This replaces the previous no-op stub that asserted on a hardcoded local
+    /// string and could never fail.
     #[test]
-    fn xvfb_mode_never_passed_to_save_display_layout() {
-        // save_default_layout_impl always derives mode from the layout name
-        // (svg or html), never from an explicit "xvfb" argument — so "xvfb"
-        // can never reach the disk.
-        //
-        // We use a temp dir so we can check the written TOML.
+    fn save_display_layout_never_writes_xvfb_mode() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let _config_path = dir.path().join("config.toml");
-        // Write a valid SVG layout path (save_display_layout validates nothing
-        // about the path; it just records the name + inferred mode).
-        // We only need to confirm the on-disk mode is never "xvfb".
-        //
-        // Simulate what set_mode does for the "svg" return path (when leaving xvfb):
-        let layout_name = "svg/neon-dash-v2.svg";
-        let mode = if layout_name.ends_with(".html") { "html" } else { "svg" };
-        assert_ne!(mode, "xvfb", "mode derived from layout name must never be 'xvfb'");
+        let layout_dir = dir.path().join("layouts");
+        std::fs::create_dir_all(&layout_dir).unwrap();
+
+        // seed a real SVG layout file (validate_layout_path requires it to exist)
+        let layout_name = "test.svg";
+        std::fs::write(layout_dir.join(layout_name), "<svg/>").unwrap();
+
+        let config_path = dir.path().join("config.toml");
+
+        // save_default_layout_impl derives mode from the layout filename.
+        // An SVG layout must produce mode="svg", never mode="xvfb".
+        save_default_layout_impl(&layout_dir, &config_path, layout_name)
+            .expect("save_default_layout_impl must succeed for a valid svg layout");
+
+        let written = std::fs::read_to_string(&config_path)
+            .expect("config.toml must have been written");
+
+        // The on-disk file must never contain 'mode = "xvfb"'.
+        assert!(
+            !written.contains("xvfb"),
+            "config.toml must not contain 'xvfb' after save_default_layout_impl: \n{}",
+            written,
+        );
+        // Positive assertion: mode must be "svg" for an SVG layout.
+        assert!(
+            written.contains(r#"mode = "svg""#),
+            "config.toml must contain mode = \"svg\" for an SVG layout: \n{}",
+            written,
+        );
     }
 
     /// Verify the ack-channel contract: when the listener sends Err, the caller
