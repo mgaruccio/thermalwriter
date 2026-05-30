@@ -621,10 +621,14 @@ impl DisplayInterface {
                 let config_path = wrapper_dir_snap.join("cava-480.conf");
                 vec![
                     "cava".to_string(),
-                    "--config".to_string(),
+                    "-p".to_string(), // cava config flag is -p, not --config
                     config_path.to_string_lossy().to_string(),
                 ]
             }
+            // btop is a TUI requiring a terminal emulator to render — the daemon
+            // preset is best-effort (works when the Xvfb session has a terminal).
+            // For full control (custom terminal, font size, etc.) use set_mode_argv
+            // from the GUI with a complete argv like ["alacritty", "-e", "btop"].
             "btop" => vec!["btop".to_string()],
             _ => {
                 return Err(zbus::fdo::Error::InvalidArgs(format!(
@@ -1696,6 +1700,109 @@ mod tests {
             written.contains("accent_color"),
             "persisted config must contain the new var: {}", written
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 13: preset argv correctness — regression guards against wrong flags
+    // ---------------------------------------------------------------------------
+
+    /// cava uses `-p <path>` (not `--config`). Hardware confirmed `--config`
+    /// causes cava to exit 1 immediately with "invalid option -- '-'".
+    ///
+    /// This test captures the ModeChange::XvfbArgv sent by start_stream_preset
+    /// and asserts the argv contains "-p" and not "--config".
+    #[tokio::test]
+    async fn cava_preset_uses_dash_p_flag() {
+        let (state, _dir) = make_test_state(15, 2).await;
+
+        // Replace mode_change_tx with a spy so we can inspect the sent argv.
+        let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+        {
+            let mut s = state.lock().await;
+            s.mode_change_tx = spy_tx;
+        }
+
+        let iface = DisplayInterface::new(state.clone());
+        // Drive start_stream_preset — the stub listener is gone (replaced by spy),
+        // so the ack will never arrive and the call will hang. Use tokio::spawn +
+        // abort after we've captured the channel message.
+        let iface_arc = Arc::new(iface);
+        let iface_clone = iface_arc.clone();
+        let task = tokio::spawn(async move {
+            let _ = iface_clone.start_stream_preset("cava".to_string()).await;
+        });
+
+        // The channel send happens before the ack await, so the message arrives
+        // even though the task is still blocked waiting for an ack.
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            spy_rx.recv(),
+        )
+        .await
+        .expect("spy channel must receive a message within 2s")
+        .expect("channel must not be closed");
+
+        task.abort();
+
+        match msg {
+            ModeChange::XvfbArgv { argv, .. } => {
+                assert_eq!(argv[0], "cava", "first element must be 'cava'");
+                assert!(
+                    argv.contains(&"-p".to_string()),
+                    "cava argv must use '-p' flag, got: {:?}", argv
+                );
+                assert!(
+                    !argv.contains(&"--config".to_string()),
+                    "cava argv must NOT use '--config' (invalid flag), got: {:?}", argv
+                );
+                // The config path must follow -p immediately.
+                let p_pos = argv.iter().position(|a| a == "-p").unwrap();
+                assert!(
+                    argv.get(p_pos + 1).map(|s| s.contains("cava-480.conf")).unwrap_or(false),
+                    "element after '-p' must be the cava config path, got: {:?}", argv
+                );
+            }
+            other => panic!("expected XvfbArgv, got: {:?}", other),
+        }
+    }
+
+    /// conky uses `-c <path>` — regression guard so it can't silently break.
+    #[tokio::test]
+    async fn conky_preset_uses_dash_c_flag() {
+        let (state, _dir) = make_test_state(15, 2).await;
+        let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+        {
+            let mut s = state.lock().await;
+            s.mode_change_tx = spy_tx;
+        }
+        let iface = Arc::new(DisplayInterface::new(state.clone()));
+        let iface_clone = iface.clone();
+        let task = tokio::spawn(async move {
+            let _ = iface_clone.start_stream_preset("conky".to_string()).await;
+        });
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            spy_rx.recv(),
+        )
+        .await
+        .expect("spy must receive within 2s")
+        .expect("channel must not close");
+        task.abort();
+        match msg {
+            ModeChange::XvfbArgv { argv, .. } => {
+                assert_eq!(argv[0], "conky");
+                assert!(
+                    argv.contains(&"-c".to_string()),
+                    "conky argv must use '-c' flag, got: {:?}", argv
+                );
+                let c_pos = argv.iter().position(|a| a == "-c").unwrap();
+                assert!(
+                    argv.get(c_pos + 1).map(|s| s.contains("conky-480.conf")).unwrap_or(false),
+                    "element after '-c' must be the conky config path, got: {:?}", argv
+                );
+            }
+            other => panic!("expected XvfbArgv, got: {:?}", other),
+        }
     }
 }
 
