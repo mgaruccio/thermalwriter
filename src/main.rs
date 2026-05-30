@@ -214,6 +214,11 @@ async fn main() -> Result<()> {
         current_background: initial_background.clone(),
         config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         bg_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+        // Serializes the full set_mode body (channel-send + ack-await + state-mirror)
+        // to prevent concurrent start/stop calls from interleaving.
+        mode_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+        // No pre-stream tick rate yet (daemon starts in layout mode).
+        pre_stream_tick_rate: None,
     }));
 
     {
