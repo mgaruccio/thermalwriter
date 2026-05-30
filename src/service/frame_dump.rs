@@ -4,9 +4,12 @@
 //   $XDG_RUNTIME_DIR/thermalwriter/last.jpg
 // Falls back to /tmp/thermalwriter/last.jpg if XDG_RUNTIME_DIR is unset.
 //
-// Writes are atomic (temp file + rename) so the GUI never reads a partial JPEG.
+// Writes are atomic (fsync + temp file + rename) so the GUI never reads a
+// partial JPEG.  Only the tick loop calls write_frame_atomic in production
+// (single writer), so a single fixed temp name is correct and sufficient.
 
 use anyhow::Result;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Return the directory where the last-frame JPEG is written.
@@ -28,37 +31,38 @@ pub fn frame_path(dir: &Path) -> PathBuf {
 
 /// Atomically write `jpeg_bytes` to `dir/last.jpg`.
 ///
-/// Creates `dir` if it does not exist. Writes to a per-caller temp file
-/// (suffixed with `pid.thread_id`) then renames, so:
-/// - The GUI always reads either the previous complete frame or the new
-///   complete frame — never a partial write.
-/// - Concurrent callers don't clobber each other's temp file before the
-///   rename, even though in production only the single tick-loop thread
-///   calls this.
+/// Creates `dir` if it does not exist.  Writes to a fixed sibling temp file
+/// (`last.jpg.tmp`), fsyncs to flush kernel buffers, then renames atomically.
+/// Only the tick loop calls this in production (single writer), so a single
+/// fixed temp name is correct — no suffix needed.
+///
+/// Readers always see either the previous complete frame or the new one;
+/// they never observe a partial write.  This matches the fsync+rename pattern
+/// used by `config.rs` save_* helpers.
 pub fn write_frame_atomic(dir: &Path, jpeg_bytes: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
 
     let dest = frame_path(dir);
-    // Unique temp name per caller: avoids two concurrent writers racing on
-    // the same .tmp path (one rename would truncate the other's write).
-    let tid = {
-        // std::thread::current().id() has no stable numeric representation;
-        // use a pointer-cast of a stack variable as a cheap unique token.
-        let x: u8 = 0;
-        &x as *const u8 as usize
-    };
-    let tmp = dir.join(format!("last.jpg.{}.tmp", tid));
+    let tmp = dir.join("last.jpg.tmp");
 
-    std::fs::write(&tmp, jpeg_bytes)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(jpeg_bytes)?;
+    file.sync_all()?;
+    drop(file);
+
     std::fs::rename(&tmp, &dest)?;
 
     Ok(())
 }
 
-/// Remove `dir/last.jpg` (and its temp sibling if present).
+/// Remove `dir/last.jpg` and the sibling temp file if present.
 ///
 /// Called when the active mode transitions away from xvfb so no stale frame
-/// remains on tmpfs.  Errors are ignored — the file simply may not exist.
+/// remains on tmpfs.  Errors are ignored — the files simply may not exist.
 pub fn clear_frame(dir: &Path) {
     let _ = std::fs::remove_file(frame_path(dir));
     let _ = std::fs::remove_file(dir.join("last.jpg.tmp"));
@@ -67,27 +71,20 @@ pub fn clear_frame(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
+    use serial_test::serial;
 
     // --- frame_dir ---
 
+    // XDG_RUNTIME_DIR is a process-global env var; #[serial] prevents races
+    // with any other test that reads or writes it in parallel.
     #[test]
+    #[serial]
     fn frame_dir_uses_xdg_runtime_dir() {
-        // Temporarily set the env var; serial_test is NOT needed here because
-        // we restore the original value before returning and the test does not
-        // mutate any shared process state beyond the duration of this call.
-        //
-        // NOTE: env-var mutation in parallel tests is unsound in general.
-        // These tests are in their own module and each uses a distinct key, so
-        // they do not race with each other.  If the project adds more env-var
-        // tests across threads, introduce #[serial] from the serial_test crate.
         let original = std::env::var("XDG_RUNTIME_DIR").ok();
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
         }
         let dir = frame_dir();
-        // restore
         match original {
             Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
@@ -123,63 +120,58 @@ mod tests {
     }
 
     #[test]
-    fn write_frame_atomic_no_torn_file_under_concurrent_writes() {
-        // Two threads hammer the same dir; reader must never see partial data.
-        // We verify the invariant by checking that every read yields either
-        // the "odd" payload or the "even" payload — never a mix or a zero-byte file.
+    fn write_frame_atomic_reader_never_sees_partial_file() {
+        // Single writer (production design), concurrent reader.  The reader
+        // must always see either the previous complete payload or the new one —
+        // never a partial write.  The rename(2) atomicity guarantee makes this
+        // hold: the destination is swapped to the fully-written temp file.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
         let tmp = tempfile::tempdir().unwrap();
         let dir = Arc::new(tmp.path().join("tw_test_c"));
 
-        let odd_payload: Vec<u8> = vec![0xAA; 4096];
-        let even_payload: Vec<u8> = vec![0xBB; 4096];
+        let payload_a: Vec<u8> = vec![0xAA; 4096];
+        let payload_b: Vec<u8> = vec![0xBB; 4096];
 
-        let barrier = Arc::new(Barrier::new(3)); // writer1 + writer2 + reader
-
-        let dir1 = Arc::clone(&dir);
-        let odd = odd_payload.clone();
-        let b1 = Arc::clone(&barrier);
-        let w1 = thread::spawn(move || {
-            b1.wait();
-            for _ in 0..50 {
-                write_frame_atomic(&dir1, &odd).unwrap();
-            }
-        });
-
-        let dir2 = Arc::clone(&dir);
-        let even = even_payload.clone();
-        let b2 = Arc::clone(&barrier);
-        let w2 = thread::spawn(move || {
-            b2.wait();
-            for _ in 0..50 {
-                write_frame_atomic(&dir2, &even).unwrap();
-            }
-        });
-
-        // Reader: starts after both writers are ready, checks each read.
-        let dir3 = Arc::clone(&dir);
-        let b3 = Arc::clone(&barrier);
-        // Pre-seed so the first read doesn't fail on a missing file.
+        // Pre-seed so the reader's first read always finds a file.
         std::fs::create_dir_all(&*dir).unwrap();
-        write_frame_atomic(&dir, &odd_payload).unwrap();
+        write_frame_atomic(&dir, &payload_a).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2)); // writer + reader
+
+        let dir_w = Arc::clone(&dir);
+        let pa = payload_a.clone();
+        let pb = payload_b.clone();
+        let bw = Arc::clone(&barrier);
+        let writer = thread::spawn(move || {
+            bw.wait();
+            for i in 0..100u32 {
+                let payload = if i % 2 == 0 { &pa } else { &pb };
+                write_frame_atomic(&dir_w, payload).unwrap();
+            }
+        });
+
+        let dir_r = Arc::clone(&dir);
+        let pa2 = payload_a.clone();
+        let pb2 = payload_b.clone();
+        let br = Arc::clone(&barrier);
         let reader = thread::spawn(move || {
-            b3.wait();
-            for _ in 0..100 {
-                if let Ok(bytes) = std::fs::read(frame_path(&dir3)) {
-                    // Must be exactly one of the two payloads — never partial.
+            br.wait();
+            for _ in 0..200 {
+                if let Ok(bytes) = std::fs::read(frame_path(&dir_r)) {
                     assert!(
-                        bytes == odd_payload || bytes == even_payload,
+                        bytes == pa2 || bytes == pb2,
                         "torn read: {} bytes (expected {} or {})",
                         bytes.len(),
-                        odd_payload.len(),
-                        even_payload.len(),
+                        pa2.len(),
+                        pb2.len(),
                     );
                 }
-                // A missing file between writes is fine — clear_frame may run.
             }
         });
 
-        w1.join().unwrap();
-        w2.join().unwrap();
+        writer.join().unwrap();
         reader.join().unwrap();
     }
 
@@ -194,6 +186,20 @@ mod tests {
         assert!(frame_path(&dir).exists());
         clear_frame(&dir);
         assert!(!frame_path(&dir).exists());
+    }
+
+    #[test]
+    fn clear_frame_also_removes_tmp_sibling() {
+        // Verify that clear_frame removes last.jpg.tmp (the fixed temp name),
+        // which may be left behind if the process was killed mid-write.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("tw_test_f");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp_path = dir.join("last.jpg.tmp");
+        std::fs::write(&tmp_path, b"partial").unwrap();
+
+        clear_frame(&dir);
+        assert!(!tmp_path.exists());
     }
 
     #[test]
