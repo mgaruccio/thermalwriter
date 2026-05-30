@@ -283,12 +283,41 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         .spawn()
         .with_context(|| format!("Failed to spawn child command: {}", command))?;
 
+    let child_pid = child_process.id();
     info!(
         "Spawned child application: {} (pid {})",
         command,
-        child_process.id()
+        child_pid
     );
     handle.child_process = Some(child_process);
+
+    // Liveness check: give the child a brief grace period then probe whether
+    // it is still running. An immediately-dying child (bad command, exec error,
+    // `false`, sh exit 127) indicates a misconfigured stream — return Err so
+    // the D-Bus set_mode caller sees a failure and leaves daemon state unchanged.
+    //
+    // 150 ms is long enough to catch instant exec failures while avoiding
+    // false positives for slow-initialising foreground apps: cava, conky, and
+    // btop all keep their sh wrapper alive well past this window. Apps that
+    // legitimately daemonize (fork + parent exit) would look dead here — that
+    // is acceptable and expected: seeded configs enforce foreground operation
+    // (conky `background=false`) and preset launches avoid kitty single-instance
+    // mode for the same reason.
+    std::thread::sleep(Duration::from_millis(150));
+
+    if let Some(child_ref) = handle.child_process.as_mut() {
+        if let Ok(Some(status)) = child_ref.try_wait() {
+            // Child already exited — drop the handle (kills Xvfb, removes fbdir)
+            // then propagate a descriptive error.
+            drop(handle);
+            bail!(
+                "Streamed child exited immediately (command: {:?}, status: {}); \
+                 refusing to report mode=xvfb with a dead stream",
+                command,
+                status
+            );
+        }
+    }
 
     Ok(handle)
 }
@@ -312,7 +341,8 @@ mod tests {
     #[test]
     #[serial]
     fn displayfd_start_returns_valid_display() {
-        let handle = start("true", 480, 480).expect("start must succeed");
+        // Use a foreground long-lived command so the liveness check passes.
+        let handle = start("sleep 5", 480, 480).expect("start must succeed");
 
         // display_num must be in the isolated range — never a low desktop display.
         assert!(
@@ -364,8 +394,9 @@ mod tests {
     #[test]
     #[serial]
     fn displayfd_two_sequential_starts_get_distinct_displays() {
-        let h1 = start("true", 480, 480).expect("first start must succeed");
-        let h2 = start("true", 480, 480).expect("second start must succeed");
+        // Use a foreground long-lived command so the liveness check passes.
+        let h1 = start("sleep 5", 480, 480).expect("first start must succeed");
+        let h2 = start("sleep 5", 480, 480).expect("second start must succeed");
 
         let n1 = h1.display_num();
         let n2 = h2.display_num();
@@ -419,6 +450,72 @@ mod tests {
         drop(h2);
     }
 
+    /// An immediately-dying child must cause start() to return Err, AND the
+    /// Xvfb it already spawned must be cleaned up (no orphaned process or fbdir).
+    ///
+    /// `false` exits with code 1 instantly; `sh -c 'this-binary-does-not-exist'`
+    /// exits with code 127 (command not found) — both exercise the liveness check.
+    #[test]
+    #[serial]
+    fn dying_child_causes_start_to_return_err_and_cleans_up_xvfb() {
+        // Record all fbdirs before the call so we can check for leaks.
+        let fbdir_before: std::collections::HashSet<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("thermalwriter-xvfb-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // `false` exits immediately with code 1 — no Xvfb stream should start.
+        let result = start("false", 480, 480);
+
+        assert!(
+            result.is_err(),
+            "start(\"false\") must return Err (child died immediately) but returned Ok"
+        );
+
+        // Give Drop a moment to reap Xvfb and remove the fbdir.
+        std::thread::sleep(Duration::from_millis(400));
+
+        // No new thermalwriter-xvfb-* dirs should remain (Xvfb was cleaned up).
+        let fbdir_after: std::collections::HashSet<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("thermalwriter-xvfb-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let leaked: Vec<_> = fbdir_after.difference(&fbdir_before).collect();
+        assert!(
+            leaked.is_empty(),
+            "start(\"false\") leaked fbdir(s) after Err: {:?}",
+            leaked
+        );
+    }
+
+    /// A living child must allow start() to return Ok.
+    #[test]
+    #[serial]
+    fn living_child_causes_start_to_return_ok() {
+        let handle = start("sleep 10", 480, 480).expect("start(\"sleep 10\") must return Ok");
+        // Child is alive — confirm the handle is usable.
+        assert!(
+            handle.screen_file().exists(),
+            "screen file must exist for a live handle"
+        );
+        drop(handle); // must not panic
+    }
+
     /// Dropping XvfbHandle must kill the entire child process group, not just the
     /// direct sh child. Uses a unique sleep duration (sleep 9473) as a sentinel —
     /// if the grandchild survives Drop, pgrep finds it and the test fails.
@@ -428,8 +525,12 @@ mod tests {
     #[test]
     #[serial]
     fn drop_kills_entire_process_group_not_just_direct_child() {
-        // Use a unique sleep duration as sentinel so pgrep is unambiguous.
-        let handle = match start("sleep 9473 &", 480, 480) {
+        // Spawn a foreground sh that itself starts a background sleep sentinel.
+        // The sh wrapper stays alive (keeping the liveness check happy) while
+        // sleep 9473 runs as a grandchild. This is the same process-group kill
+        // scenario as before; using exec keeps sh alive so we don't trip the
+        // 150ms liveness check.
+        let handle = match start("sleep 9473 & exec sleep 600", 480, 480) {
             Ok(handle) => handle,
             Err(err) => {
                 eprintln!("skipping Xvfb process-group test: {err:#}");
