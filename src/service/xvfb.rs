@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use log::info;
 use std::io::Read as _;
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -90,7 +90,9 @@ fn try_start_xvfb_on(
     fbdir: &Path,
     screen_spec: &str,
 ) -> Result<Option<(Child, u32)>> {
-    let (pipe_read_fd, pipe_write_fd) = {
+    // Wrap both pipe ends in OwnedFd immediately so they close automatically
+    // on any early return (including a spawn() failure), preventing fd leaks.
+    let (pipe_read, pipe_write) = {
         let mut fds = [0i32; 2];
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
         if rc != 0 {
@@ -99,18 +101,28 @@ fn try_start_xvfb_on(
                 std::io::Error::last_os_error()
             );
         }
-        (fds[0], fds[1])
+        // SAFETY: pipe() returned two valid, distinct fds we now own.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
     };
+
+    // The pre_exec closure needs the read-end fd number to close it in the
+    // child. Extract it before moving pipe_write into into_raw_fd below.
+    let pipe_read_raw = pipe_read.as_raw_fd();
+    // Convert pipe_write to a raw fd for the -displayfd argument. The
+    // OwnedFd is consumed here; pipe_read keeps ownership of the read end.
+    let pipe_write_raw = pipe_write.into_raw_fd();
+    // From this point pipe_write_raw is an unguarded raw fd — it must be
+    // closed exactly once, either by the child (via exec) or by us below.
 
     // Pass an explicit display number as the starting candidate. When the
     // display is free Xvfb binds it and writes the number to the pipe. When
     // it is taken Xvfb exits with code 1 and writes nothing (empty pipe →
     // clean signal to try the next candidate).
-    let xvfb_process = unsafe {
+    let spawn_result = unsafe {
         Command::new("Xvfb")
             .arg(format!(":{}", display_num))
             .arg("-displayfd")
-            .arg(pipe_write_fd.to_string())
+            .arg(pipe_write_raw.to_string())
             .args(["-screen", "0", screen_spec])
             .args(["-fbdir", &fbdir.to_string_lossy()])
             .args(["-ac", "-nolisten", "tcp"])
@@ -120,18 +132,25 @@ fn try_start_xvfb_on(
             .pre_exec(move || {
                 // SAFETY: close the read end in the child so it doesn't
                 // linger. The write end must stay open for Xvfb to use.
-                libc::close(pipe_read_fd);
+                libc::close(pipe_read_raw);
                 Ok(())
             })
             .spawn()
-            .context("Failed to spawn Xvfb — is Xvfb installed?")?
     };
 
-    // Close the write end in the parent so our read sees EOF when Xvfb
-    // closes its copy (either after writing the number, or on exit).
-    unsafe { libc::close(pipe_write_fd) };
+    // Close the write end in the parent regardless of whether spawn succeeded.
+    // On success: Xvfb owns a copy; closing ours lets read_to_string see EOF.
+    // On failure: no child was created; closing ours releases the fd.
+    // SAFETY: pipe_write_raw was produced by into_raw_fd above and has not
+    // been closed anywhere else in this process.
+    unsafe { libc::close(pipe_write_raw) };
 
-    let mut pipe_reader = unsafe { std::fs::File::from_raw_fd(pipe_read_fd) };
+    let xvfb_process = spawn_result.context("Failed to spawn Xvfb — is Xvfb installed?")?;
+
+    // pipe_read (OwnedFd) is still live; wrap it in a File to read from it.
+    // into_raw_fd() transfers ownership so the File becomes responsible for
+    // closing the fd.
+    let mut pipe_reader = unsafe { std::fs::File::from_raw_fd(pipe_read.into_raw_fd()) };
     let mut buf = String::new();
     pipe_reader
         .read_to_string(&mut buf)
