@@ -504,7 +504,7 @@ impl DisplayInterface {
         // Block until the listener confirms the swap. The ack sender is consumed by
         // the match arm above, so if the listener drops it without sending, we get
         // RecvError — treat that as a failure too.
-        let ack_result = ack_rx
+        ack_rx
             .await
             .map_err(|_| {
                 zbus::fdo::Error::Failed(
@@ -512,7 +512,6 @@ impl DisplayInterface {
                 )
             })?
             .map_err(|e| zbus::fdo::Error::Failed(format!("mode transition failed: {}", e)))?;
-        let _ = ack_result; // () on Ok path
 
         // Listener confirmed success — commit state mirror inside the mode_guard.
         // This is still safe because _mode_guard is held through this block.
@@ -656,7 +655,7 @@ impl DisplayInterface {
         .await
         .map_err(|e| zbus::fdo::Error::Failed(format!("mode_change channel closed: {}", e)))?;
 
-        let ack_result = ack_rx
+        ack_rx
             .await
             .map_err(|_| {
                 zbus::fdo::Error::Failed(
@@ -666,7 +665,6 @@ impl DisplayInterface {
             .map_err(|e| {
                 zbus::fdo::Error::Failed(format!("xvfb argv launch failed: {}", e))
             })?;
-        let _ = ack_result;
 
         // Commit state mirror — session-only, never persisted.
         {
@@ -1506,27 +1504,9 @@ mod tests {
         assert_eq!(s.tick_rate, 15, "tick_rate must be xvfb_rate after set_mode_argv");
     }
 
-    /// [DO-CONFIRM: SDL_VIDEODRIVER=x11 visible to all streamed children]:
-    ///
-    /// Every streamed child (sh -c path AND argv path) must see SDL_VIDEODRIVER=x11.
-    /// This is verified in xvfb.rs unit tests (which can actually spawn processes);
-    /// here we assert that the start_argv and start functions set the env var
-    /// unconditionally — indirectly, by checking the xvfb.rs tests pass AND by
-    /// verifying the constant is present in the source.
-    ///
-    /// The real executable test is in service::xvfb::tests::sdl_env_set_for_argv_child
-    /// and service::xvfb::tests::sdl_env_set_for_sh_child.
-    #[test]
-    fn sdl_env_doc_both_paths_inject_sdl_videodriver() {
-        // This test documents the contract: SDL_VIDEODRIVER=x11 must be set
-        // in both start() and start_argv() unconditionally. The actual process-level
-        // check is in xvfb.rs integration tests (which require Xvfb installed).
-        // This test passes as long as the xvfb.rs tests pass.
-        //
-        // Intentionally a no-op here — the real enforcement is in xvfb.rs tests.
-        // We name it explicitly so code reviewers know which tests cover this contract.
-        let _ = "SDL_VIDEODRIVER"; // documents the constant being tested elsewhere
-    }
+    // SDL_VIDEODRIVER=x11 injection is verified by process-spawning tests in
+    // service::xvfb::tests::{start_argv_sdl_videodriver_set_unconditionally,
+    // start_sh_sdl_videodriver_set_unconditionally} — no stub needed here.
 }
 
 /// Register and start the D-Bus service on the session bus.
