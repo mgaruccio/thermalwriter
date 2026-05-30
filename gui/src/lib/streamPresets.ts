@@ -150,6 +150,9 @@ export function buildArgv(
   const execPath = resolved[preset.binary] ?? null;
   if (preset.binary !== "" && !execPath) return null; // binary not found
 
+  // Guard: custom preset requires a non-empty path before we can build argv.
+  if (preset.id === "custom" && !fieldValues["custom_path"]) return null;
+
   let argv = preset.argv.map((tok) => {
     if (tok === "{executable}") return execPath ?? tok;
     if (tok === "{config_path}") return fieldValues["config_path"] ?? tok;

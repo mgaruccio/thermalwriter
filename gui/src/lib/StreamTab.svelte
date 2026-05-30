@@ -21,8 +21,14 @@
     selectedLayout: string;
     /** Callback to notify App.svelte that the daemon state may have changed. */
     onDaemonStateChange?: () => void;
+    /**
+     * Whether the Stream tab is currently visible to the user.
+     * Poll ticks are skipped (but the interval keeps running) when false,
+     * saving decode + draw work on a hidden panel without pausing the stream.
+     */
+    tabVisible?: boolean;
   };
-  let { selectedLayout, onDaemonStateChange }: Props = $props();
+  let { selectedLayout, onDaemonStateChange, tabVisible = true }: Props = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -71,13 +77,19 @@
       TERMINAL_BINARIES.some((t) => !!resolved[t]),
   );
 
+  // Custom preset requires a non-empty path before Start is enabled.
+  const customPathReady = $derived(
+    preset.id !== "custom" || !!fieldValues["custom_path"],
+  );
+
   // Start is available when everything required is resolved.
   const canStart = $derived(
     !streaming &&
       !starting &&
       xvfbResolved &&
       presetBinaryResolved &&
-      terminalResolved,
+      terminalResolved &&
+      customPathReady,
   );
 
   // Hint explaining why Start is greyed out.
@@ -90,7 +102,9 @@
           ? `${preset.binary} not found — install it to use this preset`
           : !terminalResolved
             ? "No terminal emulator found (alacritty / kitty / xterm)"
-            : "",
+            : !customPathReady
+              ? "Enter or browse for the executable path"
+              : "",
   );
 
   // Resolved terminal path (first found, in preference order).
@@ -168,6 +182,9 @@
 
   async function pollFrame() {
     if (pollInFlight) return; // don't stack if a tick takes >333ms
+    // Skip decode + draw when the tab is hidden — saves CPU on a 1%-CPU device.
+    // The interval keeps ticking so the stream resumes instantly on tab-show.
+    if (!tabVisible) return;
     pollInFlight = true;
     try {
       const bytes = await invoke<ArrayBuffer>("read_frame");

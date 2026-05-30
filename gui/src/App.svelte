@@ -486,6 +486,7 @@
           <StreamTab
             {selectedLayout}
             onDaemonStateChange={probeDaemon}
+            tabVisible={activeTab === "stream"}
           />
         </div>
       </div>
