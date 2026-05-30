@@ -71,6 +71,10 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&background_dir)?;
     builtin_layouts::seed_background_dir(&background_dir)?;
 
+    // Seed built-in Xvfb wrapper configs (conky + cava) on first run
+    let wrapper_dir = config_dir.join("wrappers");
+    builtin_layouts::seed_wrapper_dir(&wrapper_dir)?;
+
     // Decode the configured background image at startup (if set)
     let initial_background: Option<tiny_skia::Pixmap> =
         if let Some(ref image_name) = config.background.image {
