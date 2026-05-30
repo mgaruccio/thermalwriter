@@ -380,6 +380,24 @@ pub fn save_default_layout_impl(
     Ok(())
 }
 
+/// Restore the display tick rate after leaving xvfb streaming mode.
+///
+/// If `state.pre_stream_tick_rate` is `Some`, takes the value, sets
+/// `state.tick_rate`, and pushes it to `tick_rate_tx` so the tick loop
+/// slows back down to the display rate immediately. No-op if we were not
+/// streaming (`pre_stream_tick_rate` is `None`).
+///
+/// Called from every exit path that can leave xvfb mode: `set_layout` and
+/// the svg/html arm of `set_mode`. Centralised here to avoid duplicated
+/// take()/set/send across multiple call sites.
+fn restore_from_streaming(state: &mut ServiceState) {
+    if let Some(restore_rate) = state.pre_stream_tick_rate.take() {
+        state.tick_rate = restore_rate;
+        let _ = state.tick_rate_tx.send(restore_rate);
+        info!("tick_rate restored to {} FPS (leaving streaming mode)", restore_rate);
+    }
+}
+
 #[interface(name = "com.thermalwriter.Display")]
 impl DisplayInterface {
     /// Switch the active layout. Returns an error if the layout file doesn't exist
@@ -421,14 +439,8 @@ impl DisplayInterface {
         }
         .to_string();
 
-        // If we were streaming (xvfb mode), restore the pre-stream tick rate so
-        // the tick loop slows back down to the display rate. Without this, the
-        // tick loop stays at the streaming FPS (e.g. 15) after `ctl layout ...`.
-        if let Some(restore_rate) = state.pre_stream_tick_rate.take() {
-            state.tick_rate = restore_rate;
-            let _ = state.tick_rate_tx.send(restore_rate);
-            info!("set_layout: tick_rate restored to {} FPS (was streaming)", restore_rate);
-        }
+        // Restore tick rate if we were streaming — see restore_from_streaming.
+        restore_from_streaming(&mut state);
 
         Self::layout_changed(&emitter, &name).await?;
         Ok(format!("Layout set to: {}", name))
@@ -544,16 +556,11 @@ impl DisplayInterface {
                     // session-only and must never be persisted as the boot default.
                 }
                 _ => {
-                    // Returning to layout mode: restore the pre-stream tick rate.
-                    // Use the saved value if we were streaming, otherwise keep current.
-                    let restore_rate = state.pre_stream_tick_rate.take().unwrap_or(current_tick_rate);
+                    // Returning to layout mode — restore tick rate + clear streaming
+                    // state. restore_from_streaming is a no-op if we weren't streaming.
                     state.active_layout = command.clone();
-                    state.tick_rate = restore_rate;
-                    let _ = state.tick_rate_tx.send(restore_rate);
-                    info!(
-                        "Streaming stopped: tick_rate restored to {} FPS, layout → {}",
-                        restore_rate, command
-                    );
+                    restore_from_streaming(&mut state);
+                    info!("Switched to layout: {}", command);
                 }
             }
         }
@@ -733,29 +740,24 @@ impl DisplayInterface {
     /// Apply variable overrides to `name`: (a) persist to config.toml via
     /// `Config::save_layout_vars`, (b) update the daemon's in-memory Config so
     /// the tick loop sees fresh values without a restart, (c) signal the tick
-    /// loop to reload the layout.
-    ///
-    /// Audit note (xvfb mode): set_layout_vars sends ModeChange::Layout which
-    /// causes the tick-loop listener to drop the xvfb handle and switch to a
-    /// layout renderer, but does NOT update state.mode or restore tick_rate.
-    /// Calling set_layout_vars while streaming is an edge-case misuse (the GUI
-    /// should call set_layout or set_mode first); the pre_stream_tick_rate will
-    /// be left set and tick_rate will remain at the streaming FPS until the next
-    /// explicit set_layout or set_mode("svg"/"html") call. This is acceptable:
-    /// set_layout_vars is a var-tweak, not a mode-exit method.
+    /// loop to reload the layout — UNLESS the daemon is currently streaming
+    /// (mode=xvfb), in which case only (a) and (b) are performed and the live
+    /// stream is left undisturbed. The persisted vars take effect when the user
+    /// next exits streaming via `set_layout` or `set_mode`.
     async fn set_layout_vars(
         &self,
         name: String,
         vars: HashMap<String, String>,
     ) -> zbus::fdo::Result<()> {
         // Clone handles out of the state lock, then release it before disk I/O.
-        let (write_lock, layout_dir, config_path, tx) = {
+        let (write_lock, layout_dir, config_path, tx, is_streaming) = {
             let state = self.state.lock().await;
             (
                 state.config_write_lock.clone(),
                 state.layout_dir.clone(),
                 state.config_path.clone(),
                 state.mode_change_tx.clone(),
+                state.mode == "xvfb",
             )
         };
 
@@ -778,6 +780,14 @@ impl DisplayInterface {
                 .cloned()
                 .unwrap_or_default()
         };
+
+        // While streaming, skip the ModeChange::Layout send — sending it would
+        // cause the tick-loop listener to drop the xvfb handle and switch to a
+        // layout renderer, silently killing the stream. The persisted vars and
+        // in-memory mirror are already up-to-date for when the user exits streaming.
+        if is_streaming {
+            return Ok(());
+        }
 
         // Channel send outside the lock — avoids holding Mutex across .await.
         // Throwaway ack: set_layout_vars has already serialized the disk write
@@ -1567,12 +1577,9 @@ mod tests {
             let (tick_rate_tx, tick_rate_rx) = tokio::sync::watch::channel::<u32>(15);
             s.tick_rate_tx = tick_rate_tx;
 
-            // This is the fix: when leaving xvfb, take() pre_stream_tick_rate and
-            // push it into tick_rate_tx. We test this contract directly here so the
-            // assertion fails before the fix is applied.
-            let restore_rate = s.pre_stream_tick_rate.take().unwrap_or(s.tick_rate);
-            s.tick_rate = restore_rate;
-            let _ = s.tick_rate_tx.send(restore_rate);
+            // Test the shared helper directly — restore_from_streaming must take
+            // pre_stream_tick_rate, update tick_rate, and push to tick_rate_tx.
+            restore_from_streaming(&mut s);
 
             assert_eq!(
                 s.tick_rate, 2,
@@ -1616,13 +1623,10 @@ mod tests {
             assert_eq!(s.pre_stream_tick_rate, Some(2), "sanity: pre_stream saved");
         }
 
-        // Simulate the fixed set_layout state-commit path (without a real emitter):
-        // take pre_stream_tick_rate, restore tick_rate, push to tx.
+        // Simulate the fixed set_layout state-commit path via the shared helper.
         {
             let mut s = state.lock().await;
-            let restore_rate = s.pre_stream_tick_rate.take().unwrap_or(s.tick_rate);
-            s.tick_rate = restore_rate;
-            let _ = s.tick_rate_tx.send(restore_rate);
+            restore_from_streaming(&mut s);
             s.mode = "svg".to_string();
         }
 
@@ -1630,6 +1634,68 @@ mod tests {
         assert_eq!(s.tick_rate, 2, "tick_rate must be 2 after layout switch");
         assert!(s.pre_stream_tick_rate.is_none(), "pre_stream_tick_rate must be None");
         assert_eq!(s.mode, "svg", "mode must be svg after layout switch");
+    }
+
+    /// [Task 12 follow-up]: set_layout_vars while streaming must persist vars and
+    /// update the in-memory mirror but NOT send ModeChange::Layout — doing so would
+    /// silently kill the stream. Asserts the mode_change channel receives nothing
+    /// and state.mode stays "xvfb".
+    #[tokio::test]
+    async fn set_layout_vars_while_streaming_skips_channel_send() {
+        let (state, dir) = make_test_state(15, 2).await;
+
+        // Seed state as streaming.
+        {
+            let mut s = state.lock().await;
+            s.mode = "xvfb".to_string();
+            s.tick_rate = 15;
+            s.pre_stream_tick_rate = Some(2);
+        }
+
+        // Intercept the mode_change channel: replace the sender with one whose
+        // receiver we own, so we can assert nothing was sent.
+        let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+        {
+            let mut s = state.lock().await;
+            s.mode_change_tx = spy_tx;
+        }
+
+        let iface = DisplayInterface::new(state.clone());
+        let layout_name = "test.svg"; // seeded in make_test_state
+        let vars: HashMap<String, String> =
+            [("accent_color".to_string(), "#ff0000".to_string())].into();
+
+        iface
+            .set_layout_vars(layout_name.to_string(), vars.clone())
+            .await
+            .expect("set_layout_vars must succeed while streaming");
+
+        // The channel must have received nothing — stream must not be disturbed.
+        assert!(
+            spy_rx.try_recv().is_err(),
+            "set_layout_vars must NOT send ModeChange::Layout while streaming"
+        );
+
+        // The in-memory mirror must have been updated.
+        {
+            let s = state.lock().await;
+            assert_eq!(
+                s.config.layout_vars.get(layout_name),
+                Some(&vars),
+                "in-memory layout_vars must be updated even while streaming"
+            );
+            // Mode and tick_rate must be untouched.
+            assert_eq!(s.mode, "xvfb", "mode must still be xvfb after set_layout_vars");
+            assert_eq!(s.tick_rate, 15, "tick_rate must still be 15 after set_layout_vars");
+        }
+
+        // The vars must also be on disk.
+        let config_path = dir.path().join("config.toml");
+        let written = std::fs::read_to_string(&config_path).unwrap_or_default();
+        assert!(
+            written.contains("accent_color"),
+            "persisted config must contain the new var: {}", written
+        );
     }
 }
 
