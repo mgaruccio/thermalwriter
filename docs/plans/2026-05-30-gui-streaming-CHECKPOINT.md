@@ -1,6 +1,35 @@
 # GUI Streaming + Conky/Cava/btop — Execution Checkpoint
 
-**Updated:** 2026-05-30 · **Status:** Phase 1 COMPLETE & hardware-verified. Phases 2–3 remain.
+**Updated:** 2026-05-30 · **Status:** ✅ ALL PHASES COMPLETE — hardware + live-GUI verified, signed off by Mike, merging to master. Phase 3 GUI Stream tab driven end-to-end (Start conky → live un-rotated preview → Stop). Two killer runtime bugs caught only by launching the app: dialog-config boot panic (`2235989`) + self-referential `$effect` reactivity freeze (`d727801`) — both fixed + reviewed. Visual verification via `npm run tauri:dev` + Tauri MCP is REQUIRED for GUI work; unit tests + review miss runtime/reactivity bugs.
+
+## Phase 2 — DONE (hardware-verified, both reviewers approved every task)
+
+Commits on `feat/gui-streaming` (base `8316c48` → `7b1dd00`):
+| Commit | What |
+|--------|------|
+| `bc6503a` | Task 5: tmpfs last-frame readback ($XDG_RUNTIME_DIR/thermalwriter/last.jpg, block_in_place, xvfb-only via FrameSource::is_streaming(), cleared on exit) |
+| `c4bea3b` | Task 6: session-only mode transition + mode_change_lock + tick-rate push/restore |
+| `7b1f94e` `6b0ad3f` `10638fa` | Task 8b: seed conky-480.conf + cava-480.conf wrapper configs + startup wiring |
+| `94e0744` `3e83efa` | Task 7+11: argv-based preset launch (no shell) + generic set_mode_argv D-Bus method + global SDL_VIDEODRIVER=x11 |
+| `0c0593b` | Task 8: resolve_binaries D-Bus method (daemon PATH, absolute paths) |
+| `f6be082` `9e801aa` `d09bfa4` | review fixes (frame_dump honesty+fsync, Task 6 real-state tests, clippy/no-op cleanup) |
+| `6631a8a` `368ff4e` | **Hardware-found bug:** set_layout didn't restore tick_rate on stream exit; + set_layout_vars-while-streaming guard (option b) + restore_from_streaming helper |
+| `7b1dd00` | **Hardware-found bug:** cava preset used `--config`, must be `-p`; + preset argv regression tests |
+
+**Hardware-verified:** conky streams full-frame (tmpfs frame captured); cava streams audio-reactive bars (test tone); tick-rate push(15)/restore(2) confirmed; clean SIGTERM teardown + last.jpg cleared; dead-child detection refuses mode=xvfb. 58 lib tests green, clippy clean.
+
+**Mike's decisions at the Phase 2 milestone:**
+1. cava bars sparse at 480px → POLISH the cava-480.conf now (Task #14, dev-2) — re-verify on hardware.
+2. tmpfs frame is 180° rotated (post-rotation) → GUI UN-ROTATES it for the live preview (Task #17).
+3. Proceed to Phase 3.
+
+## Phase 3 — IN PROGRESS (GUI Stream tab)
+- Task #14 cava polish (dev-2) → Task #15 Tauri commands apply_stream/stop_stream/read_frame/resolve_binaries + dialog plugin (dev-1, gui/src-tauri) → Task #16 StreamTab + streamPresets.ts registry + tab nav (dev-2, gui/src) → Task #17 live preview polling, GUI un-rotates 180°, structured offline detection (dev-2).
+- Pinned Tauri command contract: apply_stream({argv}), stop_stream({layout}), read_frame()→bytes, resolve_binaries({names})→map.
+- Partition: dev-1 = gui/src-tauri/*; dev-2 = gui/src/* + layouts/wrappers/cava-480.conf.
+
+---
+### (original Phase-1 checkpoint below)
 
 This file lets a fresh session resume the plan execution without re-deriving context.
 
