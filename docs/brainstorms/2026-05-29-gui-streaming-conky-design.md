@@ -13,27 +13,56 @@ topic: gui-streaming-conky
 **Adversarial review:** Completed
 
 ### Key Improvements
-1. **Persistence reversed to session-only** (was: persist + auto-resume). Auto-resuming an
-   arbitrary saved command on boot could brick the LCD to a permanent black screen with no
-   GUI recovery. Streams are now runtime-only; the daemon always boots into the saved layout.
-2. **Frame readback moved off D-Bus onto a tmpfs file.** Polling 50–200 KB JPEGs at 3–5 Hz
-   through the session-bus broker would contend with the control channel the codebase works
-   hard to keep responsive. Now: daemon writes `$XDG_RUNTIME_DIR/thermalwriter/last.jpg`,
-   GUI reads it like it already reads backgrounds.
-3. **Live device-mirror scoped to streaming only.** Layouts keep the local `render_preview`
-   (shows unsaved edits); avoids an edit-vs-applied dual-source-of-truth.
-4. **Robust child-process cleanup** (Gemini CRITICAL). Current `sh -c` children aren't put in
-   their own process group, and conky/kitty fork or daemonize — orphan risk. Launch via
-   `systemd-run --user --scope` (cgroup kills all descendants) or `setsid`+killpg.
-5. **Atomic Xvfb display acquisition** (Gemini MAJOR). Replace the TOCTOU lockfile scan with
-   `Xvfb -displayfd`.
-6. **Structured argv for presets, `sh -c` only for custom commands** (Gemini MAJOR). Prevents
-   file paths with spaces/metacharacters from breaking preset launches.
-7. **Terminal/binary detection must reflect the daemon's systemd PATH**, not the GUI's
-   interactive PATH (the daemon execs the command).
+1. **Persistence reversed to session-only** (was: persist + auto-resume; arch-review C1).
+   Auto-resuming an arbitrary saved command on boot could brick the LCD to a permanent black
+   screen with no GUI recovery. Streams are now runtime-only; the daemon always boots into the
+   saved layout.
+2. **Frame readback moved off D-Bus onto a tmpfs file** (arch-review H2). Polling 50–200 KB
+   JPEGs at 3–5 Hz through the session-bus broker would contend with the control channel.
+   Now: daemon writes `$XDG_RUNTIME_DIR/thermalwriter/last.jpg`, GUI reads it like backgrounds.
+   **Writes wrapped in `block_in_place`** (Gemini MINOR #3) so high-fps VFS I/O doesn't stall
+   the tokio executor — mirrors how the USB send is already handled in `tick.rs`.
+3. **Live device-mirror scoped to streaming only** (arch-review M3). Layouts keep the local
+   `render_preview` (shows unsaved edits); avoids an edit-vs-applied dual-source-of-truth.
+4. **Atomic mode-transition with synchronous confirmation** (Gemini MAJOR #1). Today `set_mode`
+   mutates `state.mode`/tick-rate immediately, but `ModeChange::Xvfb` is handled asynchronously
+   and *fallibly* (`main.rs:325-347`, fails at `:346` with only a `warn!`). A failed Xvfb start
+   leaves the daemon reporting "streaming" while rendering the old layout at the wrong fps. Fix:
+   a oneshot reply channel in the `ModeChange` enum so `set_mode` awaits the listener's success
+   before mutating `ServiceState` + tick rate.
+5. **Defer handle-drop until the replacement source is confirmed** (Gemini MAJOR #2). On
+   stop, `main.rs:252-253` drops `xvfb_handle` (kills Xvfb, deletes fbdir) *before* reading the
+   target layout; if the read fails (`main.rs:312` warns and aborts) the tick loop renders the
+   frozen last Xvfb frame forever (the `XvfbSource` still holds the mmap). Fix: drop the old
+   handle only after the new `FrameSource` is built and sent. Same ordering fix for stream→stream.
+6. **Robust child-process cleanup for forking/daemonizing apps** (corrected from a prior
+   mis-stated finding). Children ARE already spawned in their own process group
+   (`xvfb.rs:153 .process_group(0)`), so `killpg` covers normal subtrees. The residual gap is
+   apps that `setsid`/daemonize and escape the pgid: conky `background yes` (own session),
+   kitty `--single-instance` (hands off to an existing server in another pgid). Mitigate by
+   forcing foreground in seeded configs (conky `background = false`), disabling kitty single-
+   instance (`--single-instance=no`) / preferring alacritty for TUIs, and OPTIONALLY launching
+   the child inside `systemd-run --user --scope` (cgroup teardown) as belt-and-suspenders.
+7. **Atomic Xvfb display acquisition** (Gemini MAJOR-adjacent). Replace the `find_unused_display`
+   TOCTOU lockfile scan (`xvfb.rs:76-84`) with `Xvfb -displayfd <fd>`, which picks a free
+   display atomically and reports it back.
+8. **Structured argv for presets, `sh -c` only for custom commands** (Gemini MINOR #5 +
+   robustness). Build preset commands as an argv vector exec'd directly, and map each terminal
+   to its OWN flag syntax (`alacritty -o font.size=N -e`, `kitty -o font_size=N -e`,
+   `xterm -fa <font> -fs N -e` — xterm rejects `-o`). Prevents config paths with spaces and
+   broken-flag launches.
+9. **cava SDL window must be sized/placed in a WM-less Xvfb** (Gemini MINOR #4). cava's SDL
+   output opens its own undecorated X11 window; with no window manager it may not fill the root,
+   leaving the X stipple visible. Probe whether `sdl_width/sdl_height = 480` + origin (0,0) fills
+   the root; if not, run a tiny WM (`matchbox-window-manager`) or `xdotool`-resize in the launch.
+10. **Terminal/binary detection must reflect the daemon's systemd PATH** (arch-review H3), not
+    the GUI's interactive PATH (the daemon execs the command).
 
 ### Escalations
-- None. All adversarial findings were verified against source and Agreed (no disputes).
+- None. All adversarial findings (architecture-strategist + Gemini) were verified against source
+  and Agreed (no disputes). One prior-draft finding ("children lack their own process group") was
+  found FALSE on verification (`xvfb.rs:153` already sets `.process_group(0)`) and corrected to
+  item 6 above.
 
 ---
 
@@ -98,8 +127,10 @@ later" a single row. C was rejected as over-engineered — wrapper depth was sco
 
 - **Live preview via tmpfs file, STREAMING-ONLY** *(refined — was D-Bus get_last_frame,
   uniform)*. While in xvfb mode, the tick loop writes the latest JPEG to
-  `$XDG_RUNTIME_DIR/thermalwriter/last.jpg` (atomic write + rename). The GUI reads it via a
-  new `read_frame` Tauri command (like `read_background`, `commands.rs:288`) ~3 fps and
+  `$XDG_RUNTIME_DIR/thermalwriter/last.jpg` (atomic write + rename) **wrapped in
+  `tokio::task::block_in_place`** *(Gemini MINOR #3)* so the synchronous VFS write doesn't stall
+  the async executor at high fps — same treatment as the USB send in `tick.rs`. The GUI reads it
+  via a new `read_frame` Tauri command (like `read_background`, `commands.rs:288`) ~3 fps and
   paints the canvas. Image bytes never touch the D-Bus control channel. **On exit from xvfb
   mode the daemon truncates/removes `last.jpg`**, and the GUI gates the preview on the live
   `mode` from `get_status` (`dbus.rs:351`) so a stale frame is never shown as live *(Gemini
@@ -132,11 +163,14 @@ later" a single row. C was rejected as over-engineered — wrapper depth was sco
   known `method = pipewire` + `auto` bug that grabs the mic). cava uses its **native SDL
   output** (its own X11 window on llvmpipe software GL), not a terminal. Visualizes whatever
   plays on the default output (incl. bitperfect via the default sink). Exclusive `hw:`
-  bit-perfect playback has no monitor → out of scope. **Audio access caveat** *(Gemini MINOR
-  #6 / arch H4):* the daemon is a systemd user service; it needs the graphical session's
-  `XDG_RUNTIME_DIR`/PipeWire socket. Detect "no audio connection" and surface a helpful
-  message instead of a silent flatline; **probe cava-from-daemon for real before calling this
-  verified** (the earlier probe checked an unrelated app).
+  bit-perfect playback has no monitor → out of scope. **SDL window placement** *(Gemini MINOR
+  #4):* in a WM-less Xvfb the SDL window isn't auto-managed; set `sdl_width = sdl_height = 480`
+  and verify it fills the root at origin (0,0) — if the X stipple shows around it, run a tiny WM
+  (`matchbox-window-manager`) or `xdotool`-resize in the launch. **Audio access caveat** *(arch
+  H4):* the daemon (systemd user service) needs the session's `XDG_RUNTIME_DIR`/PipeWire socket.
+  Detect "no audio connection" and surface a message instead of a silent flatline; **probe
+  cava-from-daemon for real before calling this verified** (the earlier probe checked an
+  unrelated app).
 
 - **Terminal emulator (for TUI apps btop/nvtop)** = preference-ordered detection
   **kitty → alacritty → xterm**, user-overridable (foot excluded: Wayland-only; ghostty
@@ -205,8 +239,10 @@ later" a single row. C was rejected as over-engineered — wrapper depth was sco
 | Daemon's xvfb mode is fully generic and reachable via `set_mode("xvfb", cmd)` | [verified] | Read `dbus.rs:305`, `render/xvfb.rs`, `service/xvfb.rs` (2026-05-29) | confirmed |
 | `set_mode("xvfb")` does NOT persist to config.toml | [verified] | Read `dbus.rs:305-348` vs `dbus.rs:258` (2026-05-29) | confirmed — now moot (session-only) |
 | Tick loop holds the JPEG only as a local binding (no shared buffer) | [verified] | Read `tick.rs:172-178` (2026-05-29) | confirmed — drove tmpfs-write decision |
-| `sh -c` child is spawned WITHOUT its own process group → killpg can miss forked/daemonized children | [verified] | Read `xvfb.rs:36, 93-97` (2026-05-29) | confirmed — drove cgroup/setsid fix |
-| `find_unused_display` scans lockfiles (TOCTOU race) | [verified] | Read `xvfb.rs:65-73` (2026-05-29) | confirmed — drove `-displayfd` fix |
+| `sh -c` child IS spawned in its own process group (`process_group(0)`); killpg covers normal subtrees | [verified] | Read `xvfb.rs:153` (2026-05-29) | confirmed — prior "no process group" finding was FALSE; residual risk is setsid/daemonize escapes only |
+| Listener handles `ModeChange::Xvfb` async + fallibly; `set_mode` mutates state before that resolves | [verified] | Read `main.rs:325-347` + `dbus.rs:340-345` (2026-05-29) | confirmed — drove oneshot-confirm fix (Gemini MAJOR #1) |
+| `ModeChange::Layout` drops xvfb_handle before the fallible layout read | [verified] | Read `main.rs:252-256, 312` (2026-05-29) | confirmed — drove defer-drop fix (Gemini MAJOR #2) |
+| `find_unused_display` scans lockfiles (TOCTOU race) | [verified] | Read `xvfb.rs:76-84` (2026-05-29) | confirmed — drove `-displayfd` fix |
 | kitty & alacritty render in a bare 480×480 Xvfb on llvmpipe | [verified] | Spawned Xvfb :97 480x480x24, launched each (2026-05-29) | confirmed |
 | `source = auto` (method=pulse) resolves to the default sink monitor | [verified] | cava upstream README + `pactl list sources` on dev box (2026-05-29) | confirmed for default-output path |
 | GUI detects offline via string-match `"daemon is not running"` | [verified] | Read `App.svelte:180` (2026-05-29) | confirmed — replace with structured error |
