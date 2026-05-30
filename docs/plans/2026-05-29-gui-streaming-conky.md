@@ -344,3 +344,54 @@ In `set_mode`: build the variant with `let (ack_tx, ack_rx) = oneshot::channel()
 ## Notes
 - Hardware verification is required before claiming streaming works (memories `feedback_hardware_verification`, `feedback_display_review`). Stop the daemon before `render_layout` tests; restart after.
 - Design source: `docs/brainstorms/2026-05-29-gui-streaming-conky-design.md` (refined, adversarially reviewed).
+
+---
+
+## Spike Results (Task 0 — 2026-05-30)
+
+Run against the live daemon (PID 31188) + hardware on the dev box. Daemon restored to `svg/neon-dash-v2.svg` afterward.
+
+### Spike A — Daemon PATH gap (pre-registered: expected MINIMAL systemd PATH)
+- **VIOLATED hypothesis (no escalation).** `systemctl --user show-environment` PATH is NOT minimal — it
+  contains `~/.bun/bin`, `~/.local/bin`, `~/.npm-global/bin`, `~/.cargo/bin`, `/usr/local/{sbin,bin}`,
+  `/usr/bin`, perl dirs. Interactive PATH only adds Claude-plugin/forge tooling dirs (irrelevant to
+  streaming apps). No `~/.config/environment.d` — the rich PATH is inherited into the systemd user
+  manager from login shell.
+- **Binary availability in the daemon's PATH:** Xvfb ✓, cava ✓, conky ✓, btop ✓, kitty ✓, alacritty ✓
+  (all `/usr/bin`). nvtop ✗ (absent everywhere, incl. `~/.local/bin`), xterm ✗, matchbox-window-manager ✗.
+- **Design impact on Task 8:** the PATH *gap* that motivated the daemon-side `resolve` is effectively zero
+  for app binaries (all in `/usr/bin`, present in both envs). Task 8 stays — but justified as **robustness**
+  (return absolute paths → no exec-time re-resolution mismatch), not gap mitigation. No design change.
+
+### Spike B — cava-from-daemon audio (pre-registered: cava client on default-sink monitor)
+- **CONFIRMED.** Daemon's process env has `XDG_RUNTIME_DIR=/run/user/1000`; both `pipewire-0` and
+  `pulse/native` sockets exist there. Launched cava via `thermalwriter ctl mirror "cava -p <sdl.conf>"`;
+  `ctl status` → `mode=xvfb`; the default-sink (Schiit USB DAC) `.monitor` source flipped
+  **SUSPENDED → RUNNING**, and the rendered bars tracked the music. cava reaches the default-output monitor
+  from the daemon's own environment. **No cava-from-daemon escalation needed.**
+- Note: `pactl list source-outputs` did NOT list the cava client (it captures via pipewire-native path),
+  but the monitor `RUNNING` state + responsive bars are definitive.
+
+### Spike C — cava SDL window fill (pre-registered: fills 480×480 at (0,0), no stipple)
+- **CONFIRMED, with a required env fix.** With `sdl_width=sdl_height=480` the SDL window fills the WM-less
+  Xvfb root at origin (0,0) over the opaque `#1a1b26` bg — **no X stipple, no window manager needed**
+  (matchbox NOT required). Verified by screenshotting `DISPLAY=:99 import -window root`: clean
+  cyan→magenta bars, full 480×480.
+- **NEW design input (Task 6 / 8b):** cava's SDL output **crashes with `double free or corruption`** when
+  SDL auto-probes the video driver, because the daemon env carries `WAYLAND_DISPLAY=wayland-1` and SDL tries
+  Wayland first. **Fix: force `SDL_VIDEODRIVER=x11`** in the cava launch (or unset WAYLAND_DISPLAY for the
+  child). With it set, cava ran stable for the full test with no errors. The seeded launch must set this env.
+- **Config gotcha:** `bars = N` aborts cava at startup if N exceeds what fits the width
+  (`window is too narrow for number of bars set, maximum is 22` at 480px default bar width). Seeded
+  cava config should use `bars = 0` (auto) or `bars ≤ 22`.
+
+### Bonus finding — self-exiting child leaves a zombie
+- When the streamed child exits on its own (cava died on the bars-config error), the daemon left a
+  `<defunct>` cava (ppid = daemon) until the next mode transition reaped it via `XvfbHandle` Drop. Not
+  blocking (Drop reaps on transition), but relevant to the process-cleanup posture (design item 6) — worth a
+  note in Task 2/3 review: a child that self-exits is not waited on until the next `set_mode`.
+
+### Probed-assumption table updates
+- `Daemon (systemd user service) can reach PipeWire for cava` → **[verified]** (Spike B).
+- `Daemon's systemd PATH differs from GUI's interactive PATH` → **[verified, but immaterial]** — differs only
+  in dev-tooling dirs; all app binaries resolve in both (Spike A).
