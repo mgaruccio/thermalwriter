@@ -74,17 +74,22 @@ impl Drop for XvfbHandle {
     }
 }
 
-/// Start Xvfb and a child application, returning a handle that owns both processes.
+/// Display numbers below this base are reserved for real desktop X servers
+/// (Xorg, Xwayland). We start scanning from here to avoid collisions.
+const DISPLAY_BASE: u32 = 100;
+/// Maximum number of display candidates to try before giving up.
+const DISPLAY_MAX_TRIES: u32 = 20;
+
+/// Try to start Xvfb on a specific display number using `-displayfd`.
 ///
-/// Display allocation is atomic: Xvfb is invoked with `-displayfd` so it picks
-/// and locks a free display number itself, then writes that number to the pipe.
-/// This eliminates the TOCTOU race of the old lockfile-scan approach.
-///
-/// `command` is executed via `sh -c` inside the virtual display (e.g., "conky -c foo.conf").
-/// `width` and `height` set the virtual screen dimensions.
-pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
-    // Create a pipe: Xvfb writes the chosen display number to the write end,
-    // we read it from the read end.
+/// Returns `Ok(Some((process, display_num)))` if Xvfb bound that display,
+/// `Ok(None)` if the display was already taken (Xvfb exited with empty pipe),
+/// or `Err` if spawning itself failed.
+fn try_start_xvfb_on(
+    display_num: u32,
+    fbdir: &Path,
+    screen_spec: &str,
+) -> Result<Option<(Child, u32)>> {
     let (pipe_read_fd, pipe_write_fd) = {
         let mut fds = [0i32; 2];
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
@@ -97,37 +102,24 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         (fds[0], fds[1])
     };
 
-    // Use a temporary fbdir with a placeholder name; we rename it after
-    // learning the display number from -displayfd. Use the pipe write-fd as a
-    // unique suffix so concurrent calls in the same process don't collide.
-    let tmp_fbdir = std::env::temp_dir().join(format!(
-        "thermalwriter-xvfb-tmp-{}-{}",
-        std::process::id(),
-        pipe_write_fd
-    ));
-    std::fs::create_dir_all(&tmp_fbdir)
-        .with_context(|| format!("Failed to create tmp fbdir: {}", tmp_fbdir.display()))?;
-
-    let screen_spec = format!("{}x{}x24", width, height);
-
-    // Spawn Xvfb. It inherits the write end of the pipe via -displayfd, writes
-    // the chosen display number (as a decimal string + newline), then closes it.
-    // We close the write end in this process after spawn so our read() sees EOF.
+    // Pass an explicit display number as the starting candidate. When the
+    // display is free Xvfb binds it and writes the number to the pipe. When
+    // it is taken Xvfb exits with code 1 and writes nothing (empty pipe →
+    // clean signal to try the next candidate).
     let xvfb_process = unsafe {
         Command::new("Xvfb")
+            .arg(format!(":{}", display_num))
             .arg("-displayfd")
             .arg(pipe_write_fd.to_string())
-            .args(["-screen", "0", &screen_spec])
-            .args(["-fbdir", &tmp_fbdir.to_string_lossy()])
+            .args(["-screen", "0", screen_spec])
+            .args(["-fbdir", &fbdir.to_string_lossy()])
             .args(["-ac", "-nolisten", "tcp"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
-            // SAFETY: pre_exec runs in the child between fork and exec.
-            // We must NOT close pipe_write_fd here — Xvfb needs it.
-            // The read end is not inherited (it stays open in the parent only).
             .pre_exec(move || {
-                // Close the read end in the child so it doesn't linger.
+                // SAFETY: close the read end in the child so it doesn't
+                // linger. The write end must stay open for Xvfb to use.
                 libc::close(pipe_read_fd);
                 Ok(())
             })
@@ -135,37 +127,100 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
             .context("Failed to spawn Xvfb — is Xvfb installed?")?
     };
 
-    // Close the write end in the parent — once Xvfb writes and closes its copy,
-    // our read will see EOF instead of hanging forever.
+    // Close the write end in the parent so our read sees EOF when Xvfb
+    // closes its copy (either after writing the number, or on exit).
     unsafe { libc::close(pipe_write_fd) };
 
-    // Read the display number from the pipe. Xvfb writes "<N>\n".
-    // Wrap the fd in a File for safe buffered reading; the fd is owned here.
     let mut pipe_reader = unsafe { std::fs::File::from_raw_fd(pipe_read_fd) };
     let mut buf = String::new();
     pipe_reader
         .read_to_string(&mut buf)
-        .context("Failed to read display number from Xvfb -displayfd pipe")?;
-    drop(pipe_reader); // fd is now closed
+        .context("Failed to read from Xvfb -displayfd pipe")?;
+    drop(pipe_reader);
 
-    let display_num: u32 = buf
+    if buf.trim().is_empty() {
+        // Xvfb exited without writing — display was taken. Reap it.
+        let mut proc = xvfb_process;
+        let _ = proc.wait();
+        return Ok(None);
+    }
+
+    let reported: u32 = buf
         .trim()
         .parse()
         .with_context(|| format!("Xvfb -displayfd returned non-numeric output: {:?}", buf))?;
 
-    let display = format!(":{}", display_num);
+    Ok(Some((xvfb_process, reported)))
+}
 
-    // Rename the fbdir to include the actual display number.
-    let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", display_num));
-    // If a stale fbdir exists from a previous run, remove it first.
-    let _ = std::fs::remove_dir_all(&fbdir);
-    std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
-        format!(
-            "Failed to rename fbdir {} → {}",
-            tmp_fbdir.display(),
-            fbdir.display()
+/// Start Xvfb and a child application, returning a handle that owns both processes.
+///
+/// Display allocation uses `-displayfd` with an explicit high-base starting
+/// candidate (`:100`+) to avoid colliding with real desktop X servers (Xorg,
+/// Xwayland) which occupy low-numbered displays. If the candidate is taken,
+/// Xvfb exits cleanly and we retry with the next number, up to
+/// `DISPLAY_MAX_TRIES` attempts.
+///
+/// `command` is executed via `sh -c` inside the virtual display (e.g.,
+/// "conky -c foo.conf"). `width` and `height` set the virtual screen
+/// dimensions.
+pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
+    let screen_spec = format!("{}x{}x24", width, height);
+
+    // Scan for a free display starting from DISPLAY_BASE. Each attempt uses a
+    // unique tmp_fbdir (candidate number as suffix) so concurrent calls in the
+    // same process don't collide.
+    let mut xvfb_process: Option<Child> = None;
+    let mut display_num = 0u32;
+
+    for candidate in DISPLAY_BASE..(DISPLAY_BASE + DISPLAY_MAX_TRIES) {
+        let tmp_fbdir = std::env::temp_dir().join(format!(
+            "thermalwriter-xvfb-tmp-{}-{}",
+            std::process::id(),
+            candidate
+        ));
+        std::fs::create_dir_all(&tmp_fbdir)
+            .with_context(|| format!("Failed to create tmp fbdir: {}", tmp_fbdir.display()))?;
+
+        match try_start_xvfb_on(candidate, &tmp_fbdir, &screen_spec)? {
+            None => {
+                // Display taken — clean up the fbdir and try the next one.
+                let _ = std::fs::remove_dir_all(&tmp_fbdir);
+                info!("Display :{} taken, trying :{}", candidate, candidate + 1);
+                continue;
+            }
+            Some((proc, reported)) => {
+                // Rename the tmp fbdir to the canonical numbered path.
+                let fbdir =
+                    std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
+                // Remove any stale dir from a previous run.
+                let _ = std::fs::remove_dir_all(&fbdir);
+                std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
+                    format!(
+                        "Failed to rename fbdir {} → {}",
+                        tmp_fbdir.display(),
+                        fbdir.display()
+                    )
+                })?;
+                xvfb_process = Some(proc);
+                display_num = reported;
+                break;
+            }
+        }
+    }
+
+    let xvfb_process = xvfb_process.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No free X display found in range :{}–:{} (tried {} candidates)",
+            DISPLAY_BASE,
+            DISPLAY_BASE + DISPLAY_MAX_TRIES - 1,
+            DISPLAY_MAX_TRIES
         )
     })?;
+
+    let display = format!(":{}", display_num);
+    let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", display_num));
+    let screen_file = fbdir.join("Xvfb_screen0");
 
     info!(
         "Spawned Xvfb on display {} (pid {})",
@@ -173,9 +228,8 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         xvfb_process.id()
     );
 
-    let screen_file = fbdir.join("Xvfb_screen0");
-
-    // Build handle now (child_process: None) so Drop fires correctly on any failure below.
+    // Build handle now (child_process: None) so Drop fires correctly on any
+    // failure below.
     let mut handle = XvfbHandle {
         xvfb_process,
         child_process: None,
@@ -231,24 +285,22 @@ mod tests {
         rc == 0
     }
 
-    /// `-displayfd` must allocate a real display: the returned handle has a
-    /// non-zero display_num, the Xvfb process is alive while the handle is
-    /// held, the framebuffer screen file exists, and after Drop both the Xvfb
-    /// process is dead and the fbdir has been removed.
-    ///
-    /// We do NOT assert on /tmp/.X{N}-lock because a real X server on the
-    /// system may hold that file for lower-numbered displays, making the check
-    /// unreliable.
+    /// `-displayfd` with high-base retry must allocate a display in the
+    /// isolated range (>= DISPLAY_BASE), keeping it clear of the live desktop.
+    /// The Xvfb process is alive while the handle is held, the framebuffer
+    /// screen file exists, and after Drop both the Xvfb process is dead and
+    /// the fbdir has been removed.
     #[test]
     #[serial]
     fn displayfd_start_returns_valid_display() {
         let handle = start("true", 480, 480).expect("start must succeed");
 
-        // display_num must be non-zero (Xvfb -displayfd allocates from 1+).
+        // display_num must be in the isolated range — never a low desktop display.
         assert!(
-            handle.display_num() >= 1,
-            "display_num {} is unexpectedly zero",
-            handle.display_num()
+            handle.display_num() >= DISPLAY_BASE,
+            "display_num {} is below DISPLAY_BASE {} — would collide with live desktop",
+            handle.display_num(),
+            DISPLAY_BASE
         );
 
         // Xvfb must be alive (process exists).
@@ -287,9 +339,9 @@ mod tests {
         );
     }
 
-    /// Two sequential `start` calls must allocate distinct display numbers.
-    /// Both Xvfb processes must be alive while their handles are held, and
-    /// both handles must drop cleanly.
+    /// Two sequential `start` calls must allocate distinct display numbers,
+    /// both in the isolated high-base range. Both Xvfb processes must be alive
+    /// while their handles are held, and both handles must drop cleanly.
     #[test]
     #[serial]
     fn displayfd_two_sequential_starts_get_distinct_displays() {
@@ -299,9 +351,23 @@ mod tests {
         let n1 = h1.display_num();
         let n2 = h2.display_num();
 
+        // Both must be in the isolated range.
+        assert!(
+            n1 >= DISPLAY_BASE,
+            "first display :{} is below DISPLAY_BASE {}",
+            n1,
+            DISPLAY_BASE
+        );
+        assert!(
+            n2 >= DISPLAY_BASE,
+            "second display :{} is below DISPLAY_BASE {}",
+            n2,
+            DISPLAY_BASE
+        );
+
         assert_ne!(
             n1, n2,
-            "both start() calls returned display :{} — -displayfd must allocate unique displays",
+            "both start() calls returned display :{} — retry-on-collision must allocate unique displays",
             n1
         );
 
