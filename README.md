@@ -10,8 +10,8 @@ Current status: `v0.1.0`, hardware-verified on the Thermalright Peerless Vision 
 - SVG layout renderer with Tera variables and built-in 480x480 layouts.
 - Sensor providers for hwmon, sysinfo, AMDGPU, NVIDIA, MangoHud, and Intel RAPL.
 - Global background image support for PNG/JPEG assets.
-- Xvfb mirror mode for rendering an X11 application onto the LCD.
-- Optional Tauri/Svelte configuration GUI under `gui/`.
+- Xvfb capture mode for streaming any X11 application onto the LCD, with built-in presets for conky, cava, and btop (session-only; never persisted as a boot default).
+- Optional Tauri/Svelte configuration GUI under `gui/`, including a Stream tab with a live preview.
 - No hardware required for layout previews and most tests.
 
 ## Requirements
@@ -67,7 +67,7 @@ thermalwriter ctl sensors
 thermalwriter ctl mirror "conky -c ~/.config/conky/lcd.conf"
 ```
 
-Config lives at `~/.config/thermalwriter/config.toml`. Built-in layouts are seeded into `~/.config/thermalwriter/layouts/`, and backgrounds are seeded into `~/.config/thermalwriter/backgrounds/`. Existing user files are not overwritten.
+Config lives at `~/.config/thermalwriter/config.toml`. Built-in layouts are seeded into `~/.config/thermalwriter/layouts/`, backgrounds into `~/.config/thermalwriter/backgrounds/`, and streaming wrapper configs (conky/cava) into `~/.config/thermalwriter/wrappers/`. Existing user files are not overwritten.
 
 ## Preview Without Hardware
 
