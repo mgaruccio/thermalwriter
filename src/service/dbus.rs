@@ -286,6 +286,56 @@ pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
     out
 }
 
+/// Resolve a single binary name to its absolute path using the daemon's own
+/// `PATH` environment variable. Returns `Some(path)` if found and executable,
+/// `None` if not found or not executable.
+///
+/// Uses the daemon process's inherited PATH — not a hardcoded list — so the
+/// result matches exactly what `Command::new(name)` would exec at runtime.
+/// Returns an absolute path so the GUI can bake it into a preset argv and
+/// avoid exec-time re-resolution mismatches (e.g. if PATH changes between
+/// the resolve call and the actual spawn).
+pub fn resolve_binary(name: &str) -> Option<String> {
+    // Reject names that already contain a path separator — those are not
+    // simple binary names and should not be resolved via PATH.
+    if name.contains('/') {
+        return None;
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        // is_file() returns false for directories and non-existent paths.
+        // We also check execute permission via libc access(X_OK).
+        if candidate.is_file() {
+            let c_path = match std::ffi::CString::new(candidate.as_os_str().as_encoded_bytes()) {
+                Ok(s) => s,
+                Err(_) => continue, // path contains null bytes — skip
+            };
+            // SAFETY: access(2) is async-signal-safe and has no preconditions.
+            let rc = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) };
+            if rc == 0 {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a slice of binary names to absolute paths using the daemon's PATH.
+///
+/// Returns a map of `name -> absolute_path`. If a binary is not found on PATH,
+/// its value is an empty string so the GUI can detect absence without a
+/// separate error channel.
+pub fn resolve_binaries_impl(names: &[String]) -> HashMap<String, String> {
+    names
+        .iter()
+        .map(|name| {
+            let path = resolve_binary(name).unwrap_or_default();
+            (name.clone(), path)
+        })
+        .collect()
+}
+
 /// Read the layout file under `layout_dir` (validated against traversal) and
 /// return its declared variables as a list of dicts with keys `name`, `type`,
 /// `default`, `help`. Empty list if the layout declares no vars.
@@ -839,6 +889,20 @@ impl DisplayInterface {
         list_backgrounds_impl(&state.background_dir)
     }
 
+    /// Resolve binary names to their absolute paths using the daemon's PATH.
+    ///
+    /// Returns a map of `name -> absolute_path`. Missing binaries map to an
+    /// empty string so the GUI can detect absence without a separate error
+    /// channel. Uses the daemon process's inherited PATH — not a hardcoded
+    /// list — so the result matches what `Command::new(name)` would resolve.
+    ///
+    /// The GUI uses this to: (a) detect which preset binaries are installed
+    /// before offering them as options, (b) bake absolute paths into preset
+    /// argv so spawn-time PATH changes don't cause mismatches.
+    async fn resolve_binaries(&self, names: Vec<String>) -> HashMap<String, String> {
+        resolve_binaries_impl(&names)
+    }
+
     /// Signal the daemon to shut down cleanly.
     async fn stop(&self) {
         let state = self.state.lock().await;
@@ -1256,6 +1320,127 @@ mod tests {
 
         let result = ack_rx.await.expect("ack sender must not be dropped");
         assert!(result.is_err(), "listener replied Err for missing layout");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 8 tests: resolve_binaries / resolve_binary
+    // ---------------------------------------------------------------------------
+
+    /// [DO-CONFIRM checklist items 1 + 2 + 3]:
+    ///
+    /// resolve_binary("sh") must return Some with an absolute path — "sh" is
+    /// always available on any POSIX system. The path must be absolute.
+    ///
+    /// resolve_binary("thermalwriter-no-such-binary-xyz") must return None —
+    /// that name cannot appear on any normal PATH.
+    #[test]
+    fn resolve_binary_known_returns_absolute_path() {
+        let path = resolve_binary("sh").expect("sh must be found on PATH");
+        assert!(
+            path.starts_with('/'),
+            "resolve_binary must return an absolute path, got: {:?}",
+            path,
+        );
+        // Must be an actual file (not a directory or non-existent path).
+        assert!(
+            std::path::Path::new(&path).is_file(),
+            "resolved path must be a real file: {:?}",
+            path,
+        );
+    }
+
+    #[test]
+    fn resolve_binary_unknown_returns_none() {
+        let result = resolve_binary("thermalwriter-no-such-binary-xyz");
+        assert!(
+            result.is_none(),
+            "resolve_binary must return None for an unknown binary, got: {:?}",
+            result,
+        );
+    }
+
+    /// [DO-CONFIRM checklist item 1]: resolve_binaries_impl maps known → path,
+    /// unknown → empty string, and returns all requested names as keys.
+    #[test]
+    fn resolve_binaries_impl_known_empty_and_missing() {
+        let names = vec![
+            "sh".to_string(),
+            "thermalwriter-no-such-binary-xyz".to_string(),
+        ];
+        let result = resolve_binaries_impl(&names);
+
+        // Both names must appear as keys.
+        assert!(result.contains_key("sh"), "sh must be a key in the result");
+        assert!(
+            result.contains_key("thermalwriter-no-such-binary-xyz"),
+            "unknown binary must still appear as a key with empty value"
+        );
+
+        // Known binary → non-empty absolute path.
+        let sh_path = &result["sh"];
+        assert!(
+            !sh_path.is_empty(),
+            "sh must resolve to a non-empty path"
+        );
+        assert!(
+            sh_path.starts_with('/'),
+            "sh path must be absolute, got: {:?}",
+            sh_path,
+        );
+
+        // Unknown binary → empty string.
+        let missing = &result["thermalwriter-no-such-binary-xyz"];
+        assert!(
+            missing.is_empty(),
+            "unknown binary must resolve to empty string, got: {:?}",
+            missing,
+        );
+    }
+
+    /// [DO-CONFIRM checklist item 2]: resolve_binary uses the process's inherited
+    /// PATH — it must find binaries that are actually on PATH, not a hardcoded list.
+    /// We verify by setting PATH to a temp dir containing a sentinel binary and
+    /// confirming resolve_binary finds it, then restore PATH.
+    ///
+    /// Uses #[serial] because set_var mutates process-global state.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_binary_uses_process_path_not_hardcoded_list() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let bin_path = dir.path().join("thermalwriter-sentinel-test-bin");
+        // Write an executable file.
+        std::fs::write(&bin_path, "#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms).unwrap();
+
+        // Prepend our temp dir to PATH for this test.
+        // SAFETY: set_var is unsafe in Rust 2024 due to potential data races
+        // with other threads reading env. #[serial] ensures only one env-mutating
+        // test runs at a time in this process.
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = std::ffi::OsString::from(dir.path());
+        new_path.push(":");
+        new_path.push(&original_path);
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let found = resolve_binary("thermalwriter-sentinel-test-bin");
+
+        // Restore PATH before any assertion (so failures don't corrupt env).
+        unsafe { std::env::set_var("PATH", &original_path) };
+
+        assert!(
+            found.is_some(),
+            "resolve_binary must find a binary injected into PATH — it is not using a hardcoded list"
+        );
+        let resolved = found.unwrap();
+        assert!(
+            resolved.starts_with('/'),
+            "resolved path must be absolute: {:?}",
+            resolved,
+        );
     }
 }
 

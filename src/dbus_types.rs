@@ -36,4 +36,8 @@ pub trait Display {
     /// The preset binary is launched without a shell — no word-splitting occurs
     /// on config paths with spaces. The cava preset injects SDL_VIDEODRIVER=x11.
     async fn start_stream_preset(&self, preset: &str) -> zbus::Result<String>;
+    /// Resolve binary names to absolute paths using the daemon's PATH.
+    /// Missing binaries map to an empty string. Returns absolute paths so
+    /// the GUI can bake them into preset argv without exec-time re-resolution.
+    async fn resolve_binaries(&self, names: Vec<String>) -> zbus::Result<HashMap<String, String>>;
 }
