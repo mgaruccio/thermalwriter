@@ -32,6 +32,15 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
     }))
 }
 
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// Number of history samples to inject per metric (60 ≈ 30s at 2FPS).
 const DEFAULT_HISTORY_SAMPLE_COUNT: usize = 60;
 
@@ -114,12 +123,12 @@ impl FrameSource for SvgRenderer<'static> {
         // Step 1: Build Tera context from sensors
         let mut context = tera::Context::new();
         for (key, value) in sensors {
-            context.insert(key, value);
+            context.insert(key, &xml_escape(value));
         }
 
         // Inject variable defaults declared by the layout frontmatter.
         for (key, value) in &self.variable_defaults {
-            context.insert(key, value);
+            context.insert(key, &xml_escape(value));
         }
 
         // Inject theme colors if configured
@@ -129,7 +138,7 @@ impl FrameSource for SvgRenderer<'static> {
 
         // Inject user overrides last so saved GUI choices win.
         for (key, value) in &self.variable_overrides {
-            context.insert(key, value);
+            context.insert(key, &xml_escape(value));
         }
 
         // Inject history arrays if configured

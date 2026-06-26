@@ -33,6 +33,16 @@ Current status: Public Beta (`v0.1.0`).
 - Optional: Node.js for GUI development.
 - Optional: Xvfb for mirror mode.
 
+## Install Daemon From Release Tarball
+
+Download and extract `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, then run:
+
+```sh
+./packaging/install.sh
+```
+
+The release installer copies the bundled `bin/thermalwriter` to `~/.cargo/bin`, installs the user systemd service, installs the restricted RAPL udev rule, and restarts the service.
+
 ## Install Daemon From Source
 
 Clone the repository, then run:
@@ -41,12 +51,7 @@ Clone the repository, then run:
 ./packaging/install.sh
 ```
 
-The installer:
-
-1. Builds and installs `thermalwriter` to `~/.cargo/bin`.
-2. Installs the systemd user service to `~/.config/systemd/user/thermalwriter.service`.
-3. Installs the RAPL udev rule through `thermalwriter setup-udev`, prompting for sudo only for that step.
-4. Enables and restarts the user service.
+In a source checkout, the same installer builds with `cargo install --path . --locked` before installing the service and udev rule.
 
 Manual install:
 
@@ -128,9 +133,9 @@ npm run tauri:dev
 The GUI talks to the daemon over D-Bus and can also render local previews.
 ## RAPL Udev Rule
 
-CPU package power comes from `/sys/class/powercap/intel-rapl:*/energy_uj`. Modern Linux kernels keep that file root-only by default after CVE-2020-8694. The included udev rule changes matching `energy_uj` files to `0444` on powercap add/change events so the user-session daemon can read them.
+CPU package power comes from `/sys/class/powercap/intel-rapl:*/energy_uj`. Modern Linux kernels keep that file root-only by default after CVE-2020-8694. The included udev rule restricts matching `energy_uj` files to `root:thermalreader` with mode `0440` on powercap add/change events.
 
-If you skip the rule, the daemon still runs; CPU power appears unavailable and a warning points to `thermalwriter setup-udev`.
+`thermalwriter setup-udev` creates the `thermalreader` group and adds the sudo-invoking user to it. Log out and back in after installation so the user-session daemon inherits the new group membership. If you skip the rule, the daemon still runs; CPU power appears unavailable and a warning points to `thermalwriter setup-udev`.
 
 ## Development
 

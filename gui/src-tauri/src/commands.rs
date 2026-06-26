@@ -483,15 +483,15 @@ pub async fn stop_stream(layout: String) -> Result<(), AppError> {
 
 /// Read the last JPEG frame written by the daemon's tick loop for the GUI preview.
 ///
-/// Path: `$XDG_RUNTIME_DIR/thermalwriter/last.jpg` (falls back to
-/// `/tmp/thermalwriter/last.jpg` when XDG_RUNTIME_DIR is unset). Returns raw
-/// JPEG bytes; the frontend wraps them in a Blob URL for display.
+/// Path: `$XDG_RUNTIME_DIR/thermalwriter/last.jpg`. There is no `/tmp` fallback:
+/// streamed frames can expose private window contents. Returns raw JPEG bytes;
+/// the frontend wraps them in a Blob URL for display.
 ///
 /// Returns `AppError::NoFrame` — not a panic — if no frame has been written yet
 /// (stream not started, or file was cleared when mode left xvfb).
 #[tauri::command]
 pub fn read_frame() -> Result<Response, AppError> {
-    let dir = frame_dir();
+    let dir = frame_dir()?;
     let bytes = read_frame_impl(&dir)?;
     Ok(Response::new(bytes))
 }
@@ -558,18 +558,20 @@ fn validate_tick_rate(rate: u32) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Return the directory where the daemon writes the last-frame JPEG.
+/// Return the private directory where the daemon writes the last-frame JPEG.
 ///
 /// Mirrors `thermalwriter::service::frame_dump::frame_dir()` — the GUI builds
 /// with `default-features = false` (no `daemon` feature), so the daemon's
 /// `service` module is not available here; the path logic is replicated inline.
-/// Path contract: `$XDG_RUNTIME_DIR/thermalwriter` (fallback `/tmp/thermalwriter`).
-fn frame_dir() -> PathBuf {
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime).join("thermalwriter")
-    } else {
-        PathBuf::from("/tmp/thermalwriter")
-    }
+/// Path contract: `$XDG_RUNTIME_DIR/thermalwriter`; no `/tmp` fallback because
+/// streamed frames can expose private window contents.
+fn frame_dir() -> Result<PathBuf, AppError> {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|e| {
+        AppError::NoFrame(format!(
+            "XDG_RUNTIME_DIR unavailable; refusing to read shared /tmp fallback: {e}"
+        ))
+    })?;
+    Ok(PathBuf::from(runtime).join("thermalwriter"))
 }
 
 /// Core of `read_frame`, factored out so it can be tested without a Tauri runtime.
@@ -952,6 +954,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
     use thermalwriter::render::FrameSource;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480">
 <rect width="480" height="480" fill="#101820"/>
@@ -1479,6 +1482,24 @@ mod tests {
         assert!(
             matches!(err, AppError::NoFrame(_)),
             "missing last.jpg must yield NoFrame, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn frame_dir_rejects_missing_xdg_runtime_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let err = frame_dir().unwrap_err();
+        match original {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        assert!(
+            matches!(err, AppError::NoFrame(_)),
+            "missing XDG_RUNTIME_DIR must yield NoFrame, got: {err:?}"
         );
     }
 

@@ -410,40 +410,61 @@ impl DisplayInterface {
         name: String,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<String> {
-        // Hold the lock through both the channel send and state update — no TOCTOU window.
-        // tokio::sync::Mutex is safe to hold across .await.
-        let mut state = self.state.lock().await;
-        // Path-traversal + existence check.
-        validate_layout_path(&state.layout_dir, &name)?;
-        let vars = state
-            .config
-            .layout_vars
-            .get(&name)
-            .cloned()
-            .unwrap_or_default();
-        // Throwaway ack: set_layout already validates the path (existence check
-        // above) and holds the state lock through the send. The caller doesn't
-        // need to wait for the tick loop to confirm the swap.
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        state
-            .mode_change_tx
-            .send(ModeChange::Layout {
-                name: name.clone(),
-                vars,
-                ack: ack_tx,
-            })
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        state.active_layout = name.clone();
-        state.mode = if name.ends_with(".html") {
-            "html"
-        } else {
-            "svg"
-        }
-        .to_string();
+        let mode_lock = {
+            let state = self.state.lock().await;
+            state.mode_change_lock.clone()
+        };
+        let _mode_guard = mode_lock.lock().await;
 
-        // Restore tick rate if we were streaming — see restore_from_streaming.
-        restore_from_streaming(&mut state);
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<()>>();
+        let (tx, layout_dir_snap, vars) = {
+            let state = self.state.lock().await;
+            (
+                state.mode_change_tx.clone(),
+                state.layout_dir.clone(),
+                state
+                    .config
+                    .layout_vars
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+
+        // Path-traversal + existence check.
+        validate_layout_path(&layout_dir_snap, &name)?;
+        tx.send(ModeChange::Layout {
+            name: name.clone(),
+            vars,
+            ack: ack_tx,
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        // Wait for the listener to prove the new renderer is live before
+        // updating the state mirror or restoring the tick rate from streaming.
+        ack_rx
+            .await
+            .map_err(|_| {
+                zbus::fdo::Error::Failed(
+                    "layout transition listener dropped ack channel without replying".to_string(),
+                )
+            })?
+            .map_err(|e| zbus::fdo::Error::Failed(format!("layout transition failed: {}", e)))?;
+
+        {
+            let mut state = self.state.lock().await;
+            state.active_layout = name.clone();
+            state.mode = if name.ends_with(".html") {
+                "html"
+            } else {
+                "svg"
+            }
+            .to_string();
+
+            // Restore tick rate if we were streaming — see restore_from_streaming.
+            restore_from_streaming(&mut state);
+        }
 
         Self::layout_changed(&emitter, &name).await?;
         Ok(format!("Layout set to: {}", name))
@@ -545,7 +566,9 @@ impl DisplayInterface {
             match mode.as_str() {
                 "xvfb" => {
                     // Save the pre-stream tick rate so we can restore it on stop.
-                    state.pre_stream_tick_rate = Some(current_tick_rate);
+                    if state.pre_stream_tick_rate.is_none() {
+                        state.pre_stream_tick_rate = Some(current_tick_rate);
+                    }
                     // Push the xvfb tick rate into the tick loop immediately.
                     // xvfb streaming needs a higher rate (e.g. 15 FPS) than the
                     // default layout rate (e.g. 2 FPS).
@@ -691,7 +714,9 @@ impl DisplayInterface {
         {
             let mut state = self.state.lock().await;
             state.mode = "xvfb".to_string();
-            state.pre_stream_tick_rate = Some(current_tick_rate);
+            if state.pre_stream_tick_rate.is_none() {
+                state.pre_stream_tick_rate = Some(current_tick_rate);
+            }
             state.tick_rate = xvfb_tick_rate;
             let _ = state.tick_rate_tx.send(xvfb_tick_rate);
             info!(
@@ -1280,6 +1305,45 @@ mod tests {
                 "active_layout must be set after stop"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn restarting_stream_preserves_original_restore_rate() {
+        let display_rate: u32 = 2;
+        let xvfb_rate: u32 = 15;
+        let (state, _dir) = make_test_state(xvfb_rate, display_rate).await;
+        let iface = DisplayInterface::new(state.clone());
+
+        iface
+            .set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .await
+            .expect("first xvfb set_mode must succeed");
+        iface
+            .set_mode_argv(vec!["sleep".to_string(), "99".to_string()])
+            .await
+            .expect("second xvfb set_mode_argv must succeed");
+
+        {
+            let s = state.lock().await;
+            assert_eq!(
+                s.pre_stream_tick_rate,
+                Some(display_rate),
+                "restarting a stream must not overwrite the original layout FPS"
+            );
+            assert_eq!(s.tick_rate, xvfb_rate);
+        }
+
+        iface
+            .set_mode("svg".to_string(), "test.svg".to_string())
+            .await
+            .expect("svg set_mode must succeed");
+
+        let s = state.lock().await;
+        assert_eq!(
+            s.tick_rate, display_rate,
+            "stop after a stream restart must restore the original layout FPS"
+        );
+        assert!(s.pre_stream_tick_rate.is_none());
     }
 
     /// [DO-CONFIRM checklist item 3]: session-only — xvfb mode must NEVER be

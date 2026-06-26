@@ -1,27 +1,26 @@
 // Frame dump: writes the last-rendered xvfb JPEG frame to a tmpfs path for GUI preview.
 //
-// Path contract (shared with GUI Phase 3 Task 9 read_frame command):
+// Path contract (shared with GUI read_frame command):
 //   $XDG_RUNTIME_DIR/thermalwriter/last.jpg
-// Falls back to /tmp/thermalwriter/last.jpg if XDG_RUNTIME_DIR is unset.
+// No /tmp fallback: streamed frames can expose private window contents, so the
+// daemon fails closed if no per-user runtime directory is available.
 //
 // Writes are atomic (fsync + temp file + rename) so the GUI never reads a
 // partial JPEG.  Only the tick loop calls write_frame_atomic in production
 // (single writer), so a single fixed temp name is correct and sufficient.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Return the directory where the last-frame JPEG is written.
+/// Return the private directory where the last-frame JPEG is written.
 ///
-/// Prefers `$XDG_RUNTIME_DIR/thermalwriter`; falls back to `/tmp/thermalwriter`
-/// when the env var is unset.
-pub fn frame_dir() -> PathBuf {
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime).join("thermalwriter")
-    } else {
-        PathBuf::from("/tmp/thermalwriter")
-    }
+/// Requires `$XDG_RUNTIME_DIR`; falling back to `/tmp` would expose streamed
+/// window contents through a shared namespace.
+pub fn frame_dir() -> Result<PathBuf> {
+    let runtime = std::env::var("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR is not set; refusing to dump stream frames to shared /tmp")?;
+    Ok(PathBuf::from(runtime).join("thermalwriter"))
 }
 
 /// The canonical path of the last-frame JPEG.
@@ -41,6 +40,11 @@ pub fn frame_path(dir: &Path) -> PathBuf {
 /// used by `config.rs` save_* helpers.
 pub fn write_frame_atomic(dir: &Path, jpeg_bytes: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
 
     let dest = frame_path(dir);
     let tmp = dir.join("last.jpg.tmp");
@@ -84,12 +88,30 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
         }
-        let dir = frame_dir();
+        let dir = frame_dir().unwrap();
         match original {
             Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
         assert_eq!(dir, PathBuf::from("/run/user/1000/thermalwriter"));
+    }
+
+    #[test]
+    #[serial]
+    fn frame_dir_rejects_missing_xdg_runtime_dir() {
+        let original = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let result = frame_dir();
+        match original {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        assert!(
+            result.is_err(),
+            "frame_dir must fail closed without XDG_RUNTIME_DIR"
+        );
     }
 
     // --- write_frame_atomic ---
@@ -104,6 +126,12 @@ mod tests {
 
         let out = std::fs::read(frame_path(&dir)).unwrap();
         assert_eq!(out, data);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "frame dump directory must be private");
+        }
     }
 
     #[test]

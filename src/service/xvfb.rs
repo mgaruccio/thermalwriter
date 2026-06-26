@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use log::info;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,53 @@ impl XvfbHandle {
     pub fn display_num(&self) -> u32 {
         self.display_num
     }
+}
+
+const XAUTH_FAMILY_WILD: u16 = 0xffff;
+const XAUTH_NAME: &[u8] = b"MIT-MAGIC-COOKIE-1";
+
+fn xauthority_path(fbdir: &Path) -> PathBuf {
+    fbdir.join("Xauthority")
+}
+
+fn push_xauth_field(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn write_xauthority(fbdir: &Path, display_num: u32) -> Result<PathBuf> {
+    let mut cookie = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .context("Failed to open /dev/urandom for Xauthority cookie")?
+        .read_exact(&mut cookie)
+        .context("Failed to read Xauthority cookie")?;
+
+    let display = display_num.to_string();
+    let mut data = Vec::new();
+    data.extend_from_slice(&XAUTH_FAMILY_WILD.to_be_bytes());
+    push_xauth_field(&mut data, b"");
+    push_xauth_field(&mut data, display.as_bytes());
+    push_xauth_field(&mut data, XAUTH_NAME);
+    push_xauth_field(&mut data, &cookie);
+
+    let path = xauthority_path(fbdir);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .with_context(|| format!("Failed to create Xauthority file: {}", path.display()))?;
+    file.write_all(&data)
+        .with_context(|| format!("Failed to write Xauthority file: {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync Xauthority file: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to chmod Xauthority file: {}", path.display()))?;
+    }
+    Ok(path)
 }
 
 /// Send SIGTERM to a process group, then SIGKILL after a short wait if any
@@ -114,6 +161,10 @@ fn try_start_xvfb_on(
     // From this point pipe_write_raw is an unguarded raw fd — it must be
     // closed exactly once, either by the child (via exec) or by us below.
 
+    let xauthority = write_xauthority(fbdir, display_num)?;
+    let fbdir_arg = fbdir.to_string_lossy().into_owned();
+    let xauthority_arg = xauthority.to_string_lossy().into_owned();
+
     // Pass an explicit display number as the starting candidate. When the
     // display is free Xvfb binds it and writes the number to the pipe. When
     // it is taken Xvfb exits with code 1 and writes nothing (empty pipe →
@@ -124,8 +175,9 @@ fn try_start_xvfb_on(
             .arg("-displayfd")
             .arg(pipe_write_raw.to_string())
             .args(["-screen", "0", screen_spec])
-            .args(["-fbdir", &fbdir.to_string_lossy()])
-            .args(["-ac", "-nolisten", "tcp"])
+            .args(["-fbdir", &fbdir_arg])
+            .args(["-auth", &xauthority_arg])
+            .args(["-nolisten", "tcp"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
@@ -278,9 +330,11 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     // WAYLAND_DISPLAY, which causes SDL to auto-probe Wayland and crash for any
     // SDL-based child (e.g. cava). Every streamed child runs inside a Xvfb X11
     // virtual display, so forcing x11 is always correct and harmless for non-SDL apps.
+    let xauthority = xauthority_path(&fbdir);
     let child_process = Command::new("sh")
         .args(["-c", command])
         .env("DISPLAY", &display)
+        .env("XAUTHORITY", &xauthority)
         .env("SDL_VIDEODRIVER", "x11")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -432,11 +486,13 @@ pub fn start_argv(argv: &[String], width: u32, height: u32) -> Result<XvfbHandle
     // no shell word-splitting occurs on spaces within any element.
     //
     // SDL_VIDEODRIVER=x11 is set unconditionally (same rationale as start()).
+    let xauthority = xauthority_path(&fbdir);
     let mut cmd = Command::new(&argv[0]);
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
     cmd.env("DISPLAY", &display)
+        .env("XAUTHORITY", &xauthority)
         .env("SDL_VIDEODRIVER", "x11")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -556,6 +612,17 @@ mod tests {
             handle.screen_file().exists(),
             "screen file must exist for a live start_argv handle"
         );
+        let auth_path = xauthority_path(&handle.fbdir);
+        assert!(
+            auth_path.exists(),
+            "Xauthority file must exist beside the Xvfb fbdir"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "Xauthority file must be private");
+        }
         drop(handle);
     }
 

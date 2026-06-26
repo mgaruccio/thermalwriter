@@ -112,6 +112,27 @@ fn template_renderer_produces_480x480_frame() {
     assert_eq!(pixel[2], 0x2e, "B channel should be 0x2e");
 }
 
+#[test]
+fn svg_renderer_escapes_text_variable_xml_chars() {
+    let template = r##"{# vars:
+label: text = "CPU" "Panel label"
+#}
+<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="40">{{ label }}</text>
+</svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    renderer.set_layout_vars(HashMap::from([(
+        "label".to_string(),
+        "CPU & GPU <hot> \"quoted\" 'ok'".to_string(),
+    )]));
+
+    let frame = renderer
+        .render(&HashMap::new())
+        .expect("XML-special text variables must be escaped before SVG parsing");
+    assert_eq!(frame.data.len(), 480 * 480 * 3);
+}
+
 // Regression tests for the ModeChange::Layout reload path bug:
 // The bug was that the new SvgRenderer was built with ThemePalette::default() and
 // set_history() was never called. Tera is not strict-mode, so undefined variables

@@ -1,9 +1,10 @@
-# thermalwriter — allow non-root processes to read Intel-RAPL energy counters.
+# thermalwriter — allow only the thermalreader group to read Intel-RAPL energy counters.
 #
 # Since CVE-2020-8694 ("Platypus") kernels default /sys/class/powercap/intel-rapl:*/energy_uj
 # to mode 0400 (root-only). thermalwriter runs as a user service and needs this file readable
 # to compute CPU package power. A boot-time tmpfiles.d rule is not sufficient: the kernel
 # regenerates these sysfs attributes on driver reload / PM events, resetting the mode to 0400.
-# A udev RUN+= hook re-applies 0444 on every add|change event for powercap devices.
+# A udev RUN+= hook re-applies root:thermalreader 0440 on every add|change event for powercap
+# devices; `thermalwriter setup-udev` creates the group and adds the invoking user.
 
-SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add|change", RUN+="/bin/chmod 0444 /sys%p/energy_uj"
+SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add|change", RUN+="/bin/sh -c '/bin/chgrp thermalreader /sys%p/energy_uj && /bin/chmod 0440 /sys%p/energy_uj'"

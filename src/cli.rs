@@ -230,9 +230,10 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
 const UDEV_RULE: &str = include_str!("../packaging/udev/99-thermalwriter-rapl.rules");
 const UDEV_RULE_DEST: &str = "/etc/udev/rules.d/99-thermalwriter-rapl.rules";
 const STALE_TRCC_TMPFILE: &str = "/etc/tmpfiles.d/trcc-rapl.conf";
+const RAPL_GROUP: &str = "thermalreader";
 
-/// Install the udev rule that makes `/sys/class/powercap/intel-rapl:*/energy_uj` readable
-/// by non-root processes. Re-execs under sudo when not already root.
+/// Install the udev rule that makes `/sys/class/powercap/intel-rapl:*/energy_uj`
+/// readable only by members of the thermalreader group. Re-execs under sudo when not root.
 pub fn run_setup_udev() -> Result<()> {
     // SAFETY: geteuid() is always safe — it takes no arguments and can't fail.
     let euid = unsafe { libc::geteuid() };
@@ -248,6 +249,33 @@ pub fn run_setup_udev() -> Result<()> {
             anyhow::bail!("sudo thermalwriter setup-udev exited with {status}");
         }
         return Ok(());
+    }
+
+    let group_status = std::process::Command::new("groupadd")
+        .args(["--force", RAPL_GROUP])
+        .status()
+        .context("Failed to invoke `groupadd --force thermalreader`")?;
+    if !group_status.success() {
+        anyhow::bail!("`groupadd --force {RAPL_GROUP}` exited with {group_status}");
+    }
+
+    let sudo_user = std::env::var("SUDO_USER").ok();
+    if let Some(user) = sudo_user
+        .as_deref()
+        .filter(|u| !u.is_empty() && *u != "root")
+    {
+        let usermod_status = std::process::Command::new("usermod")
+            .args(["-aG", RAPL_GROUP, user])
+            .status()
+            .with_context(|| format!("Failed to invoke `usermod -aG {RAPL_GROUP} {user}`"))?;
+        if !usermod_status.success() {
+            anyhow::bail!("`usermod -aG {RAPL_GROUP} {user}` exited with {usermod_status}");
+        }
+        println!(
+            "Added {user} to group {RAPL_GROUP}; log out and back in for membership to apply."
+        );
+    } else {
+        println!("Group {RAPL_GROUP} is ready; add your daemon user to it if needed.");
     }
 
     std::fs::write(UDEV_RULE_DEST, UDEV_RULE)
@@ -275,7 +303,7 @@ pub fn run_setup_udev() -> Result<()> {
         anyhow::bail!("`udevadm trigger --subsystem-match=powercap` exited with {trigger}");
     }
 
-    println!("udev rules reloaded; CPU power sensor should now be readable.");
+    println!("udev rules reloaded; CPU power sensor is readable to group {RAPL_GROUP}.");
     Ok(())
 }
 
@@ -388,9 +416,13 @@ mod tests {
 
     #[test]
     fn udev_rule_content_embedded() {
-        // Sanity-check that include_str! picked up the rule file and it contains our selector.
+        // Sanity-check that include_str! picked up the rule file and restricts RAPL
+        // to the dedicated group instead of making the counter world-readable.
         assert!(UDEV_RULE.contains("SUBSYSTEM==\"powercap\""));
         assert!(UDEV_RULE.contains("energy_uj"));
+        assert!(UDEV_RULE.contains("thermalreader"));
+        assert!(UDEV_RULE.contains("0440"));
+        assert!(!UDEV_RULE.contains("0444"));
     }
 
     #[test]
