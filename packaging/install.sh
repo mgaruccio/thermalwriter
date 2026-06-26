@@ -25,6 +25,36 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "error: systemctl not found — thermalwriter requires systemd user services" >&2
+    exit 1
+fi
+
+if ! command -v install >/dev/null 2>&1; then
+    echo "error: install command not found" >&2
+    exit 1
+fi
+
+if ! command -v sudo >/dev/null 2>&1; then
+    echo "error: sudo not found — setup-udev needs sudo for /etc/udev/rules.d" >&2
+    exit 1
+fi
+
+if ! command -v pkg-config >/dev/null 2>&1; then
+    echo "error: pkg-config not found — install pkg-config or pkgconf before building thermalwriter" >&2
+    exit 1
+fi
+
+if ! pkg-config --exists libudev; then
+    echo "error: libudev development files not found — install libudev-dev on Debian/Ubuntu, systemd-devel on Fedora, or systemd on Arch" >&2
+    exit 1
+fi
+
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "error: systemd user session is not available; run from a logged-in desktop/user session" >&2
+    exit 1
+fi
+
 echo "==> Building and installing thermalwriter binary..."
 ( cd "$PROJECT_DIR" && cargo install --path . --locked )
 

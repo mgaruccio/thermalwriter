@@ -35,10 +35,16 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev build-essential curl wget file
       - name: Install frontend dependencies
         working-directory: gui
         run: npm ci
       - name: Build frontend
         working-directory: gui
         run: npm run build
+      - name: Build Tauri app
+        working-directory: gui
+        env:
+          CI: false
+          NO_STRIP: 1
+        run: npm run tauri:build

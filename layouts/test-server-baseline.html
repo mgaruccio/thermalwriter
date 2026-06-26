@@ -1,0 +1,25 @@
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #0d1117; padding: 16px; gap: 12px;">
+  <div style="display: flex; flex-direction: row; height: 24px;">
+    <span style="height: 18px; font-size: 13px; color: #3fb950;">[ ONLINE ]  HOME SERVER</span>
+  </div>
+  <div style="display: flex; flex-direction: column; height: 158px; background: #161b22; padding: 14px; gap: 4px;">
+    <span style="height: 16px; font-size: 11px; color: #6e7681;">CPU TEMPERATURE</span>
+    <span style="height: 88px; font-size: 64px; color: #e6edf3;">{{ cpu_temp | default(value="--") }}°C</span>
+    <span style="height: 24px; font-size: 18px; color: #58a6ff;">{{ cpu_util | default(value="--") }}% utilization</span>
+  </div>
+  <div style="display: flex; flex-direction: column; height: 158px; background: #161b22; padding: 14px; gap: 4px;">
+    <span style="height: 16px; font-size: 11px; color: #6e7681;">MEMORY</span>
+    <span style="height: 88px; font-size: 64px; color: #e6edf3;">{{ ram_used | default(value="--") }} GB</span>
+    <span style="height: 24px; font-size: 18px; color: #bc8cff;">of {{ ram_total | default(value="--") }} GB total</span>
+  </div>
+  <div style="display: flex; flex-direction: row; height: 72px; gap: 12px;">
+    <div style="display: flex; flex-direction: column; width: 212px; height: 72px; background: #161b22; padding: 12px; gap: 6px;">
+      <span style="height: 12px; font-size: 9px; color: #6e7681;">CPU LOAD</span>
+      <span style="height: 28px; font-size: 24px; color: #58a6ff;">{{ cpu_util | default(value="--") }}%</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 212px; height: 72px; background: #161b22; padding: 12px; gap: 6px;">
+      <span style="height: 12px; font-size: 9px; color: #6e7681;">RAM USED / TOTAL</span>
+      <span style="height: 28px; font-size: 20px; color: #bc8cff;">{{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</span>
+    </div>
+  </div>
+</div>

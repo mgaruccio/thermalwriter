@@ -92,8 +92,7 @@
       if (firstConfigurable) {
         await selectLayout(firstConfigurable.name);
       }
-      // list_sensors silently falls back when daemon is down — probe more
-      // directly so the connection pill reflects reality.
+      // list_sensors can fall back to mock descriptors and get_status is the real D-Bus liveness probe.
       await probeDaemon();
     } catch (e) {
       error = String(e);
@@ -104,10 +103,7 @@
 
   async function probeDaemon() {
     try {
-      // get_active_background just reads config.toml; piggyback the call so
-      // we don't add a roundtrip. Real liveness is set by the apply path,
-      // where set_background returns a definitive answer.
-      await invoke("get_active_background");
+      await invoke("get_status");
       daemonState = "ok";
     } catch {
       daemonState = "down";

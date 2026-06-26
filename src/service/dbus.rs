@@ -394,7 +394,10 @@ fn restore_from_streaming(state: &mut ServiceState) {
     if let Some(restore_rate) = state.pre_stream_tick_rate.take() {
         state.tick_rate = restore_rate;
         let _ = state.tick_rate_tx.send(restore_rate);
-        info!("tick_rate restored to {} FPS (leaving streaming mode)", restore_rate);
+        info!(
+            "tick_rate restored to {} FPS (leaving streaming mode)",
+            restore_rate
+        );
     }
 }
 
@@ -682,9 +685,7 @@ impl DisplayInterface {
                     "mode transition listener dropped ack channel without replying".to_string(),
                 )
             })?
-            .map_err(|e| {
-                zbus::fdo::Error::Failed(format!("xvfb argv launch failed: {}", e))
-            })?;
+            .map_err(|e| zbus::fdo::Error::Failed(format!("xvfb argv launch failed: {}", e)))?;
 
         // Commit state mirror — session-only, never persisted.
         {
@@ -930,9 +931,12 @@ impl DisplayInterface {
         // Signal the tick loop (still inside bg_guard). Throwaway ack — same
         // rationale as set_background: bg_guard already serializes correctness.
         let (ack_tx, _ack_rx) = oneshot::channel();
-        tx.send(ModeChange::Background { image: None, ack: ack_tx })
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
+        tx.send(ModeChange::Background {
+            image: None,
+            ack: ack_tx,
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
 
         // Brief commit lock: update in-memory state mirror.
         {
@@ -1038,6 +1042,21 @@ impl DisplayInterface {
     async fn error(emitter: &SignalEmitter<'_>, message: &str) -> zbus::Result<()>;
 }
 
+/// Register and start the D-Bus service on the session bus.
+///
+/// Returns the active connection (must be kept alive for the service to remain registered).
+pub async fn serve(state: Arc<Mutex<ServiceState>>) -> anyhow::Result<zbus::Connection> {
+    let iface = DisplayInterface::new(state);
+    let connection = zbus::connection::Builder::session()?
+        .name("com.thermalwriter.Service")?
+        .serve_at("/com/thermalwriter/display", iface)?
+        .build()
+        .await?;
+
+    info!("D-Bus service registered: com.thermalwriter.Service at /com/thermalwriter/display");
+    Ok(connection)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,17 +1104,19 @@ mod tests {
             }
         });
 
-        let mut config = Config::default();
-        config.display = DisplayConfig {
-            tick_rate: display_tick_rate,
-            default_layout: "test.svg".to_string(),
-            jpeg_quality: 85,
-            rotation: 180,
-            mode: "svg".to_string(),
-        };
-        config.xvfb = XvfbConfig {
-            command: String::new(),
-            tick_rate: xvfb_tick_rate,
+        let config = Config {
+            display: DisplayConfig {
+                tick_rate: display_tick_rate,
+                default_layout: "test.svg".to_string(),
+                jpeg_quality: 85,
+                rotation: 180,
+                mode: "svg".to_string(),
+            },
+            xvfb: XvfbConfig {
+                command: String::new(),
+                tick_rate: xvfb_tick_rate,
+            },
+            ..Default::default()
         };
 
         let state = Arc::new(tokio::sync::Mutex::new(ServiceState {
@@ -1149,28 +1170,40 @@ mod tests {
         // (restores pre_stream_tick_rate). Without an initial xvfb transition
         // pre_stream_tick_rate is None and the stop path falls back to current_tick_rate.
         // We do this sequentially to establish the initial condition.
-        iface.set_mode("xvfb".to_string(), "sleep 99".to_string())
+        iface
+            .set_mode("xvfb".to_string(), "sleep 99".to_string())
             .await
             .expect("initial xvfb set_mode must succeed");
 
         // Snapshot state before the concurrent race.
         let mode_before = state.lock().await.mode.clone();
-        assert_eq!(mode_before, "xvfb", "sanity: mode must be xvfb after initial set");
+        assert_eq!(
+            mode_before, "xvfb",
+            "sanity: mode must be xvfb after initial set"
+        );
 
         // Now race: one caller switches back to svg, the other re-enters xvfb.
         let iface1 = iface.clone();
         let iface2 = iface.clone();
 
         let svg_task = tokio::spawn(async move {
-            iface1.set_mode("svg".to_string(), "test.svg".to_string()).await
+            iface1
+                .set_mode("svg".to_string(), "test.svg".to_string())
+                .await
         });
         let xvfb_task = tokio::spawn(async move {
-            iface2.set_mode("xvfb".to_string(), "sleep 99".to_string()).await
+            iface2
+                .set_mode("xvfb".to_string(), "sleep 99".to_string())
+                .await
         });
 
         let (svg_result, xvfb_result) = tokio::join!(svg_task, xvfb_task);
-        svg_result.unwrap().expect("svg set_mode must not return Err");
-        xvfb_result.unwrap().expect("xvfb set_mode must not return Err");
+        svg_result
+            .unwrap()
+            .expect("svg set_mode must not return Err");
+        xvfb_result
+            .unwrap()
+            .expect("xvfb set_mode must not return Err");
 
         // Read final state.
         let final_state = state.lock().await;
@@ -1182,10 +1215,13 @@ mod tests {
         // (the svg caller wrote mode, the xvfb caller wrote tick_rate last).
         let valid_pairs = [("xvfb", 15u32), ("svg", 2u32)];
         assert!(
-            valid_pairs.iter().any(|(m, r)| m == final_mode && *r == final_rate),
+            valid_pairs
+                .iter()
+                .any(|(m, r)| m == final_mode && *r == final_rate),
             "concurrent set_mode produced inconsistent state: mode={:?}, tick_rate={} \
              (valid pairs: xvfb/15, svg/2) — mode_change_lock is not serializing the state commit",
-            final_mode, final_rate,
+            final_mode,
+            final_rate,
         );
 
         // When svg won, active_layout must be set.
@@ -1207,12 +1243,16 @@ mod tests {
         let iface = DisplayInterface::new(state.clone());
 
         // Start streaming: tick_rate must change to xvfb_rate.
-        iface.set_mode("xvfb".to_string(), "sleep 99".to_string())
+        iface
+            .set_mode("xvfb".to_string(), "sleep 99".to_string())
             .await
             .expect("xvfb set_mode must succeed");
         {
             let s = state.lock().await;
-            assert_eq!(s.tick_rate, xvfb_rate, "tick_rate must be xvfb_rate after start");
+            assert_eq!(
+                s.tick_rate, xvfb_rate,
+                "tick_rate must be xvfb_rate after start"
+            );
             assert_eq!(
                 s.pre_stream_tick_rate,
                 Some(display_rate),
@@ -1221,7 +1261,8 @@ mod tests {
         }
 
         // Stop streaming: tick_rate must be restored to display_rate.
-        iface.set_mode("svg".to_string(), "test.svg".to_string())
+        iface
+            .set_mode("svg".to_string(), "test.svg".to_string())
             .await
             .expect("svg set_mode must succeed");
         {
@@ -1234,7 +1275,10 @@ mod tests {
                 s.pre_stream_tick_rate.is_none(),
                 "pre_stream_tick_rate must be cleared after stop"
             );
-            assert_eq!(s.active_layout, "test.svg", "active_layout must be set after stop");
+            assert_eq!(
+                s.active_layout, "test.svg",
+                "active_layout must be set after stop"
+            );
         }
     }
 
@@ -1262,8 +1306,8 @@ mod tests {
         save_default_layout_impl(&layout_dir, &config_path, layout_name)
             .expect("save_default_layout_impl must succeed for a valid svg layout");
 
-        let written = std::fs::read_to_string(&config_path)
-            .expect("config.toml must have been written");
+        let written =
+            std::fs::read_to_string(&config_path).expect("config.toml must have been written");
 
         // The on-disk file must never contain 'mode = "xvfb"'.
         assert!(
@@ -1319,7 +1363,10 @@ mod tests {
 
         // On Err, the caller must NOT update the mode mirror.
         // (In the real set_mode: `state.mode = new_mode` only executes on Ok.)
-        assert_eq!(mode, "svg", "mode must remain 'svg' after a failed transition");
+        assert_eq!(
+            mode, "svg",
+            "mode must remain 'svg' after a failed transition"
+        );
         let _ = &mut mode; // suppress unused-mut
     }
 
@@ -1352,7 +1399,10 @@ mod tests {
 
         // On Ok, the caller updates the mode mirror — simulate the state commit.
         let mode = "xvfb".to_string();
-        assert_eq!(mode, "xvfb", "mode must update to 'xvfb' after a successful transition");
+        assert_eq!(
+            mode, "xvfb",
+            "mode must update to 'xvfb' after a successful transition"
+        );
     }
 
     /// Verify Layout variant also carries an ack.
@@ -1372,8 +1422,13 @@ mod tests {
 
         let msg = mode_rx.recv().await.unwrap();
         match msg {
-            ModeChange::Layout { name: _, vars: _, ack } => {
-                ack.send(Err(anyhow::anyhow!("layout file not found"))).unwrap();
+            ModeChange::Layout {
+                name: _,
+                vars: _,
+                ack,
+            } => {
+                ack.send(Err(anyhow::anyhow!("layout file not found")))
+                    .unwrap();
             }
             _ => panic!("unexpected variant"),
         }
@@ -1438,10 +1493,7 @@ mod tests {
 
         // Known binary → non-empty absolute path.
         let sh_path = &result["sh"];
-        assert!(
-            !sh_path.is_empty(),
-            "sh must resolve to a non-empty path"
-        );
+        assert!(!sh_path.is_empty(), "sh must resolve to a non-empty path");
         assert!(
             sh_path.starts_with('/'),
             "sh path must be absolute, got: {:?}",
@@ -1537,7 +1589,10 @@ mod tests {
         // State must have been committed as xvfb.
         let s = state.lock().await;
         assert_eq!(s.mode, "xvfb", "mode must be xvfb after set_mode_argv");
-        assert_eq!(s.tick_rate, 15, "tick_rate must be xvfb_rate after set_mode_argv");
+        assert_eq!(
+            s.tick_rate, 15,
+            "tick_rate must be xvfb_rate after set_mode_argv"
+        );
     }
 
     // SDL_VIDEODRIVER=x11 injection is verified by process-spawning tests in
@@ -1594,7 +1649,8 @@ mod tests {
                 "pre_stream_tick_rate must be cleared after leaving xvfb"
             );
             assert_eq!(
-                *tick_rate_rx.borrow(), 2,
+                *tick_rate_rx.borrow(),
+                2,
                 "tick_rate_tx must have received the restored display rate"
             );
         }
@@ -1617,7 +1673,8 @@ mod tests {
 
         // Enter xvfb mode via real set_mode so pre_stream_tick_rate is properly set.
         let iface = DisplayInterface::new(state.clone());
-        iface.set_mode("xvfb".to_string(), "sleep 99".to_string())
+        iface
+            .set_mode("xvfb".to_string(), "sleep 99".to_string())
             .await
             .expect("xvfb set_mode must succeed");
 
@@ -1636,7 +1693,10 @@ mod tests {
 
         let s = state.lock().await;
         assert_eq!(s.tick_rate, 2, "tick_rate must be 2 after layout switch");
-        assert!(s.pre_stream_tick_rate.is_none(), "pre_stream_tick_rate must be None");
+        assert!(
+            s.pre_stream_tick_rate.is_none(),
+            "pre_stream_tick_rate must be None"
+        );
         assert_eq!(s.mode, "svg", "mode must be svg after layout switch");
     }
 
@@ -1689,8 +1749,14 @@ mod tests {
                 "in-memory layout_vars must be updated even while streaming"
             );
             // Mode and tick_rate must be untouched.
-            assert_eq!(s.mode, "xvfb", "mode must still be xvfb after set_layout_vars");
-            assert_eq!(s.tick_rate, 15, "tick_rate must still be 15 after set_layout_vars");
+            assert_eq!(
+                s.mode, "xvfb",
+                "mode must still be xvfb after set_layout_vars"
+            );
+            assert_eq!(
+                s.tick_rate, 15,
+                "tick_rate must still be 15 after set_layout_vars"
+            );
         }
 
         // The vars must also be on disk.
@@ -1698,7 +1764,8 @@ mod tests {
         let written = std::fs::read_to_string(&config_path).unwrap_or_default();
         assert!(
             written.contains("accent_color"),
-            "persisted config must contain the new var: {}", written
+            "persisted config must contain the new var: {}",
+            written
         );
     }
 
@@ -1734,13 +1801,10 @@ mod tests {
 
         // The channel send happens before the ack await, so the message arrives
         // even though the task is still blocked waiting for an ack.
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            spy_rx.recv(),
-        )
-        .await
-        .expect("spy channel must receive a message within 2s")
-        .expect("channel must not be closed");
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), spy_rx.recv())
+            .await
+            .expect("spy channel must receive a message within 2s")
+            .expect("channel must not be closed");
 
         task.abort();
 
@@ -1749,17 +1813,22 @@ mod tests {
                 assert_eq!(argv[0], "cava", "first element must be 'cava'");
                 assert!(
                     argv.contains(&"-p".to_string()),
-                    "cava argv must use '-p' flag, got: {:?}", argv
+                    "cava argv must use '-p' flag, got: {:?}",
+                    argv
                 );
                 assert!(
                     !argv.contains(&"--config".to_string()),
-                    "cava argv must NOT use '--config' (invalid flag), got: {:?}", argv
+                    "cava argv must NOT use '--config' (invalid flag), got: {:?}",
+                    argv
                 );
                 // The config path must follow -p immediately.
                 let p_pos = argv.iter().position(|a| a == "-p").unwrap();
                 assert!(
-                    argv.get(p_pos + 1).map(|s| s.contains("cava-480.conf")).unwrap_or(false),
-                    "element after '-p' must be the cava config path, got: {:?}", argv
+                    argv.get(p_pos + 1)
+                        .map(|s| s.contains("cava-480.conf"))
+                        .unwrap_or(false),
+                    "element after '-p' must be the cava config path, got: {:?}",
+                    argv
                 );
             }
             other => panic!("expected XvfbArgv, got: {:?}", other),
@@ -1780,43 +1849,29 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = iface_clone.start_stream_preset("conky".to_string()).await;
         });
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            spy_rx.recv(),
-        )
-        .await
-        .expect("spy must receive within 2s")
-        .expect("channel must not close");
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), spy_rx.recv())
+            .await
+            .expect("spy must receive within 2s")
+            .expect("channel must not close");
         task.abort();
         match msg {
             ModeChange::XvfbArgv { argv, .. } => {
                 assert_eq!(argv[0], "conky");
                 assert!(
                     argv.contains(&"-c".to_string()),
-                    "conky argv must use '-c' flag, got: {:?}", argv
+                    "conky argv must use '-c' flag, got: {:?}",
+                    argv
                 );
                 let c_pos = argv.iter().position(|a| a == "-c").unwrap();
                 assert!(
-                    argv.get(c_pos + 1).map(|s| s.contains("conky-480.conf")).unwrap_or(false),
-                    "element after '-c' must be the conky config path, got: {:?}", argv
+                    argv.get(c_pos + 1)
+                        .map(|s| s.contains("conky-480.conf"))
+                        .unwrap_or(false),
+                    "element after '-c' must be the conky config path, got: {:?}",
+                    argv
                 );
             }
             other => panic!("expected XvfbArgv, got: {:?}", other),
         }
     }
-}
-
-/// Register and start the D-Bus service on the session bus.
-///
-/// Returns the active connection (must be kept alive for the service to remain registered).
-pub async fn serve(state: Arc<Mutex<ServiceState>>) -> anyhow::Result<zbus::Connection> {
-    let iface = DisplayInterface::new(state);
-    let connection = zbus::connection::Builder::session()?
-        .name("com.thermalwriter.Service")?
-        .serve_at("/com/thermalwriter/display", iface)?
-        .build()
-        .await?;
-
-    info!("D-Bus service registered: com.thermalwriter.Service at /com/thermalwriter/display");
-    Ok(connection)
 }

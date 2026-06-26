@@ -2,9 +2,19 @@
 
 `thermalwriter` is a lightweight Linux daemon for Thermalright cooler LCD displays. It replaces the large vendor Python/Qt app with a Rust service that renders local layouts, polls system sensors, and sends JPEG frames over USB.
 
-Current status: `v0.1.0`, hardware-verified on the Thermalright Peerless Vision / GrandVision 360 AIO, USB `87ad:70db`. Other Thermalright LCD coolers may work if they use the same protocol, but they are not confirmed yet.
+Current status: Public Beta (`v0.1.0`).
+
+### Supported Devices
+
+| Status | Device / Host Details |
+| --- | --- |
+| **Known working** | Thermalright Peerless Vision / GrandVision 360 AIO, USB `87ad:70db` |
+| **Experimental** | Other Thermalright LCD coolers using the same protocol |
+| **Not supported** | Non-Linux hosts and devices with different USB protocols |
 
 ## Features
+
+![Layout Preview](docs/assets/neon-dash-v2-preview.png)
 
 - User-session systemd daemon with D-Bus control commands.
 - SVG layout renderer with Tera variables and built-in 480x480 layouts.
@@ -23,7 +33,7 @@ Current status: `v0.1.0`, hardware-verified on the Thermalright Peerless Vision 
 - Optional: Node.js for GUI development.
 - Optional: Xvfb for mirror mode.
 
-## Install From Source
+## Install Daemon From Source
 
 Clone the repository, then run:
 
@@ -46,6 +56,25 @@ install -Dm0644 systemd/thermalwriter.service ~/.config/systemd/user/thermalwrit
 systemctl --user daemon-reload
 thermalwriter setup-udev
 systemctl --user enable --now thermalwriter
+```
+
+## Install GUI Release Artifact
+
+The GUI companion app is available as a pre-compiled Debian package (`.deb`) or standalone executable (`.AppImage`) from the releases page.
+
+*Note: Installing or launching the GUI only installs/runs the GUI itself. It does **not** install the `thermalwriter` daemon, the systemd user service, or the udev rule. You must still install the daemon separately.*
+
+### Installation / Run Commands
+
+For Debian/Ubuntu-like systems (via `.deb`):
+```sh
+sudo apt install ./thermalwriter-config_*_amd64.deb
+```
+
+For general Linux distributions (via `.AppImage`):
+```sh
+chmod +x ./Thermalwriter*.AppImage
+./Thermalwriter*.AppImage
 ```
 
 Uninstall the service and installed binary:
@@ -85,9 +114,9 @@ cargo run --example render_layout layouts/svg/neon-dash-v2.svg 15 --mock
 
 Do not assume hardware is attached when developing. Prefer tests and preview examples before running hardware-facing commands.
 
-## GUI
+## GUI Development
 
-The optional GUI is in `gui/`:
+The optional GUI source code is in `gui/`:
 
 ```sh
 cd gui
@@ -96,8 +125,7 @@ npm run build
 npm run tauri:dev
 ```
 
-The GUI talks to the daemon over D-Bus and can also render local previews. GUI app bundles are not published yet; see `docs/release.md` for the release checklist.
-
+The GUI talks to the daemon over D-Bus and can also render local previews.
 ## RAPL Udev Rule
 
 CPU package power comes from `/sys/class/powercap/intel-rapl:*/energy_uj`. Modern Linux kernels keep that file root-only by default after CVE-2020-8694. The included udev rule changes matching `energy_uj` files to `0444` on powercap add/change events so the user-session daemon can read them.
@@ -113,14 +141,18 @@ cargo fmt --check
 cargo test --workspace
 cargo test --workspace --no-default-features
 cargo clippy --workspace --all-targets -- -D warnings
-cd gui && npm ci && npm run build
+cd gui && npm ci && npm run build && npm run tauri:build
 ```
 
-More details:
+## Documentation
 
-- `docs/architecture.md` describes the daemon, renderers, sensors, D-Bus service, and GUI split.
-- `docs/release.md` covers GitHub, crates.io, and GUI release checks.
-- `skills/designing-layouts/` documents LCD layout constraints.
+For more information, consult the following documentation files:
+- [CHANGELOG.md](CHANGELOG.md) - Version history and changes.
+- [Configuration Guide](docs/configuration.md) - Full details on `config.toml` structure, defaults, and ranges.
+- [GUI Guide](docs/gui.md) - Detailed guide to the Svelte/Tauri-based configuration app.
+- [Release Guide](docs/release.md) - Procedures for publishing and creating release packages.
+- [Architecture Guide](docs/architecture.md) - Internal design of the daemon and GUI components.
+- [Designing Layouts](skills/designing-layouts/SKILL.md) - Guidelines for creating custom LCD layouts.
 
 ## License
 

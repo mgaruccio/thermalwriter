@@ -101,7 +101,8 @@ mod tests {
             // callers can surface actionable details. StatePoisoned and
             // DaemonUnavailable are excluded (no inner string, or tested separately).
             assert!(
-                matches!(&err,
+                matches!(
+                    &err,
                     AppError::StatePoisoned | AppError::DaemonUnavailable { .. }
                 ) || s.contains(&err.to_string()),
                 "Display for {err:?} is suspiciously short: {s:?}"

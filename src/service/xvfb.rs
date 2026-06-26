@@ -210,8 +210,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
             }
             Some((proc, reported)) => {
                 // Rename the tmp fbdir to the canonical numbered path.
-                let fbdir =
-                    std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
+                let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
                 // Remove any stale dir from a previous run.
                 let _ = std::fs::remove_dir_all(&fbdir);
                 std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
@@ -290,11 +289,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
         .with_context(|| format!("Failed to spawn child command: {}", command))?;
 
     let child_pid = child_process.id();
-    info!(
-        "Spawned child application: {} (pid {})",
-        command,
-        child_pid
-    );
+    info!("Spawned child application: {} (pid {})", command, child_pid);
     handle.child_process = Some(child_process);
 
     // Liveness check: give the child a brief grace period then probe whether
@@ -349,11 +344,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
 /// - The child-liveness check (150 ms grace + `try_wait`) is applied — an
 ///   immediately-dying child returns `Err` so the D-Bus caller sees failure and
 ///   daemon state is left unchanged.
-pub fn start_argv(
-    argv: &[String],
-    width: u32,
-    height: u32,
-) -> Result<XvfbHandle> {
+pub fn start_argv(argv: &[String], width: u32, height: u32) -> Result<XvfbHandle> {
     if argv.is_empty() {
         bail!("start_argv: argv must not be empty");
     }
@@ -380,8 +371,7 @@ pub fn start_argv(
                 continue;
             }
             Some((proc, reported)) => {
-                let fbdir =
-                    std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
+                let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
                 let _ = std::fs::remove_dir_all(&fbdir);
                 std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
                     format!(
@@ -459,8 +449,7 @@ pub fn start_argv(
     let child_pid = child_process.id();
     info!(
         "Spawned child application (argv): {:?} (pid {})",
-        argv,
-        child_pid
+        argv, child_pid
     );
     handle.child_process = Some(child_process);
 
@@ -555,8 +544,7 @@ mod tests {
     #[serial]
     fn start_argv_liveness_check_and_display_base() {
         let argv: Vec<String> = vec!["sleep".to_string(), "10".to_string()];
-        let handle = start_argv(&argv, 480, 480)
-            .expect("start_argv(sleep 10) must succeed");
+        let handle = start_argv(&argv, 480, 480).expect("start_argv(sleep 10) must succeed");
 
         assert!(
             handle.display_num() >= DISPLAY_BASE,
@@ -604,11 +592,13 @@ mod tests {
         let argv: Vec<String> = vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!("printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5", out_path),
+            format!(
+                "printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5",
+                out_path
+            ),
         ];
 
-        let handle = start_argv(&argv, 480, 480)
-            .expect("start_argv with SDL check must succeed");
+        let handle = start_argv(&argv, 480, 480).expect("start_argv with SDL check must succeed");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
         let written = std::fs::read_to_string(&out_path).unwrap_or_default();
@@ -632,9 +622,14 @@ mod tests {
         let out_path = out_file.path().to_string_lossy().to_string();
 
         let handle = start(
-            &format!("printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5", out_path),
-            480, 480,
-        ).expect("start with SDL check must succeed");
+            &format!(
+                "printf '%s' \"$SDL_VIDEODRIVER\" > {}; exec sleep 5",
+                out_path
+            ),
+            480,
+            480,
+        )
+        .expect("start with SDL check must succeed");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
         let written = std::fs::read_to_string(&out_path).unwrap_or_default();

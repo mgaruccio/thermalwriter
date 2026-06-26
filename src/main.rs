@@ -313,7 +313,8 @@ async fn main() -> Result<()> {
                     // Start the new Xvfb process FIRST — before dropping the existing handle.
                     // If start or source-creation fails, the old source/handle stays live.
                     match xvfb_manager::start(&command, 480, 480) {
-                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480) {
+                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480)
+                        {
                             Ok(source) => {
                                 if source_tx.send(Box::new(source)).await.is_err() {
                                     let msg = "Failed to send xvfb frame source to tick loop — receiver dropped".to_string();
@@ -335,13 +336,15 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => {
                                 // new_handle drops here, killing the new Xvfb.
-                                let msg = format!("Failed to create XvfbSource for '{}': {}", command, e);
+                                let msg =
+                                    format!("Failed to create XvfbSource for '{}': {}", command, e);
                                 log::warn!("{}", msg);
                                 let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                             }
                         },
                         Err(e) => {
-                            let msg = format!("Failed to start xvfb for command '{}': {}", command, e);
+                            let msg =
+                                format!("Failed to start xvfb for command '{}': {}", command, e);
                             log::warn!("{}", msg);
                             let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                         }
@@ -353,7 +356,8 @@ async fn main() -> Result<()> {
                     // Mirror the Xvfb arm: start FIRST, drop old handle only after
                     // new source is confirmed sent to the tick loop.
                     match xvfb_manager::start_argv(&argv, 480, 480) {
-                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480) {
+                        Ok(new_handle) => match XvfbSource::new(new_handle.screen_file(), 480, 480)
+                        {
                             Ok(source) => {
                                 if source_tx.send(Box::new(source)).await.is_err() {
                                     let msg = "Failed to send argv xvfb frame source to tick loop — receiver dropped".to_string();
@@ -372,7 +376,10 @@ async fn main() -> Result<()> {
                                 let _ = ack.send(Ok(()));
                             }
                             Err(e) => {
-                                let msg = format!("Failed to create XvfbSource for argv {:?}: {}", argv, e);
+                                let msg = format!(
+                                    "Failed to create XvfbSource for argv {:?}: {}",
+                                    argv, e
+                                );
                                 log::warn!("{}", msg);
                                 let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
                             }

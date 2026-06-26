@@ -393,11 +393,12 @@ pub struct DaemonStatus {
 /// treat that as "offline / no status available" rather than an error to show.
 #[tauri::command]
 pub async fn get_status() -> Result<DaemonStatus, AppError> {
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -414,10 +415,7 @@ pub async fn get_status() -> Result<DaemonStatus, AppError> {
             .get("tick_rate")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
-        connected: raw
-            .get("connected")
-            .map(|v| v == "true")
-            .unwrap_or(false),
+        connected: raw.get("connected").map(|v| v == "true").unwrap_or(false),
         active_layout: raw.get("active_layout").cloned().unwrap_or_default(),
         resolution: raw.get("resolution").cloned().unwrap_or_default(),
     })
@@ -434,13 +432,16 @@ pub async fn get_status() -> Result<DaemonStatus, AppError> {
 #[tauri::command]
 pub async fn apply_stream(argv: Vec<String>) -> Result<(), AppError> {
     if argv.is_empty() {
-        return Err(AppError::DaemonCall("apply_stream: argv must not be empty".to_string()));
+        return Err(AppError::DaemonCall(
+            "apply_stream: argv must not be empty".to_string(),
+        ));
     }
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -457,12 +458,17 @@ pub async fn apply_stream(argv: Vec<String>) -> Result<(), AppError> {
 /// The daemon restores tick_rate and kills the xvfb child automatically.
 #[tauri::command]
 pub async fn stop_stream(layout: String) -> Result<(), AppError> {
-    let mode = if layout.ends_with(".html") { "html" } else { "svg" };
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let mode = if layout.ends_with(".html") {
+        "html"
+    } else {
+        "svg"
+    };
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -499,11 +505,12 @@ pub fn read_frame() -> Result<Response, AppError> {
 #[tauri::command]
 pub async fn set_tick_rate(rate: u32) -> Result<(), AppError> {
     validate_tick_rate(rate)?;
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -521,11 +528,12 @@ pub async fn set_tick_rate(rate: u32) -> Result<(), AppError> {
 /// preset binaries are installed before offering them.
 #[tauri::command]
 pub async fn resolve_binaries(names: Vec<String>) -> Result<HashMap<String, String>, AppError> {
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonUnavailable {
@@ -568,9 +576,7 @@ fn frame_dir() -> PathBuf {
 /// Reads `dir/last.jpg`; returns `AppError::NoFrame` if the file is absent.
 fn read_frame_impl(dir: &Path) -> Result<Vec<u8>, AppError> {
     let path = dir.join("last.jpg");
-    std::fs::read(&path).map_err(|e| {
-        AppError::NoFrame(format!("{}: {e}", path.display()))
-    })
+    std::fs::read(&path).map_err(|e| AppError::NoFrame(format!("{}: {e}", path.display())))
 }
 
 fn list_layout_names(layout_dir: &Path) -> Vec<String> {
@@ -1482,24 +1488,15 @@ mod tests {
     #[test]
     fn set_tick_rate_rejects_out_of_range() {
         assert!(
-            matches!(
-                validate_tick_rate(0),
-                Err(AppError::DaemonCall(_))
-            ),
+            matches!(validate_tick_rate(0), Err(AppError::DaemonCall(_))),
             "rate=0 must be rejected"
         );
         assert!(
-            matches!(
-                validate_tick_rate(61),
-                Err(AppError::DaemonCall(_))
-            ),
+            matches!(validate_tick_rate(61), Err(AppError::DaemonCall(_))),
             "rate=61 must be rejected"
         );
         assert!(
-            matches!(
-                validate_tick_rate(100),
-                Err(AppError::DaemonCall(_))
-            ),
+            matches!(validate_tick_rate(100), Err(AppError::DaemonCall(_))),
             "rate=100 must be rejected"
         );
     }

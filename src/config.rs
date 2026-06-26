@@ -436,9 +436,8 @@ pub mod builtin_layouts {
             ("conky-480.conf", WRAPPER_CONKY),
             ("cava-480.conf", WRAPPER_CAVA),
         ];
-        std::fs::create_dir_all(wrapper_dir).with_context(|| {
-            format!("Failed to create wrappers dir: {}", wrapper_dir.display())
-        })?;
+        std::fs::create_dir_all(wrapper_dir)
+            .with_context(|| format!("Failed to create wrappers dir: {}", wrapper_dir.display()))?;
         for (name, content) in wrappers {
             let dest = wrapper_dir.join(name);
             if !dest.exists() {
@@ -508,14 +507,20 @@ mod tests {
         builtin_layouts::seed_wrapper_dir(&wrapper_dir).unwrap();
 
         let content = std::fs::read(wrapper_dir.join("conky-480.conf")).unwrap();
-        assert_eq!(content, user_content, "seed_wrapper_dir clobbered user edit");
+        assert_eq!(
+            content, user_content,
+            "seed_wrapper_dir clobbered user edit"
+        );
     }
 
     #[test]
     fn wrapper_conky_content_has_required_keys() {
         let conf = builtin_layouts::WRAPPER_CONKY;
         // Foreground operation
-        assert!(conf.contains("background        = false"), "conky must be foreground");
+        assert!(
+            conf.contains("background        = false"),
+            "conky must be foreground"
+        );
         // Window setup
         assert!(conf.contains("own_window        = true"));
         assert!(conf.contains("own_window_type   = 'desktop'"));
@@ -547,7 +552,10 @@ mod tests {
         assert!(conf.contains("height = 480"));
         // bars must NOT be 24 (crashes at 480px); accept 0 (auto) or <= 22
         if conf.contains("bars = ") {
-            let bars_line = conf.lines().find(|l| l.trim().starts_with("bars =")).unwrap();
+            let bars_line = conf
+                .lines()
+                .find(|l| l.trim().starts_with("bars ="))
+                .unwrap();
             let val: u32 = bars_line
                 .split('=')
                 .nth(1)

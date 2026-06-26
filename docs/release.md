@@ -12,11 +12,11 @@
 Run:
 
 ```sh
-cargo package --list --allow-dirty
-cargo package --allow-dirty
+cargo package --list
+cargo package
 ```
 
-Inspect the file list. It should include source, examples, tests, built-in layouts/assets, packaging files, and public docs. It should not include `target/`, worktrees, agent-local folders, `gui/node_modules/`, `gui/dist/`, or old implementation plans.
+Inspect the file list. It should include source, examples, tests, built-in layouts/assets, packaging files, and public docs. It should not include `target/`, worktrees, agent-local folders, `gui/node_modules/`, `gui/dist/`, or old implementation plans under `docs/plans/`.
 
 Publish the daemon crate only after a clean package build:
 
@@ -28,14 +28,30 @@ The Tauri GUI crate is marked `publish = false`; distribute the GUI through Taur
 
 ## GUI App Distribution
 
-Before producing GUI artifacts:
+Before producing GUI artifacts locally:
 
 ```sh
 cd gui
 npm ci
-npm run build
-npm run tauri -- build
+npm run tauri:build
 ```
 
-Document the generated package type, distro tested, and whether the daemon service was already installed.
+Expected bundle output directories:
+- `.AppImage` bundle: `gui/src-tauri/target/release/bundle/appimage/`
+- `.deb` bundle: `gui/src-tauri/target/release/bundle/deb/`
 
+## Tag-Release Artifacts
+
+GitHub release automation runs on tag push (matching `v*`) or `workflow_dispatch`. The following artifacts are compiled, packaged, hashed, and uploaded to the GitHub Release:
+
+1. **Daemon Tarball**: `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` containing:
+   - `bin/thermalwriter` (release binary)
+   - `README.md`
+   - `LICENSE`
+   - `packaging/install.sh`
+   - `packaging/uninstall.sh`
+   - `packaging/udev/99-thermalwriter-rapl.rules`
+   - `systemd/thermalwriter.service`
+2. **GUI Debian Package**: `*.deb`
+3. **GUI AppImage**: `*.AppImage`
+4. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.

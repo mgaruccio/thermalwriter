@@ -17,6 +17,7 @@ include = [
     "/README.md",
     "/CONTRIBUTING.md",
     "/SECURITY.md",
+    "/CHANGELOG.md",
     "/src/**",
     "/examples/**",
     "/tests/**",
@@ -30,10 +31,14 @@ include = [
     "/layouts/neon-dash.html",
     "/layouts/system-stats.html",
     "/layouts/svg/**",
+    "/layouts/wrappers/**",
     "/packaging/**",
     "/systemd/**",
     "/docs/architecture.md",
     "/docs/release.md",
+    "/docs/configuration.md",
+    "/docs/gui.md",
+    "/docs/assets/**",
 ]
 
 [workspace]

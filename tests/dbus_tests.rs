@@ -523,9 +523,12 @@ fn background_save_sets_all_three_effects() {
         Config::save_background_image(&config_path, Some("dark.png"))
             .expect("save_background_image must succeed");
         let (ack_tx, _) = tokio::sync::oneshot::channel();
-        tx.send(ModeChange::Background { image: None, ack: ack_tx })
-            .await
-            .expect("channel send must succeed");
+        tx.send(ModeChange::Background {
+            image: None,
+            ack: ack_tx,
+        })
+        .await
+        .expect("channel send must succeed");
 
         // Effect 1 (in-memory mirror) is now the caller's explicit responsibility —
         // no longer bundled into a helper, so we exercise effects 2 and 3 here.
@@ -561,9 +564,12 @@ fn background_save_none_clears_all_three_effects() {
         Config::save_background_image(&config_path, None)
             .expect("save_background_image(None) must succeed");
         let (ack_tx, _) = tokio::sync::oneshot::channel();
-        tx.send(ModeChange::Background { image: None, ack: ack_tx })
-            .await
-            .expect("channel send must succeed");
+        tx.send(ModeChange::Background {
+            image: None,
+            ack: ack_tx,
+        })
+        .await
+        .expect("channel send must succeed");
 
         // Effect 1 (in-memory mirror) is now the caller's explicit responsibility —
         // no longer bundled into a helper, so we exercise effects 2 and 3 here.
@@ -607,9 +613,12 @@ fn background_save_outside_lock_sets_disk_and_channel() {
         Config::save_background_image(&config_path, Some("dark.png"))
             .expect("save_background_image must succeed");
         let (ack_tx, _) = tokio::sync::oneshot::channel();
-        tx.send(ModeChange::Background { image: None, ack: ack_tx })
-            .await
-            .expect("channel send must succeed");
+        tx.send(ModeChange::Background {
+            image: None,
+            ack: ack_tx,
+        })
+        .await
+        .expect("channel send must succeed");
 
         // Effect 1: on-disk config must have image = "dark.png"
         let on_disk = fs::read_to_string(&config_path).unwrap();
@@ -647,9 +656,12 @@ fn background_save_outside_lock_none_clears_disk_and_channel() {
         Config::save_background_image(&config_path, None)
             .expect("save_background_image(None) must succeed");
         let (ack_tx, _) = tokio::sync::oneshot::channel();
-        tx.send(ModeChange::Background { image: None, ack: ack_tx })
-            .await
-            .expect("channel send must succeed");
+        tx.send(ModeChange::Background {
+            image: None,
+            ack: ack_tx,
+        })
+        .await
+        .expect("channel send must succeed");
 
         // Disk: image key removed
         let on_disk = fs::read_to_string(&config_path).unwrap();

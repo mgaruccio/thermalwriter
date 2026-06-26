@@ -1,0 +1,42 @@
+<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #08080f; padding: 12px; gap: 8px;">
+  <div style="display: flex; flex-direction: row; height: 80px; background: #0e0e1c; padding: 10px; gap: 0px;">
+    <div style="display: flex; flex-direction: column; width: 120px; justify-content: center; gap: 0px;">
+      <span style="height: 50px; font-size: 44px; color: #00f5c4;">{{ fps | default(value="--") }}</span>
+      <span style="height: 18px; font-size: 13px; color: #229977;">FPS</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 296px; justify-content: center; gap: 6px;">
+      <span style="height: 24px; font-size: 20px; color: #dddddd;">{{ frametime | default(value="--") }} ms frametime</span>
+      <span style="height: 14px; font-size: 11px; color: #333344;">GAMING PERFORMANCE</span>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: row; height: 224px; gap: 8px;">
+    <div style="display: flex; flex-direction: column; width: 222px; background: #0e0e1c; padding: 14px; gap: 4px;">
+      <span style="height: 14px; font-size: 11px; color: #555566;">CPU TEMP</span>
+      <span style="height: 136px; font-size: 108px; color: #ff4f6d;">{{ cpu_temp | default(value="--") }}°</span>
+      <span style="height: 20px; font-size: 15px; color: #771122;">{{ cpu_util | default(value="--") }}% util</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 222px; background: #0e0e1c; padding: 14px; gap: 4px;">
+      <span style="height: 14px; font-size: 11px; color: #555566;">GPU TEMP</span>
+      <span style="height: 136px; font-size: 108px; color: #3dd6ff;">{{ gpu_temp | default(value="--") }}°</span>
+      <span style="height: 20px; font-size: 15px; color: #116688;">{{ gpu_util | default(value="--") }}% util</span>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: row; height: 112px; gap: 8px;">
+    <div style="display: flex; flex-direction: column; width: 108px; background: #0e0e1c; padding: 10px; justify-content: center; gap: 4px;">
+      <span style="height: 36px; font-size: 28px; color: #ffd060; text-align: center;">{{ gpu_power | default(value="--") }}W</span>
+      <span style="height: 14px; font-size: 10px; color: #555566; text-align: center;">GPU PWR</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 108px; background: #0e0e1c; padding: 10px; justify-content: center; gap: 4px;">
+      <span style="height: 36px; font-size: 28px; color: #3dd6ff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
+      <span style="height: 14px; font-size: 10px; color: #555566; text-align: center;">GPU UTIL</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 108px; background: #0e0e1c; padding: 10px; justify-content: center; gap: 4px;">
+      <span style="height: 36px; font-size: 28px; color: #b47aff; text-align: center;">{{ ram_used | default(value="--") }}G</span>
+      <span style="height: 14px; font-size: 10px; color: #555566; text-align: center;">RAM</span>
+    </div>
+    <div style="display: flex; flex-direction: column; width: 108px; background: #0e0e1c; padding: 10px; justify-content: center; gap: 4px;">
+      <span style="height: 36px; font-size: 28px; color: #b47aff; text-align: center;">{{ vram_used | default(value="--") }}G</span>
+      <span style="height: 14px; font-size: 10px; color: #555566; text-align: center;">VRAM</span>
+    </div>
+  </div>
+</div>

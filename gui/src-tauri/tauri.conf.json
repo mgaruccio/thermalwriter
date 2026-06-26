@@ -29,8 +29,14 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
-    "icon": []
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "icon": ["icons/icon.png"],
+    "category": "Utility",
+    "shortDescription": "Configure Thermalright LCD cooler layouts",
+    "longDescription": "Thermalwriter Config configures the thermalwriter daemon, renders local 480x480 previews, applies layout variables and backgrounds, and controls Xvfb streaming presets.",
+    "homepage": "https://github.com/mgaruccio/thermalwriter",
+    "license": "MIT",
+    "licenseFile": "../../LICENSE"
   }
 }

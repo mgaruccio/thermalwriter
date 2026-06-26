@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install system dependencies (Daemon)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev xvfb
+
+      - name: Build daemon
+        run: cargo build --release -p thermalwriter --locked
+
+      - name: Stage daemon archive
+        run: |
+          STAGED_DIR="thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu"
+          mkdir -p "$STAGED_DIR/bin"
+          mkdir -p "$STAGED_DIR/packaging/udev"
+          mkdir -p "$STAGED_DIR/systemd"
+          cp target/release/thermalwriter "$STAGED_DIR/bin/"
+          cp README.md LICENSE "$STAGED_DIR/"
+          cp packaging/install.sh packaging/uninstall.sh "$STAGED_DIR/packaging/"
+          cp packaging/udev/99-thermalwriter-rapl.rules "$STAGED_DIR/packaging/udev/"
+          cp systemd/thermalwriter.service "$STAGED_DIR/systemd/"
+          tar -czf "$STAGED_DIR.tar.gz" "$STAGED_DIR"
+
+      - name: Install system dependencies (GUI)
+        run: sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev build-essential curl wget file
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: npm ci
+
+      - name: Build GUI Tauri app
+        working-directory: gui
+        env:
+          CI: false
+          NO_STRIP: 1
+        run: npm run tauri:build
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release_dist
+          cp thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz release_dist/
+          cp gui/src-tauri/target/release/bundle/appimage/*.AppImage release_dist/
+          cp gui/src-tauri/target/release/bundle/deb/*.deb release_dist/
+          cd release_dist
+          sha256sum * > SHA256SUMS
+
+      - name: Create and upload release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes-file CHANGELOG.md
+          gh release upload "$TAG" release_dist/* --clobber

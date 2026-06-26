@@ -10,10 +10,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::render::FrameSource;
-use crate::render::svg::SvgRenderer;
 use crate::render::TemplateRenderer;
-use crate::sensor::history::SensorHistory;
 use crate::render::frontmatter::LayoutFrontmatter;
+use crate::render::svg::SvgRenderer;
+use crate::sensor::history::SensorHistory;
 use crate::theme::ThemePalette;
 
 /// Build a new layout `FrameSource` from `layout_path`.
@@ -53,8 +53,13 @@ pub fn build_layout_source(
         .unwrap_or(false);
 
     if is_svg {
-        let mut renderer = SvgRenderer::new(&template, width, height)
-            .map_err(|e| anyhow::anyhow!("Failed to create SvgRenderer for '{}': {}", layout_path.display(), e))?;
+        let mut renderer = SvgRenderer::new(&template, width, height).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create SvgRenderer for '{}': {}",
+                layout_path.display(),
+                e
+            )
+        })?;
         renderer.set_theme(theme);
         if let Some(ref hist) = sensor_history {
             renderer.set_history(hist.clone());
@@ -63,8 +68,13 @@ pub fn build_layout_source(
         renderer.set_background(background);
         Ok(Box::new(renderer))
     } else {
-        let renderer = TemplateRenderer::new(&template, width, height)
-            .map_err(|e| anyhow::anyhow!("Failed to create TemplateRenderer for '{}': {}", layout_path.display(), e))?;
+        let renderer = TemplateRenderer::new(&template, width, height).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create TemplateRenderer for '{}': {}",
+                layout_path.display(),
+                e
+            )
+        })?;
         Ok(Box::new(renderer))
     }
 }
@@ -113,7 +123,11 @@ mod tests {
         if result.is_ok() {
             xvfb_sentinel.take(); // would drop on real handle
         }
-        assert_eq!(xvfb_sentinel, Some(42), "sentinel must still be Some after Err path");
+        assert_eq!(
+            xvfb_sentinel,
+            Some(42),
+            "sentinel must still be Some after Err path"
+        );
     }
 
     /// When build_layout_source succeeds, the caller should drop the old handle
@@ -145,7 +159,10 @@ mod tests {
         if result.is_ok() {
             xvfb_sentinel.take(); // represents dropping the old xvfb handle
         }
-        assert_eq!(xvfb_sentinel, None, "handle must be dropped after successful build");
+        assert_eq!(
+            xvfb_sentinel, None,
+            "handle must be dropped after successful build"
+        );
     }
 
     /// Verify the error message names the failing path (helps debugging).
