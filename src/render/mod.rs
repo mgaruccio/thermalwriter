@@ -31,6 +31,7 @@ pub struct RawFrame {
 
 impl RawFrame {
     /// Convert a tiny_skia Pixmap (premultiplied RGBA) to RawFrame (straight RGB).
+    #[allow(unknown_lints)]
     #[allow(clippy::manual_checked_ops)]
     pub fn from_pixmap(pixmap: &Pixmap) -> Self {
         let data = pixmap.data();

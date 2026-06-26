@@ -145,6 +145,8 @@ fn rotate_180(pixmap: &Pixmap) -> Vec<u8> {
     rotated
 }
 
+#[allow(unknown_lints)]
+#[allow(clippy::manual_checked_ops)]
 fn encode_jpeg(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     // Premultiplied -> straight (tiny-skia uses premultiplied)
     let mut straight = Vec::with_capacity(rgba.len());
