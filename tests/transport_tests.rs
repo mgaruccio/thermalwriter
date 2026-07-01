@@ -53,10 +53,18 @@ impl Transport for MockTransport {
     fn is_connected(&self) -> bool {
         self.connected
     }
-    fn try_reconnect(&mut self) -> Result<()> {
+    fn try_reconnect(&mut self) -> Result<DeviceInfo> {
         self.reconnect_count += 1;
         self.connected = true;
-        Ok(())
+        Ok(DeviceInfo {
+            vid: 0,
+            pid: 0,
+            width: 480,
+            height: 480,
+            pm: 4,
+            sub: 5,
+            use_jpeg: true,
+        })
     }
 }
 
@@ -91,6 +99,20 @@ fn reconnect_is_called_after_send_frame_failure() {
     // Second send succeeds
     let r2 = t.send_frame(&[0u8; 100]);
     assert!(r2.is_ok(), "second send must succeed after reconnect");
+}
+
+#[test]
+fn disconnected_bulk_usb_starts_unconnected_and_reconnectable() {
+    let mut transport = bulk_usb::BulkUsb::disconnected();
+
+    assert!(
+        !transport.is_connected(),
+        "startup placeholder must report disconnected"
+    );
+    assert!(
+        transport.send_frame(&[0u8; 4]).is_err(),
+        "disconnected placeholder must not claim sends succeeded"
+    );
 }
 
 // ---------------------------------------------------------------------------

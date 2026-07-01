@@ -143,6 +143,15 @@ impl BulkUsb {
             info: None,
         })
     }
+
+    pub fn disconnected() -> Self {
+        Self {
+            handle: None,
+            ep_out: 0,
+            ep_in: 0,
+            info: None,
+        }
+    }
 }
 
 impl BulkUsb {
@@ -270,15 +279,15 @@ impl Transport for BulkUsb {
         self.handle.is_some() && self.info.is_some()
     }
 
-    fn try_reconnect(&mut self) -> Result<()> {
+    fn try_reconnect(&mut self) -> Result<DeviceInfo> {
         self.close();
         let mut new = BulkUsb::new()?;
         let info = new.handshake()?;
         self.handle = new.handle.take(); // take() avoids moving out of Drop type
         self.ep_out = new.ep_out;
         self.ep_in = new.ep_in;
-        self.info = Some(info);
-        Ok(())
+        self.info = Some(info.clone());
+        Ok(info)
     }
 }
 

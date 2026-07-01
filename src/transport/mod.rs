@@ -27,8 +27,9 @@ pub trait Transport: Send {
     fn is_connected(&self) -> bool {
         true
     }
-    /// Attempt to re-establish the connection (re-open + handshake).
-    fn try_reconnect(&mut self) -> Result<()> {
+    /// Attempt to re-establish the connection (re-open + handshake), returning
+    /// the negotiated device info for the new connection.
+    fn try_reconnect(&mut self) -> Result<DeviceInfo> {
         anyhow::bail!("reconnect not supported by this transport")
     }
 }

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thermalwriter::render::{FrameSource, RawFrame, SensorData};
+use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
 use thermalwriter::transport::{DeviceInfo, Transport};
 use tiny_skia::Pixmap;
 
@@ -120,6 +121,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
                 None,
                 std::time::Duration::from_millis(500),
                 tokio::sync::watch::channel(true).0,
+                tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480)).0,
                 tokio::sync::watch::channel(30u32).1,
             )
             .await
@@ -199,6 +201,7 @@ async fn tick_loop_applies_template_update() {
                 None,
                 std::time::Duration::from_millis(500),
                 tokio::sync::watch::channel(true).0,
+                tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480)).0,
                 tokio::sync::watch::channel(30u32).1,
             )
             .await
@@ -316,6 +319,7 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
                 None,
                 std::time::Duration::from_millis(500),
                 tokio::sync::watch::channel(true).0,
+                tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480)).0,
                 tokio::sync::watch::channel(30u32).1,
             )
             .await
@@ -426,6 +430,7 @@ async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
                 None,
                 std::time::Duration::from_millis(500),
                 tokio::sync::watch::channel(true).0,
+                tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480)).0,
                 tokio::sync::watch::channel(30u32).1,
             )
             .await

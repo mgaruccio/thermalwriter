@@ -288,11 +288,10 @@ pub fn list_backgrounds_impl(bg_dir: &Path) -> Vec<String> {
 /// `PATH` environment variable. Returns `Some(path)` if found and executable,
 /// `None` if not found or not executable.
 ///
-/// Uses the daemon process's inherited PATH — not a hardcoded list — so the
-/// result matches exactly what `Command::new(name)` would exec at runtime.
-/// Returns an absolute path so the GUI can bake it into a preset argv and
-/// avoid exec-time re-resolution mismatches (e.g. if PATH changes between
-/// the resolve call and the actual spawn).
+/// Uses the daemon process's inherited PATH, but only considers absolute PATH
+/// entries. Relative or empty entries are skipped so callers never receive a
+/// current-directory-dependent executable. Returned paths are canonicalized so
+/// the GUI can bake them into preset argv without exec-time PATH re-resolution.
 pub fn resolve_binary(name: &str) -> Option<String> {
     // Reject names that already contain a path separator — those are not
     // simple binary names and should not be resolved via PATH.
@@ -301,6 +300,9 @@ pub fn resolve_binary(name: &str) -> Option<String> {
     }
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
+        if !dir.is_absolute() {
+            continue;
+        }
         let candidate = dir.join(name);
         // is_file() returns false for directories and non-existent paths.
         // We also check execute permission via libc access(X_OK).
@@ -312,7 +314,10 @@ pub fn resolve_binary(name: &str) -> Option<String> {
             // SAFETY: access(2) is async-signal-safe and has no preconditions.
             let rc = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) };
             if rc == 0 {
-                return Some(candidate.to_string_lossy().into_owned());
+                match candidate.canonicalize() {
+                    Ok(path) => return Some(path.to_string_lossy().into_owned()),
+                    Err(_) => continue,
+                }
             }
         }
     }
@@ -332,6 +337,38 @@ pub fn resolve_binaries_impl(names: &[String]) -> HashMap<String, String> {
             (name.clone(), path)
         })
         .collect()
+}
+
+fn validate_absolute_executable(executable: &str, context: &str) -> zbus::fdo::Result<()> {
+    if executable.is_empty() {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "{context}: executable must not be empty"
+        )));
+    }
+    if !Path::new(executable).is_absolute() {
+        return Err(zbus::fdo::Error::InvalidArgs(format!(
+            "{context}: executable must be an absolute path, got {executable:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stream_argv(argv: &[String]) -> zbus::fdo::Result<()> {
+    let executable = argv.first().ok_or_else(|| {
+        zbus::fdo::Error::InvalidArgs("set_mode_argv: argv must not be empty".to_string())
+    })?;
+    validate_absolute_executable(executable, "set_mode_argv")
+}
+
+fn resolve_stream_binary(name: &str) -> zbus::fdo::Result<String> {
+    let path = resolve_binary(name).ok_or_else(|| {
+        zbus::fdo::Error::InvalidArgs(format!(
+            "stream preset executable {name:?} was not found on daemon PATH"
+        ))
+    })?;
+
+    validate_absolute_executable(&path, "stream preset executable")?;
+    Ok(path)
 }
 
 /// Read the layout file under `layout_dir` (validated against traversal) and
@@ -513,15 +550,9 @@ impl DisplayInterface {
 
         let change = match mode.as_str() {
             "xvfb" => {
-                if command.is_empty() {
-                    return Err(zbus::fdo::Error::InvalidArgs(
-                        "xvfb mode requires a command".to_string(),
-                    ));
-                }
-                ModeChange::Xvfb {
-                    command: command.clone(),
-                    ack: ack_tx,
-                }
+                return Err(zbus::fdo::Error::InvalidArgs(
+                    "set_mode(\"xvfb\", shell_command) is disabled; use set_mode_argv or start_stream_preset".to_string(),
+                ));
             }
             "svg" | "html" => {
                 // Path-traversal + existence check on the layout name.
@@ -606,11 +637,7 @@ impl DisplayInterface {
     /// Session-only: never persisted. Tick-rate pushed on start, restored on stop.
     /// The call is serialized by `mode_change_lock` — concurrent callers queue up.
     async fn set_mode_argv(&self, argv: Vec<String>) -> zbus::fdo::Result<String> {
-        if argv.is_empty() {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "set_mode_argv: argv must not be empty".to_string(),
-            ));
-        }
+        validate_stream_argv(&argv)?;
         let label = argv[0].clone();
         self.launch_xvfb_argv_inner(argv, &label).await
     }
@@ -638,7 +665,7 @@ impl DisplayInterface {
             "conky" => {
                 let config_path = wrapper_dir_snap.join("conky-480.conf");
                 vec![
-                    "conky".to_string(),
+                    resolve_stream_binary("conky")?,
                     "-c".to_string(),
                     config_path.to_string_lossy().to_string(),
                 ]
@@ -646,7 +673,7 @@ impl DisplayInterface {
             "cava" => {
                 let config_path = wrapper_dir_snap.join("cava-480.conf");
                 vec![
-                    "cava".to_string(),
+                    resolve_stream_binary("cava")?,
                     "-p".to_string(), // cava config flag is -p, not --config
                     config_path.to_string_lossy().to_string(),
                 ]
@@ -655,7 +682,7 @@ impl DisplayInterface {
             // preset is best-effort (works when the Xvfb session has a terminal).
             // For full control (custom terminal, font size, etc.) use set_mode_argv
             // from the GUI with a complete argv like ["alacritty", "-e", "btop"].
-            "btop" => vec!["btop".to_string()],
+            "btop" => vec![resolve_stream_binary("btop")?],
             _ => {
                 return Err(zbus::fdo::Error::InvalidArgs(format!(
                     "Unknown preset: {} (expected conky, cava, or btop)",
@@ -1196,9 +1223,9 @@ mod tests {
         // pre_stream_tick_rate is None and the stop path falls back to current_tick_rate.
         // We do this sequentially to establish the initial condition.
         iface
-            .set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
             .await
-            .expect("initial xvfb set_mode must succeed");
+            .expect("initial xvfb set_mode_argv must succeed");
 
         // Snapshot state before the concurrent race.
         let mode_before = state.lock().await.mode.clone();
@@ -1218,7 +1245,7 @@ mod tests {
         });
         let xvfb_task = tokio::spawn(async move {
             iface2
-                .set_mode("xvfb".to_string(), "sleep 99".to_string())
+                .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
                 .await
         });
 
@@ -1269,9 +1296,9 @@ mod tests {
 
         // Start streaming: tick_rate must change to xvfb_rate.
         iface
-            .set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
             .await
-            .expect("xvfb set_mode must succeed");
+            .expect("xvfb set_mode_argv must succeed");
         {
             let s = state.lock().await;
             assert_eq!(
@@ -1315,11 +1342,11 @@ mod tests {
         let iface = DisplayInterface::new(state.clone());
 
         iface
-            .set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
             .await
-            .expect("first xvfb set_mode must succeed");
+            .expect("first xvfb set_mode_argv must succeed");
         iface
-            .set_mode_argv(vec!["sleep".to_string(), "99".to_string()])
+            .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
             .await
             .expect("second xvfb set_mode_argv must succeed");
 
@@ -1501,6 +1528,38 @@ mod tests {
         assert!(result.is_err(), "listener replied Err for missing layout");
     }
 
+    #[test]
+    fn stream_argv_rejects_relative_executable() {
+        let argv = vec!["conky".to_string(), "-c".to_string(), "config".to_string()];
+        let err = validate_stream_argv(&argv).unwrap_err();
+        assert!(
+            matches!(err, zbus::fdo::Error::InvalidArgs(_)),
+            "relative argv executable should be rejected: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_mode_xvfb_shell_string_is_rejected() {
+        let (state, _dir) = make_test_state(15, 2).await;
+        let iface = DisplayInterface::new(state);
+
+        let err = iface
+            .set_mode("xvfb".to_string(), "/bin/true".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, zbus::fdo::Error::InvalidArgs(_)),
+            "shell-string xvfb D-Bus path should be rejected: {err:?}"
+        );
+    }
+
+    #[test]
+    fn stream_argv_accepts_absolute_executable() {
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()];
+        validate_stream_argv(&argv).expect("absolute executable should be accepted");
+    }
+
     // ---------------------------------------------------------------------------
     // Task 8 tests: resolve_binaries / resolve_binary
     // ---------------------------------------------------------------------------
@@ -1619,6 +1678,83 @@ mod tests {
         );
     }
 
+    /// [DO-CONFIRM]: preset binary resolution must never return relative
+    /// executables when PATH contains relative or empty components.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_binary_ignores_relative_path_components() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let original_cwd = std::env::current_dir().expect("must get current dir");
+
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let temp_path = temp_dir.path();
+
+        // Create a relative directory "relative-bin" inside temp_dir
+        let rel_subdir_name = "relative-bin";
+        let rel_dir = temp_path.join(rel_subdir_name);
+        std::fs::create_dir(&rel_dir).expect("create rel dir");
+
+        // Create an absolute directory as well
+        let abs_dir = temp_path.join("absolute-bin");
+        std::fs::create_dir(&abs_dir).expect("create abs dir");
+
+        // Write executable sentinels
+        let rel_sentinel = "thermalwriter-rel-sentinel";
+        let abs_sentinel = "thermalwriter-abs-sentinel";
+
+        let rel_bin_path = rel_dir.join(rel_sentinel);
+        let abs_bin_path = abs_dir.join(abs_sentinel);
+
+        for bin_path in &[&rel_bin_path, &abs_bin_path] {
+            std::fs::write(bin_path, "#!/bin/sh\n").unwrap();
+            let mut perms = std::fs::metadata(bin_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(bin_path, perms).unwrap();
+        }
+
+        // Change current directory to temp_dir, making "relative-bin" relative to CWD.
+        std::env::set_current_dir(temp_path).expect("set current dir");
+
+        // Construct PATH: relative-bin:<abs_dir>:<original_path>
+        let mut new_path = std::ffi::OsString::from(rel_subdir_name);
+        new_path.push(":");
+        new_path.push(&abs_dir);
+        new_path.push(":");
+        new_path.push(&original_path);
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let found_rel = resolve_binary(rel_sentinel);
+        let found_abs = resolve_binary(abs_sentinel);
+
+        // Restore PATH and CWD before assertions
+        unsafe { std::env::set_var("PATH", &original_path) };
+        let restore_cwd_res = std::env::set_current_dir(&original_cwd);
+
+        // Verify restoring CWD succeeded
+        restore_cwd_res.expect("restore current dir");
+
+        // Assert the relative sentinel was not resolved
+        assert!(
+            found_rel.is_none(),
+            "resolve_binary must NOT resolve from relative PATH components, but resolved: {:?}",
+            found_rel
+        );
+
+        // Assert the absolute sentinel was resolved
+        assert!(
+            found_abs.is_some(),
+            "resolve_binary must still resolve from absolute PATH components"
+        );
+        let resolved_abs_path = found_abs.unwrap();
+        assert!(
+            resolved_abs_path.starts_with('/'),
+            "resolved absolute path must start with '/', got: {:?}",
+            resolved_abs_path
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // Task 7b tests: set_mode_argv generic method + global SDL_VIDEODRIVER=x11
     // ---------------------------------------------------------------------------
@@ -1639,7 +1775,7 @@ mod tests {
         // We just need to confirm the method exists, accepts a Vec<String>,
         // and returns Ok (the stub ack is Ok so the ack-await path succeeds).
         let argv = vec![
-            "sh".to_string(),
+            "/bin/sh".to_string(),
             "-c".to_string(),
             "exec sleep 999".to_string(),
         ];
@@ -1738,9 +1874,9 @@ mod tests {
         // Enter xvfb mode via real set_mode so pre_stream_tick_rate is properly set.
         let iface = DisplayInterface::new(state.clone());
         iface
-            .set_mode("xvfb".to_string(), "sleep 99".to_string())
+            .set_mode_argv(vec!["/bin/sleep".to_string(), "99".to_string()])
             .await
-            .expect("xvfb set_mode must succeed");
+            .expect("xvfb set_mode_argv must succeed");
 
         {
             let s = state.lock().await;
@@ -1843,8 +1979,23 @@ mod tests {
     /// This test captures the ModeChange::XvfbArgv sent by start_stream_preset
     /// and asserts the argv contains "-p" and not "--config".
     #[tokio::test]
+    #[serial_test::serial]
     async fn cava_preset_uses_dash_p_flag() {
         let (state, _dir) = make_test_state(15, 2).await;
+        let fake_path = tempfile::TempDir::new().expect("fake PATH dir");
+        let fake_cava = fake_path.path().join("cava");
+        std::fs::write(&fake_cava, "#!/bin/sh\nexit 0\n").expect("write fake cava");
+        let mut perms = std::fs::metadata(&fake_cava).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        std::fs::set_permissions(&fake_cava, perms).expect("chmod fake cava");
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut test_path = std::ffi::OsString::from(fake_path.path());
+        test_path.push(":");
+        test_path.push(&original_path);
+        unsafe { std::env::set_var("PATH", &test_path) };
 
         // Replace mode_change_tx with a spy so we can inspect the sent argv.
         let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
@@ -1870,11 +2021,17 @@ mod tests {
             .expect("spy channel must receive a message within 2s")
             .expect("channel must not be closed");
 
+        unsafe { std::env::set_var("PATH", &original_path) };
+
         task.abort();
 
         match msg {
             ModeChange::XvfbArgv { argv, .. } => {
-                assert_eq!(argv[0], "cava", "first element must be 'cava'");
+                assert!(
+                    argv[0].ends_with("/cava"),
+                    "first element must resolve to cava, got: {}",
+                    argv[0]
+                );
                 assert!(
                     argv.contains(&"-p".to_string()),
                     "cava argv must use '-p' flag, got: {:?}",
@@ -1901,8 +2058,24 @@ mod tests {
 
     /// conky uses `-c <path>` — regression guard so it can't silently break.
     #[tokio::test]
+    #[serial_test::serial]
     async fn conky_preset_uses_dash_c_flag() {
         let (state, _dir) = make_test_state(15, 2).await;
+        let fake_path = tempfile::TempDir::new().expect("fake PATH dir");
+        let fake_conky = fake_path.path().join("conky");
+        std::fs::write(&fake_conky, "#!/bin/sh\nexit 0\n").expect("write fake conky");
+        let mut perms = std::fs::metadata(&fake_conky).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        std::fs::set_permissions(&fake_conky, perms).expect("chmod fake conky");
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut test_path = std::ffi::OsString::from(fake_path.path());
+        test_path.push(":");
+        test_path.push(&original_path);
+        unsafe { std::env::set_var("PATH", &test_path) };
+
         let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
         {
             let mut s = state.lock().await;
@@ -1917,10 +2090,16 @@ mod tests {
             .await
             .expect("spy must receive within 2s")
             .expect("channel must not close");
+        unsafe { std::env::set_var("PATH", &original_path) };
+
         task.abort();
         match msg {
             ModeChange::XvfbArgv { argv, .. } => {
-                assert_eq!(argv[0], "conky");
+                assert!(
+                    argv[0].ends_with("/conky"),
+                    "first element must resolve to conky, got: {}",
+                    argv[0]
+                );
                 assert!(
                     argv.contains(&"-c".to_string()),
                     "conky argv must use '-c' flag, got: {:?}",

@@ -11,6 +11,7 @@ use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
+use crate::service::mode_handler::RuntimeDisplayDimensions;
 use crate::transport::Transport;
 
 /// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
@@ -92,6 +93,7 @@ pub async fn run_tick_loop(
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
     connected_tx: tokio::sync::watch::Sender<bool>,
+    display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<()> {
     info!(
@@ -212,8 +214,15 @@ pub async fn run_tick_loop(
                                 let reconnect_result =
                                     tokio::task::block_in_place(|| transport.try_reconnect());
                                 match reconnect_result {
-                                    Ok(()) => {
-                                        info!("USB device reconnected");
+                                    Ok(device_info) => {
+                                        info!(
+                                            "USB device reconnected: {}x{}",
+                                            device_info.width, device_info.height
+                                        );
+                                        let _ = display_tx.send(RuntimeDisplayDimensions::new(
+                                            device_info.width,
+                                            device_info.height,
+                                        ));
                                         let _ = connected_tx.send(true);
                                     }
                                     Err(e) => {
