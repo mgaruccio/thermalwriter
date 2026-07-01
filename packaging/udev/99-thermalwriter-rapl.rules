@@ -1,10 +1,16 @@
-# thermalwriter — allow only the thermalreader group to read Intel-RAPL energy counters.
+# thermalwriter — grant daemon access to supported Thermalright LCD USB devices and
+# allow only the thermalreader group to read Intel-RAPL energy counters.
+#
+# The LCD daemon runs as a normal user service and opens the display through libusb.
+# TAG+="uaccess" lets the active local logind session access the known Thermalright
+# USB display without running the daemon as root.
 #
 # Since CVE-2020-8694 ("Platypus") kernels default /sys/class/powercap/intel-rapl:*/energy_uj
-# to mode 0400 (root-only). thermalwriter runs as a user service and needs this file readable
-# to compute CPU package power. A boot-time tmpfiles.d rule is not sufficient: the kernel
-# regenerates these sysfs attributes on driver reload / PM events, resetting the mode to 0400.
-# A udev RUN+= hook re-applies root:thermalreader 0440 on every add|change event for powercap
-# devices; `thermalwriter setup-udev` creates the group and adds the invoking user.
+# to mode 0400 (root-only). thermalwriter needs this file readable to compute CPU
+# package power. A boot-time tmpfiles.d rule is not sufficient: the kernel regenerates
+# these sysfs attributes on driver reload / PM events, resetting the mode to 0400.
+# A udev RUN+= hook re-applies root:thermalreader 0440 on every add|change event for
+# powercap devices; `thermalwriter setup-udev` creates the group and adds the invoking user.
+SUBSYSTEM=="usb", ATTR{idVendor}=="87ad", ATTR{idProduct}=="70db", TAG+="uaccess"
 
 SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add|change", RUN+="/bin/sh -c '/bin/chgrp thermalreader /sys%p/energy_uj && /bin/chmod 0440 /sys%p/energy_uj'"

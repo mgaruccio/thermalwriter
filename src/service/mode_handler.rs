@@ -13,8 +13,65 @@ use crate::render::FrameSource;
 use crate::render::TemplateRenderer;
 use crate::render::frontmatter::LayoutFrontmatter;
 use crate::render::svg::SvgRenderer;
+#[cfg(feature = "daemon")]
+use crate::render::xvfb::XvfbSource;
 use crate::sensor::history::SensorHistory;
+#[cfg(feature = "daemon")]
+use crate::service::xvfb::{self as xvfb_manager, XvfbHandle};
 use crate::theme::ThemePalette;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeDisplayDimensions {
+    width: u32,
+    height: u32,
+}
+
+impl RuntimeDisplayDimensions {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.height
+    }
+
+    pub fn build_layout_source(
+        self,
+        layout_path: &Path,
+        vars: HashMap<String, String>,
+        background: Option<tiny_skia::Pixmap>,
+        sensor_history: Option<Arc<Mutex<SensorHistory>>>,
+        theme: ThemePalette,
+    ) -> anyhow::Result<Box<dyn FrameSource>> {
+        build_layout_source(
+            layout_path,
+            vars,
+            background,
+            sensor_history,
+            theme,
+            self.width,
+            self.height,
+        )
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn start_xvfb_shell(self, command: &str) -> anyhow::Result<(XvfbHandle, XvfbSource)> {
+        let handle = xvfb_manager::start(command, self.width, self.height)?;
+        let source = XvfbSource::new(handle.screen_file(), self.width, self.height)?;
+        Ok((handle, source))
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn start_xvfb_argv(self, argv: &[String]) -> anyhow::Result<(XvfbHandle, XvfbSource)> {
+        let handle = xvfb_manager::start_argv(argv, self.width, self.height)?;
+        let source = XvfbSource::new(handle.screen_file(), self.width, self.height)?;
+        Ok((handle, source))
+    }
+}
 
 /// Build a new layout `FrameSource` from `layout_path`.
 ///
@@ -163,6 +220,27 @@ mod tests {
             xvfb_sentinel, None,
             "handle must be dropped after successful build"
         );
+    }
+
+    #[test]
+    fn runtime_dimensions_build_listener_layout_source() {
+        let tmp = tempdir().unwrap();
+        let svg_path = tmp.path().join("non_480.svg");
+        std::fs::write(&svg_path, r#"<svg viewBox="0 0 320 240"></svg>"#).unwrap();
+
+        let display = RuntimeDisplayDimensions::new(320, 240);
+        let mut source = display
+            .build_layout_source(
+                &svg_path,
+                HashMap::new(),
+                None,
+                None,
+                ThemePalette::default(),
+            )
+            .expect("valid SVG should build");
+
+        let frame = source.render(&HashMap::new()).expect("SVG should render");
+        assert_eq!((frame.width, frame.height), (320, 240));
     }
 
     /// Verify the error message names the failing path (helps debugging).

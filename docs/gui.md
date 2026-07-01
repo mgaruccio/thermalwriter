@@ -31,7 +31,7 @@ The **Variables** tab allows you to configure layout-specific options:
 
 The **Backgrounds** panel allows you to customize the image displayed behind your layout.
 - You can select **None** or choose from imported backgrounds.
-- The gallery supports importing custom images. It handles PNG, JPEG, and GIF-capable image formats under the hood.
+- The gallery supports importing custom PNG and JPEG images.
 - **Validation**: Imports are limited to a maximum of 8 MB. Bytes are decoded and verified to ensure they are valid images and can be successfully downscaled to the LCD's 480x480 resolution before being copied to `~/.config/thermalwriter/backgrounds/`.
 
 ---
@@ -49,13 +49,15 @@ The interface supports several presets for popular monitoring tools and custom s
 - **Cava**: Renders an audio visualizer. Requires a valid config file.
 - **btop**: Full-featured terminal system monitor. Run inside a terminal emulator wrapper.
 - **nvtop**: Terminal GPU status monitor. Run inside a terminal emulator wrapper.
-- **Custom...**: Run an arbitrary command or script (requires entering a path to the executable).
+- **Custom...**: Run an arbitrary command or script as your user inside Xvfb. The executable must be selected as an absolute path; streaming is a same-user session-bus feature, not a privilege boundary.
 
 ### Terminal Emulator Fallbacks
 For presets that run a text user interface (TUI) and need a terminal window (like `btop` and `nvtop`), the GUI probes the system for installed terminal emulators in this preference order:
 1. `alacritty`
 2. `kitty`
 3. `xterm`
+
+The daemon validates streamed executables as absolute paths before launch. Built-in presets are resolved against the daemon's own `PATH`, while custom commands use the executable path chosen in the GUI. Streamed child processes run as the daemon user with stdout/stderr hidden in the UI; use only commands you trust. The public streaming path uses structured argv rather than `sh -c`.
 
 ### Target Framerate (FPS)
 - You can adjust the stream frame rate using the FPS slider or number input.

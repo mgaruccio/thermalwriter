@@ -26,7 +26,7 @@ echo "==> Removing installed binary..."
 rm -f "$CARGO_BIN/thermalwriter"
 
 if [[ -f "$UDEV_RULE" ]]; then
-    echo "==> Removing RAPL udev rule (sudo required)..."
+    echo "==> Removing thermalwriter udev rule (sudo required)..."
     sudo rm -f "$UDEV_RULE"
     sudo udevadm control --reload-rules
     echo "Left group 'thermalreader' in place; remove it manually with 'sudo groupdel thermalreader' if no longer needed."

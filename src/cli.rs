@@ -58,8 +58,9 @@ pub enum CtlCommand {
     Reload,
     /// Start xvfb mirror mode — capture any X11 application on the LCD.
     Mirror {
-        /// Shell command to run inside the virtual display.
-        command: String,
+        /// Executable and arguments to run inside the virtual display; argv[0] must be an absolute path.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
     },
     /// Launch a named streaming preset via structured argv (no shell).
     /// preset: conky | cava | btop
@@ -129,9 +130,9 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
             proxy.reload().await.context("Failed to reload daemon")?;
             println!("Daemon reload signal sent.");
         }
-        CtlCommand::Mirror { command } => {
+        CtlCommand::Mirror { argv } => {
             let result = proxy
-                .set_mode("xvfb", &command)
+                .set_mode_argv(argv)
                 .await
                 .context("Failed to set mirror mode")?;
             println!("{}", result);
@@ -232,7 +233,8 @@ const UDEV_RULE_DEST: &str = "/etc/udev/rules.d/99-thermalwriter-rapl.rules";
 const STALE_TRCC_TMPFILE: &str = "/etc/tmpfiles.d/trcc-rapl.conf";
 const RAPL_GROUP: &str = "thermalreader";
 
-/// Install the udev rule that makes `/sys/class/powercap/intel-rapl:*/energy_uj`
+/// Install the udev rule that grants local-session access to supported Thermalright
+/// USB displays and makes `/sys/class/powercap/intel-rapl:*/energy_uj`
 /// readable only by members of the thermalreader group. Re-execs under sudo when not root.
 pub fn run_setup_udev() -> Result<()> {
     // SAFETY: geteuid() is always safe — it takes no arguments and can't fail.
@@ -283,9 +285,9 @@ pub fn run_setup_udev() -> Result<()> {
     println!("Installed {UDEV_RULE_DEST}");
 
     if std::path::Path::new(STALE_TRCC_TMPFILE).exists() {
-        std::fs::remove_file(STALE_TRCC_TMPFILE)
-            .with_context(|| format!("Failed to remove {STALE_TRCC_TMPFILE}"))?;
-        println!("Removed stale {STALE_TRCC_TMPFILE} (left over from trcc)");
+        eprintln!(
+            "warning: found {STALE_TRCC_TMPFILE}; thermalwriter will not remove another project's tmpfiles rule. Remove it manually if it conflicts with thermalwriter RAPL permissions."
+        );
     }
 
     let reload = std::process::Command::new("udevadm")
@@ -303,7 +305,8 @@ pub fn run_setup_udev() -> Result<()> {
         anyhow::bail!("`udevadm trigger --subsystem-match=powercap` exited with {trigger}");
     }
 
-    println!("udev rules reloaded; CPU power sensor is readable to group {RAPL_GROUP}.");
+    println!("udev rules reloaded; replug the display if it was already connected.");
+    println!("CPU power sensor is readable to group {RAPL_GROUP} after group membership applies.");
     Ok(())
 }
 
@@ -427,11 +430,19 @@ mod tests {
 
     #[test]
     fn cli_parses_ctl_mirror() {
-        let cli =
-            Cli::try_parse_from(["thermalwriter", "ctl", "mirror", "conky -c foo.conf"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "thermalwriter",
+            "ctl",
+            "mirror",
+            "/usr/bin/conky",
+            "-c",
+            "foo.conf",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
-            Command::Ctl { subcommand: CtlCommand::Mirror { ref command } } if command == "conky -c foo.conf"
+            Command::Ctl { subcommand: CtlCommand::Mirror { ref argv } }
+                if argv == &["/usr/bin/conky".to_string(), "-c".to_string(), "foo.conf".to_string()]
         ));
     }
 }

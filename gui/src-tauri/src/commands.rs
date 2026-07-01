@@ -371,7 +371,7 @@ pub fn import_background(
 ///
 /// Field names match the keys the daemon inserts in its `GetStatus` D-Bus
 /// response so nothing is silently dropped when the raw HashMap is parsed.
-/// dev-2: check `.mode == "xvfb"` to determine whether streaming is active.
+/// The frontend can treat `.mode == "xvfb"` as the streaming-active signal.
 #[derive(Debug, serde::Serialize)]
 pub struct DaemonStatus {
     /// Current display mode: "svg", "html", or "xvfb".
@@ -499,7 +499,7 @@ pub fn read_frame() -> Result<Response, AppError> {
 /// Set the daemon tick rate (1–60 FPS). Validates range locally before calling
 /// D-Bus so the GUI gets a fast, descriptive error without a round-trip.
 ///
-/// Intended use: dev-2's Stream tab calls `apply_stream(argv)` then
+/// Intended use: the Stream tab calls `apply_stream(argv)` then
 /// `set_tick_rate(fps)` to start streaming at the desired frame rate. The
 /// daemon's existing restore_from_streaming path resets the rate on stop.
 #[tauri::command]

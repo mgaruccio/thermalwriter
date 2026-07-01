@@ -39,6 +39,7 @@ include = [
     "/docs/configuration.md",
     "/docs/gui.md",
     "/docs/assets/**",
+    "/skills/designing-layouts/SKILL.md",
 ]
 
 [workspace]

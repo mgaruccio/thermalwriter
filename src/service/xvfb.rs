@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use log::info;
-use std::io::{Read as _, Write as _};
+use std::io::{ErrorKind, Read as _, Write as _};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,65 @@ impl XvfbHandle {
 const XAUTH_FAMILY_WILD: u16 = 0xffff;
 const XAUTH_NAME: &[u8] = b"MIT-MAGIC-COOKIE-1";
 
+fn random_hex_128() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .context("Failed to open /dev/urandom for private Xvfb directory name")?
+        .read_exact(&mut bytes)
+        .context("Failed to read private Xvfb directory name bytes")?;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(out)
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to create private dir: {}", path.display()));
+        }
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("Failed to chmod private dir: {}", path.display()))?;
+    Ok(())
+}
+
+fn xvfb_private_parent_dir() -> Result<PathBuf> {
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        let parent = PathBuf::from(runtime_dir).join("thermalwriter");
+        ensure_private_dir(&parent)?;
+        Ok(parent)
+    } else {
+        Ok(std::env::temp_dir())
+    }
+}
+
+fn create_private_fbdir() -> Result<PathBuf> {
+    let parent = xvfb_private_parent_dir()?;
+    for _ in 0..32 {
+        let candidate = parent.join(format!("thermalwriter-xvfb-{}", random_hex_128()?));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("Failed to create private fbdir: {}", candidate.display())
+                });
+            }
+        }
+    }
+    bail!("Failed to allocate unique private Xvfb framebuffer directory")
+}
+
 fn xauthority_path(fbdir: &Path) -> PathBuf {
     fbdir.join("Xauthority")
 }
@@ -61,20 +121,16 @@ fn write_xauthority(fbdir: &Path, display_num: u32) -> Result<PathBuf> {
     let path = xauthority_path(fbdir);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
+        .mode(0o600)
         .open(&path)
         .with_context(|| format!("Failed to create Xauthority file: {}", path.display()))?;
     file.write_all(&data)
         .with_context(|| format!("Failed to write Xauthority file: {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("Failed to sync Xauthority file: {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to chmod Xauthority file: {}", path.display()))?;
-    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to chmod Xauthority file: {}", path.display()))?;
     Ok(path)
 }
 
@@ -239,41 +295,25 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     let screen_spec = format!("{}x{}x24", width, height);
 
     // Scan for a free display starting from DISPLAY_BASE. Each attempt uses a
-    // unique tmp_fbdir (candidate number as suffix) so concurrent calls in the
-    // same process don't collide.
+    // freshly-created 0700 framebuffer directory with an unguessable name.
     let mut xvfb_process: Option<Child> = None;
     let mut display_num = 0u32;
+    let mut fbdir: Option<PathBuf> = None;
 
     for candidate in DISPLAY_BASE..(DISPLAY_BASE + DISPLAY_MAX_TRIES) {
-        let tmp_fbdir = std::env::temp_dir().join(format!(
-            "thermalwriter-xvfb-tmp-{}-{}",
-            std::process::id(),
-            candidate
-        ));
-        std::fs::create_dir_all(&tmp_fbdir)
-            .with_context(|| format!("Failed to create tmp fbdir: {}", tmp_fbdir.display()))?;
+        let candidate_fbdir = create_private_fbdir()?;
 
-        match try_start_xvfb_on(candidate, &tmp_fbdir, &screen_spec)? {
+        match try_start_xvfb_on(candidate, &candidate_fbdir, &screen_spec)? {
             None => {
                 // Display taken — clean up the fbdir and try the next one.
-                let _ = std::fs::remove_dir_all(&tmp_fbdir);
+                let _ = std::fs::remove_dir_all(&candidate_fbdir);
                 info!("Display :{} taken, trying :{}", candidate, candidate + 1);
                 continue;
             }
             Some((proc, reported)) => {
-                // Rename the tmp fbdir to the canonical numbered path.
-                let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
-                // Remove any stale dir from a previous run.
-                let _ = std::fs::remove_dir_all(&fbdir);
-                std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
-                    format!(
-                        "Failed to rename fbdir {} → {}",
-                        tmp_fbdir.display(),
-                        fbdir.display()
-                    )
-                })?;
                 xvfb_process = Some(proc);
                 display_num = reported;
+                fbdir = Some(candidate_fbdir);
                 break;
             }
         }
@@ -289,7 +329,7 @@ pub fn start(command: &str, width: u32, height: u32) -> Result<XvfbHandle> {
     })?;
 
     let display = format!(":{}", display_num);
-    let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", display_num));
+    let fbdir = fbdir.context("Xvfb started without framebuffer directory")?;
     let screen_file = fbdir.join("Xvfb_screen0");
 
     info!(
@@ -408,34 +448,20 @@ pub fn start_argv(argv: &[String], width: u32, height: u32) -> Result<XvfbHandle
     // Scan for a free display starting from DISPLAY_BASE. Mirrors start().
     let mut xvfb_process: Option<Child> = None;
     let mut display_num = 0u32;
-
+    let mut fbdir: Option<PathBuf> = None;
     for candidate in DISPLAY_BASE..(DISPLAY_BASE + DISPLAY_MAX_TRIES) {
-        let tmp_fbdir = std::env::temp_dir().join(format!(
-            "thermalwriter-xvfb-tmp-{}-{}",
-            std::process::id(),
-            candidate
-        ));
-        std::fs::create_dir_all(&tmp_fbdir)
-            .with_context(|| format!("Failed to create tmp fbdir: {}", tmp_fbdir.display()))?;
+        let candidate_fbdir = create_private_fbdir()?;
 
-        match try_start_xvfb_on(candidate, &tmp_fbdir, &screen_spec)? {
+        match try_start_xvfb_on(candidate, &candidate_fbdir, &screen_spec)? {
             None => {
-                let _ = std::fs::remove_dir_all(&tmp_fbdir);
+                let _ = std::fs::remove_dir_all(&candidate_fbdir);
                 info!("Display :{} taken, trying :{}", candidate, candidate + 1);
                 continue;
             }
             Some((proc, reported)) => {
-                let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", reported));
-                let _ = std::fs::remove_dir_all(&fbdir);
-                std::fs::rename(&tmp_fbdir, &fbdir).with_context(|| {
-                    format!(
-                        "Failed to rename fbdir {} → {}",
-                        tmp_fbdir.display(),
-                        fbdir.display()
-                    )
-                })?;
                 xvfb_process = Some(proc);
                 display_num = reported;
+                fbdir = Some(candidate_fbdir);
                 break;
             }
         }
@@ -451,7 +477,7 @@ pub fn start_argv(argv: &[String], width: u32, height: u32) -> Result<XvfbHandle
     })?;
 
     let display = format!(":{}", display_num);
-    let fbdir = std::env::temp_dir().join(format!("thermalwriter-xvfb-{}", display_num));
+    let fbdir = fbdir.context("Xvfb started without framebuffer directory")?;
     let screen_file = fbdir.join("Xvfb_screen0");
 
     info!(
@@ -533,6 +559,36 @@ pub fn start_argv(argv: &[String], width: u32, height: u32) -> Result<XvfbHandle
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn private_fbdir_is_created_0700_with_unpredictable_name() {
+        let fbdir = create_private_fbdir().expect("private fbdir should be created");
+        let metadata = std::fs::metadata(&fbdir).expect("fbdir metadata should be readable");
+
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(
+            fbdir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("thermalwriter-xvfb-") && name.len() > 40),
+            "fbdir name should include a random suffix: {}",
+            fbdir.display()
+        );
+
+        std::fs::remove_dir_all(fbdir).expect("fbdir cleanup should succeed");
+    }
+
+    #[test]
+    fn xauthority_is_created_0600() {
+        let fbdir = create_private_fbdir().expect("private fbdir should be created");
+        let xauth = write_xauthority(&fbdir, DISPLAY_BASE).expect("Xauthority should be written");
+        let metadata = std::fs::metadata(&xauth).expect("Xauthority metadata should be readable");
+
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        std::fs::remove_dir_all(fbdir).expect("fbdir cleanup should succeed");
+    }
 
     /// Returns `true` if a process with the given PID exists (is alive).
     fn pid_alive(pid: u32) -> bool {

@@ -9,7 +9,7 @@ Current status: Public Beta (`v0.1.0`).
 | Status | Device / Host Details |
 | --- | --- |
 | **Known working** | Thermalright Peerless Vision / GrandVision 360 AIO, USB `87ad:70db` |
-| **Experimental** | Other Thermalright LCD coolers using the same protocol |
+| **Experimental** | Other Thermalright LCD coolers using the same protocol when connected before daemon startup; absent-at-start hotplug currently targets the known 480x480 device path |
 | **Not supported** | Non-Linux hosts and devices with different USB protocols |
 
 ## Features
@@ -33,6 +33,19 @@ Current status: Public Beta (`v0.1.0`).
 - Optional: Node.js for GUI development.
 - Optional: Xvfb for mirror mode.
 
+Source builds also need native `pkg-config`/`pkgconf` and libudev development files:
+
+```sh
+# Debian / Ubuntu
+sudo apt install pkg-config libudev-dev
+
+# Fedora
+sudo dnf install pkgconf-pkg-config systemd-devel
+
+# Arch
+sudo pacman -S pkgconf systemd
+```
+
 ## Install Daemon From Release Tarball
 
 Download and extract `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, then run:
@@ -41,7 +54,7 @@ Download and extract `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, the
 ./packaging/install.sh
 ```
 
-The release installer copies the bundled `bin/thermalwriter` to `~/.cargo/bin`, installs the user systemd service, installs the restricted RAPL udev rule, and restarts the service.
+The release installer copies the bundled `bin/thermalwriter` to `${CARGO_HOME:-~/.cargo}/bin`, writes a user systemd service whose `ExecStart` points at that exact installed binary, installs udev rules for USB display access and restricted RAPL reads, and restarts the service. If the display was already connected, replug it after install so the new USB permissions apply.
 
 ## Install Daemon From Source
 
@@ -51,7 +64,7 @@ Clone the repository, then run:
 ./packaging/install.sh
 ```
 
-In a source checkout, the same installer builds with `cargo install --path . --locked` before installing the service and udev rule.
+In a source checkout, the same installer builds with `cargo install --path . --locked` before installing the service and udev rules. If the display was already connected, replug it after install so the new USB permissions apply.
 
 Manual install:
 
@@ -98,10 +111,12 @@ thermalwriter ctl status
 thermalwriter ctl layouts
 thermalwriter ctl layout svg/neon-dash-v2.svg
 thermalwriter ctl sensors
-thermalwriter ctl mirror "conky -c ~/.config/conky/lcd.conf"
+thermalwriter ctl mirror /usr/bin/conky -c ~/.config/conky/lcd.conf
 ```
 
 Config lives at `~/.config/thermalwriter/config.toml`. Built-in layouts are seeded into `~/.config/thermalwriter/layouts/`, backgrounds into `~/.config/thermalwriter/backgrounds/`, and streaming wrapper configs (conky/cava) into `~/.config/thermalwriter/wrappers/`. Existing user files are not overwritten.
+
+Streaming commands run as your user through the session daemon. Generic mirror launches use structured argv, not a shell, and `argv[0]` must be an absolute executable path; built-in presets resolve executables from the daemon's `PATH`.
 
 ## Preview Without Hardware
 
