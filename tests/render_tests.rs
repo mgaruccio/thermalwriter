@@ -422,8 +422,10 @@ fn svg_renderer_background_fallback_order_resolution() {
     assert_eq!(frame.data[2], 15, "Case 1: B should be 15 (#08080f)");
 
     // Case 2: Configured theme background overrides fallback. Theme bg: #123456 (R:18, G:52, B:86)
-    let mut theme = ThemePalette::default();
-    theme.background = "#123456".to_string();
+    let theme = ThemePalette {
+        background: "#123456".to_string(),
+        ..Default::default()
+    };
     renderer.set_theme(theme.clone());
     let frame = renderer.render(&Default::default()).unwrap();
     assert_eq!(frame.data[0], 18, "Case 2: R should be 18 (#123456)");
@@ -463,8 +465,10 @@ theme_background: color = "#112233" "Custom default background"
   <rect x="2" y="0" width="2" height="4" fill="{{ theme_background }}"/>
 </svg>"##;
 
-    let mut theme = ThemePalette::default();
-    theme.background = "#123456".to_string();
+    let theme = ThemePalette {
+        background: "#123456".to_string(),
+        ..Default::default()
+    };
 
     let mut renderer = SvgRenderer::new(template, 4, 4).unwrap();
     renderer.set_theme(theme);
