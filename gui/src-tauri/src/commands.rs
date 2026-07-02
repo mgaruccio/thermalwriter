@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::ipc::Response;
 use thermalwriter::config::Config;
 use thermalwriter::dbus_types::DisplayProxy;
+use thermalwriter::render::background::decode_from_file;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, SensorData};
@@ -26,11 +27,14 @@ pub struct RendererState {
     cache: Mutex<RendererCache>,
 }
 
-/// Cached `SvgRenderer` keyed by the layout name that produced it. Rebuilt on
-/// layout change to ensure usvg options/fontdb are correct for the new template.
+/// Cached preview renderer state. The renderer is keyed by layout; the decoded
+/// background pixmap is keyed by image name so slider/keystroke previews avoid
+/// re-reading and re-decoding the same background file.
 struct RendererCache {
     current_layout: Option<String>,
     renderer: Option<SvgRenderer<'static>>,
+    current_background: Option<String>,
+    background_pixmap: Option<tiny_skia::Pixmap>,
 }
 
 impl RendererState {
@@ -42,6 +46,8 @@ impl RendererState {
             cache: Mutex::new(RendererCache {
                 current_layout: None,
                 renderer: None,
+                current_background: None,
+                background_pixmap: None,
             }),
         }
     }
@@ -166,6 +172,7 @@ pub async fn list_sensors() -> Result<Vec<SensorDescriptor>, AppError> {
 pub fn render_preview(
     layout: String,
     vars: HashMap<String, String>,
+    background: Option<String>,
     state: tauri::State<'_, RendererState>,
 ) -> Result<Response, AppError> {
     let path = validate_layout_path(&state.layout_dir, &layout)?;
@@ -177,6 +184,7 @@ pub fn render_preview(
     let theme = config.theme.manual.unwrap_or_default();
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
+    let background_pixmap = cached_preview_background(&state, &mut cache, background.as_deref())?;
     if cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none() {
         let mut renderer =
             SvgRenderer::new(&content, 480, 480).map_err(|e| AppError::Render(e.to_string()))?;
@@ -191,7 +199,7 @@ pub fn render_preview(
             }
             let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
             fill_synthetic_history(&mut history, &metrics, &mock_sensors());
-            renderer.set_history(Arc::new(Mutex::new(history)));
+            renderer.set_history(Arc::new(std::sync::Mutex::new(history)));
         }
         cache.renderer = Some(renderer);
         cache.current_layout = Some(layout.clone());
@@ -202,6 +210,7 @@ pub fn render_preview(
         .ok_or_else(|| AppError::Render("renderer not initialized".into()))?;
     renderer.set_theme(theme);
     renderer.set_layout_vars(vars);
+    renderer.set_background(background_pixmap);
 
     let frame = renderer
         .render(&mock_sensors())
@@ -260,14 +269,19 @@ pub async fn apply_to_daemon(
         .map_err(|e| AppError::DaemonUnavailable {
             reason: format!("daemon proxy not reachable: {e}"),
         })?;
-    // Route layout vars through daemon — it owns the in-memory state and
-    // triggers ModeChange::Layout for the tick loop.
+    // Route layout vars through daemon — it owns the in-memory state the live
+    // layout switch reads from.
     proxy
         .set_layout_vars(&layout, vars)
         .await
         .map_err(|e| AppError::DaemonCall(format!("set_layout_vars failed: {e}")))?;
+    // Then switch the active daemon renderer and wait for its ack so get_status()
+    // and the sidebar active-daemon highlight reflect the applied layout.
+    proxy
+        .set_layout(&layout)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("set_layout failed: {e}")))?;
     // Persist the new default layout through daemon so both config.toml writes
-    // go through the same atomic path (no concurrent GUI vs daemon clobber).
     proxy
         .set_default_layout(&layout)
         .await
@@ -830,6 +844,27 @@ fn validate_vars(
     Ok(())
 }
 
+fn cached_preview_background(
+    state: &RendererState,
+    cache: &mut RendererCache,
+    background: Option<&str>,
+) -> Result<Option<tiny_skia::Pixmap>, AppError> {
+    let Some(name) = background else {
+        cache.current_background = None;
+        cache.background_pixmap = None;
+        return Ok(None);
+    };
+
+    let path = validate_background_path(&state.background_dir, name)?;
+    if cache.current_background.as_deref() != Some(name) || cache.background_pixmap.is_none() {
+        let pixmap = decode_from_file(&path).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+        cache.current_background = Some(name.to_string());
+        cache.background_pixmap = Some(pixmap);
+    }
+
+    Ok(cache.background_pixmap.clone())
+}
+
 fn is_valid_color(value: &str) -> bool {
     let Some(hex) = value.strip_prefix('#') else {
         return false;
@@ -973,6 +1008,13 @@ mod tests {
         RendererState::new(layout_dir, background_dir, config_path)
     }
 
+    fn lock_cache(state: &RendererState) -> std::sync::MutexGuard<'_, RendererCache> {
+        match state.cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     // ---- pixel format / byte count ----
 
     #[test]
@@ -1026,7 +1068,7 @@ mod tests {
         fill_synthetic_history(&mut history, &metrics, &mock_sensors());
 
         let mut renderer = SvgRenderer::new(HISTORY_SVG, 480, 480).unwrap();
-        renderer.set_history(Arc::new(Mutex::new(history)));
+        renderer.set_history(Arc::new(std::sync::Mutex::new(history)));
         let frame = renderer
             .render(&mock_sensors())
             .expect("graph layout must render once history is seeded");
@@ -1114,7 +1156,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
 
         {
-            let mut cache = state.cache.lock().unwrap();
+            let mut cache = lock_cache(&state);
             assert!(cache.renderer.is_none(), "cache empty initially");
             let r = SvgRenderer::new(&content, 480, 480).unwrap();
             cache.renderer = Some(r);
@@ -1122,7 +1164,7 @@ mod tests {
         }
 
         // Simulate the swap-decision the same way render_preview does:
-        let cache = state.cache.lock().unwrap();
+        let cache = lock_cache(&state);
         let needs_rebuild =
             cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none();
         assert!(!needs_rebuild, "should NOT rebuild for unchanged layout");
@@ -1139,13 +1181,13 @@ mod tests {
         let layout2 = "svg/other.svg".to_string();
 
         {
-            let mut cache = state.cache.lock().unwrap();
+            let mut cache = lock_cache(&state);
             let r = SvgRenderer::new(SIMPLE_SVG, 480, 480).unwrap();
             cache.renderer = Some(r);
             cache.current_layout = Some(layout1.clone());
         }
 
-        let cache = state.cache.lock().unwrap();
+        let cache = lock_cache(&state);
         let needs_rebuild =
             cache.current_layout.as_deref() != Some(layout2.as_str()) || cache.renderer.is_none();
         assert!(needs_rebuild, "must rebuild when layout changes");
@@ -1487,7 +1529,10 @@ mod tests {
 
     #[test]
     fn frame_dir_rejects_missing_xdg_runtime_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = match ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let original = std::env::var("XDG_RUNTIME_DIR").ok();
         unsafe {
             std::env::remove_var("XDG_RUNTIME_DIR");
@@ -1528,5 +1573,113 @@ mod tests {
         assert!(validate_tick_rate(1).is_ok(), "rate=1 must be accepted");
         assert!(validate_tick_rate(15).is_ok(), "rate=15 must be accepted");
         assert!(validate_tick_rate(60).is_ok(), "rate=60 must be accepted");
+    }
+
+    fn make_solid_color_png(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+        use image::{ImageBuffer, ImageFormat, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn test_cached_renderer_background_clearing() {
+        // Transparent layout: background pixels show through when a background
+        // is present, then return to the fallback color when cleared.
+        const TRANSPARENT_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480">
+<text x="240" y="240" fill="#ffffff" font-size="32" text-anchor="middle">transparent</text>
+</svg>
+"##;
+
+        let mut renderer = SvgRenderer::new(TRANSPARENT_SVG, 480, 480).unwrap();
+
+        // 1. Set background to red
+        let bg_bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
+        let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+        renderer.set_background(Some(bg));
+
+        // Render and verify background shows through (red)
+        let frame_with_bg = renderer.render(&mock_sensors()).unwrap();
+        assert_eq!(
+            frame_with_bg.data[0], 255,
+            "R should be 255 (red background)"
+        );
+        assert_eq!(frame_with_bg.data[1], 0, "G should be 0");
+        assert_eq!(frame_with_bg.data[2], 0, "B should be 0");
+
+        // 2. Clear background (set to None), mimicking render_preview background = None.
+        renderer.set_background(None);
+
+        // Render and verify background is cleared back to fallback #08080f (R:8, G:8, B:15)
+        let frame_cleared = renderer.render(&mock_sensors()).unwrap();
+        assert_eq!(frame_cleared.data[0], 8, "R should be 8 (fallback)");
+        assert_eq!(frame_cleared.data[1], 8, "G should be 8 (fallback)");
+        assert_eq!(frame_cleared.data[2], 15, "B should be 15 (fallback)");
+    }
+
+    #[test]
+    fn test_preview_background_cache_semantics() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp);
+
+        // 1. Create a solid red PNG background file
+        let bg1_path = state.background_dir.join("bg1.png");
+        let red_png = make_solid_color_png(480, 480, 255, 0, 0);
+        fs::write(&bg1_path, &red_png).unwrap();
+
+        // Retrieve and verify it decodes to red
+        let mut cache = lock_cache(&state);
+        let pixmap = cached_preview_background(&state, &mut cache, Some("bg1.png"))
+            .unwrap()
+            .expect("should return a pixmap");
+        assert_eq!(pixmap.data()[0], 255);
+        assert_eq!(pixmap.data()[1], 0);
+        assert_eq!(pixmap.data()[2], 0);
+
+        // Check that it's cached in the state
+        assert_eq!(cache.current_background.as_deref(), Some("bg1.png"));
+        assert!(cache.background_pixmap.is_some());
+
+        // 2. Change the file on disk to blue
+        let blue_png = make_solid_color_png(480, 480, 0, 0, 255);
+        fs::write(&bg1_path, &blue_png).unwrap();
+
+        // Retrieve again and verify it STILL decodes to red (cached)
+        let pixmap_cached = cached_preview_background(&state, &mut cache, Some("bg1.png"))
+            .unwrap()
+            .expect("should return a pixmap");
+        assert_eq!(pixmap_cached.data()[0], 255);
+        assert_eq!(pixmap_cached.data()[1], 0);
+        assert_eq!(pixmap_cached.data()[2], 0);
+
+        // 3. Clearing the background invalidates the cached background state
+        let cleared = cached_preview_background(&state, &mut cache, None).unwrap();
+        assert!(cleared.is_none());
+        assert!(cache.current_background.is_none());
+        assert!(cache.background_pixmap.is_none());
+
+        // 4. Querying bg1.png after clearing reads the current version from disk (which is blue now)
+        let pixmap_after_clear = cached_preview_background(&state, &mut cache, Some("bg1.png"))
+            .unwrap()
+            .expect("should return a pixmap");
+        assert_eq!(pixmap_after_clear.data()[0], 0);
+        assert_eq!(pixmap_after_clear.data()[1], 0);
+        assert_eq!(pixmap_after_clear.data()[2], 255);
+        assert_eq!(cache.current_background.as_deref(), Some("bg1.png"));
+
+        // 5. Changing selected background name decodes the new file
+        let bg2_path = state.background_dir.join("bg2.png");
+        let green_png = make_solid_color_png(480, 480, 0, 255, 0);
+        fs::write(&bg2_path, &green_png).unwrap();
+
+        let pixmap_new = cached_preview_background(&state, &mut cache, Some("bg2.png"))
+            .unwrap()
+            .expect("should return a pixmap");
+        assert_eq!(pixmap_new.data()[0], 0);
+        assert_eq!(pixmap_new.data()[1], 255);
+        assert_eq!(pixmap_new.data()[2], 0);
+        assert_eq!(cache.current_background.as_deref(), Some("bg2.png"));
     }
 }

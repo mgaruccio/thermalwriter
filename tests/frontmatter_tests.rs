@@ -161,6 +161,7 @@ fn invalid_color_default_is_rejected() {
 bad_color: color = "red" "Not a hex color"
 also_bad: color = "#gghhii" "Bad hex digits"
 good_color: color = "#ff8800" "Valid hex color"
+good_alpha: color = "#11223344" "Valid alpha hex"
 #}
 <svg/>"##;
     let fm = LayoutFrontmatter::parse(svg);
@@ -175,6 +176,10 @@ good_color: color = "#ff8800" "Valid hex color"
     assert!(
         fm.variables.contains_key("good_color"),
         "valid hex color must be accepted"
+    );
+    assert!(
+        fm.variables.contains_key("good_alpha"),
+        "valid alpha hex color must be accepted"
     );
 }
 

@@ -326,6 +326,10 @@ select {
 .titlebar-center {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.32em;
@@ -335,6 +339,32 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
+}
+
+.device-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  letter-spacing: 0.16em;
+  background: color-mix(in srgb, var(--bg-elev) 78%, transparent);
+}
+
+.device-badge.ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 44%, transparent);
+}
+
+.device-badge.warn {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 50%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.device-badge.err {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
 }
 
 .titlebar-right {
@@ -542,6 +572,16 @@ select {
   border-color: var(--accent);
   color: var(--text-primary);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.layout-row.active-daemon:not(.active) {
+  border-color: color-mix(in srgb, var(--green) 48%, transparent);
+  box-shadow: inset 2px 0 0 var(--green);
+}
+
+.layout-row.active-daemon .meta {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 48%, transparent);
 }
 
 .layout-row .kind-dot {
@@ -1056,6 +1096,10 @@ select {
 
 .statusbar .warn {
   color: var(--amber);
+}
+
+.statusbar .err {
+  color: var(--red);
 }
 
 .statusbar .accent {

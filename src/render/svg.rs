@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{Context, Result};
 use resvg::usvg;
 use tera::Tera;
-use tiny_skia::{Pixmap, PixmapPaint, Transform};
+use tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
 
 use super::frontmatter::LayoutFrontmatter;
 use super::{FrameSource, RawFrame, SensorData};
@@ -43,6 +43,7 @@ fn xml_escape(value: &str) -> String {
 
 /// Number of history samples to inject per metric (60 ≈ 30s at 2FPS).
 const DEFAULT_HISTORY_SAMPLE_COUNT: usize = 60;
+const DEFAULT_THEME_BACKGROUND: &str = "#08080f";
 
 /// Renders SVG templates with sensor data substitution via Tera + resvg.
 pub struct SvgRenderer<'a> {
@@ -116,8 +117,37 @@ impl<'a> SvgRenderer<'a> {
     pub fn set_background(&mut self, bg: Option<Pixmap>) {
         self.background = bg;
     }
+    fn resolved_theme_background_value(&self) -> &str {
+        self.variable_overrides
+            .get("theme_background")
+            .or_else(|| self.variable_defaults.get("theme_background"))
+            .or_else(|| self.theme.as_ref().map(|theme| &theme.background))
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_THEME_BACKGROUND)
+    }
+
+    fn fallback_background_color(&self) -> Color {
+        parse_hex_color(self.resolved_theme_background_value()).unwrap_or_else(|| {
+            parse_hex_color(DEFAULT_THEME_BACKGROUND).expect("valid fallback color")
+        })
+    }
 }
 
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let hex = value.trim().strip_prefix('#')?;
+    if hex.len() != 6 && hex.len() != 8 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    let a = if hex.len() == 8 {
+        u8::from_str_radix(&hex[6..8], 16).ok()?
+    } else {
+        255
+    };
+    Some(Color::from_rgba8(r, g, b, a))
+}
 impl FrameSource for SvgRenderer<'static> {
     fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
         // Step 1: Build Tera context from sensors
@@ -136,9 +166,22 @@ impl FrameSource for SvgRenderer<'static> {
             theme.inject_into_context(&mut context);
         }
 
-        // Inject user overrides last so saved GUI choices win.
+        // Keep theme_background aligned with the no-image fallback fill:
+        // override -> frontmatter default -> theme palette -> hard fallback.
+        let resolved = self.resolved_theme_background_value();
+        let theme_background_context = if parse_hex_color(resolved).is_some() {
+            resolved
+        } else {
+            DEFAULT_THEME_BACKGROUND
+        };
+        context.insert("theme_background", &xml_escape(theme_background_context));
+
+        // Inject user overrides last so saved GUI choices win. theme_background
+        // was inserted above after resolving/sanitizing the fallback color.
         for (key, value) in &self.variable_overrides {
-            context.insert(key, &xml_escape(value));
+            if key != "theme_background" {
+                context.insert(key, &xml_escape(value));
+            }
         }
 
         // Inject history arrays if configured
@@ -183,7 +226,18 @@ impl FrameSource for SvgRenderer<'static> {
             );
             composed
         } else {
-            layout_pixmap
+            let mut composed =
+                Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
+            composed.fill(self.fallback_background_color());
+            composed.draw_pixmap(
+                0,
+                0,
+                layout_pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            composed
         };
 
         Ok(RawFrame::from_pixmap(&final_pixmap))

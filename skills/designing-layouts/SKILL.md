@@ -142,6 +142,12 @@ Key patterns:
 
 Single font: JetBrains Mono (monospace). Numbers won't shift width when values change — no layout jitter.
 
+> **SVG font-family quirk:** the bundled font asset is loaded into `usvg` under
+> the family name `DejaVu Sans Mono`. SVG text that must resolve through the
+> embedded font should declare `font-family="DejaVu Sans Mono"` (or rely on the
+> renderer's monospace default) even though the asset filename references
+> JetBrains Mono. HTML layouts may continue to use the generic monospace stack.
+
 ### Color System
 
 **Page backgrounds** — never pure black, use tinted near-blacks:

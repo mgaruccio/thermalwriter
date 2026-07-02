@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import BgGallery from "./lib/BgGallery.svelte";
   import StreamTab from "./lib/StreamTab.svelte";
@@ -8,6 +8,7 @@
   // AppError serializes to a plain string; this prefix is guaranteed by the
   // thiserror #[error("daemon is not running…")] template in error.rs.
   const DAEMON_OFFLINE_PREFIX = "daemon is not running";
+  const DAEMON_STATUS_POLL_MS = 5000;
 
   type LayoutSummary = {
     name: string;
@@ -30,6 +31,14 @@
     key: string;
     name: string;
     unit: string;
+  };
+
+  type DaemonStatus = {
+    mode: string;
+    tick_rate: number;
+    connected: boolean;
+    active_layout: string;
+    resolution: string;
   };
 
   type ThemeId =
@@ -62,6 +71,11 @@
   let canvas = $state<HTMLCanvasElement | undefined>();
   let previewTimer: number | undefined;
   let daemonState = $state<"unknown" | "ok" | "down">("unknown");
+  let daemonStatus = $state<DaemonStatus | null>(null);
+  let daemonProbeTimer: ReturnType<typeof setInterval> | undefined;
+  let daemonProbeInFlight = false;
+  let daemonProbeQueued = false;
+  let appMounted = false;
   let activeTab = $state<"variables" | "stream">("variables");
   let theme = $state<ThemeId>(
     (localStorage.getItem("tw-theme") as ThemeId) || "tokyo-night-storm",
@@ -71,12 +85,33 @@
   const configurableLayouts = $derived(layouts.filter((l) => l.configurable));
   const previewOnlyLayouts = $derived(layouts.filter((l) => !l.configurable));
 
+  const activeDaemonLayout = $derived(daemonStatus?.active_layout ?? "");
+  const titlebarResolution = $derived((daemonStatus?.resolution || "480x480").replace("x", " × "));
+  const deviceConnected = $derived(daemonState === "ok" && daemonStatus?.connected === true);
+  const deviceBadgeClass = $derived(daemonState === "down" ? "err" : deviceConnected ? "ok" : "warn");
+  const deviceBadgeLabel = $derived(
+    daemonState === "unknown"
+      ? "Probing device"
+      : daemonState === "down"
+        ? "Daemon offline"
+        : deviceConnected
+          ? "USB connected"
+          : "USB disconnected",
+  );
   $effect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("tw-theme", theme);
   });
 
   onMount(async () => {
+    appMounted = true;
+    // D-Bus status probing must not depend on startup metadata invokes. If a
+    // layout/background read fails, keep polling so the titlebar can recover.
+    void probeDaemon();
+    if (appMounted && daemonProbeTimer === undefined) {
+      daemonProbeTimer = setInterval(probeDaemon, DAEMON_STATUS_POLL_MS);
+    }
+
     try {
       const [layoutList, sensorList, bgList, activeBg] = await Promise.all([
         invoke<LayoutSummary[]>("list_layouts"),
@@ -92,8 +127,6 @@
       if (firstConfigurable) {
         await selectLayout(firstConfigurable.name);
       }
-      // list_sensors can fall back to mock descriptors and get_status is the real D-Bus liveness probe.
-      await probeDaemon();
     } catch (e) {
       error = String(e);
     } finally {
@@ -101,17 +134,44 @@
     }
   });
 
+  onDestroy(() => {
+    appMounted = false;
+    daemonProbeQueued = false;
+    if (daemonProbeTimer !== undefined) {
+      clearInterval(daemonProbeTimer);
+      daemonProbeTimer = undefined;
+    }
+  });
+
   async function probeDaemon() {
+    if (daemonProbeInFlight) {
+      daemonProbeQueued = true;
+      return;
+    }
+    daemonProbeInFlight = true;
     try {
-      await invoke("get_status");
-      daemonState = "ok";
+      const nextStatus = await invoke<DaemonStatus>("get_status");
+      if (appMounted) {
+        daemonStatus = nextStatus;
+        daemonState = "ok";
+      }
     } catch {
-      daemonState = "down";
+      if (appMounted) {
+        daemonStatus = null;
+        daemonState = "down";
+      }
+    } finally {
+      daemonProbeInFlight = false;
+      if (daemonProbeQueued && appMounted) {
+        daemonProbeQueued = false;
+        void probeDaemon();
+      }
     }
   }
 
   $effect(() => {
     selectedLayout;
+    selectedBackground;
     JSON.stringify(values);
     schedulePreview();
   });
@@ -153,6 +213,7 @@
       const buffer = await invoke<ArrayBuffer>("render_preview", {
         layout: selectedLayout,
         vars: values,
+        background: selectedBackground,
       });
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
@@ -179,6 +240,7 @@
         await invoke<void>("set_background", { name: selectedBackground });
         status = `Applied ${selectedLayout} — live on device.`;
         daemonState = "ok";
+        await probeDaemon();
       } catch (e) {
         const message = String(e);
         if (message.includes(DAEMON_OFFLINE_PREFIX)) {
@@ -189,9 +251,11 @@
           await invoke<void>("save_background", { name: selectedBackground });
           status = `Saved ${selectedLayout}. Daemon offline — changes will load on next start.`;
           daemonState = "down";
+          daemonStatus = null;
         } else {
           error = `Daemon apply failed: ${message}`;
           daemonState = "down";
+          daemonStatus = null;
         }
       }
     } catch (e) {
@@ -210,7 +274,7 @@
   function daemonLabel(): string {
     switch (daemonState) {
       case "ok":
-        return "Daemon · Online";
+        return daemonStatus?.connected === false ? "Daemon · No USB" : "Daemon · Online";
       case "down":
         return "Daemon · Offline";
       default:
@@ -219,7 +283,7 @@
   }
 
   function daemonClass(): string {
-    if (daemonState === "ok") return "ok";
+    if (daemonState === "ok") return daemonStatus?.connected === false ? "warn" : "ok";
     if (daemonState === "down") return "err";
     return "warn";
   }
@@ -234,7 +298,8 @@
     </div>
 
     <div class="titlebar-center">
-      &#x25b8; Peerless Vision · 480 × 480 · USB 0x87AD/0x70DB
+      <span>&#x25b8; Peerless Vision · {titlebarResolution}</span>
+      <span class="device-badge {deviceBadgeClass}">{deviceBadgeLabel}</span>
     </div>
 
     <div class="titlebar-right">
@@ -281,6 +346,7 @@
                   type="button"
                   class="layout-row {kindClass(layout.kind)}"
                   class:active={layout.name === selectedLayout}
+                  class:active-daemon={layout.name === activeDaemonLayout}
                   onclick={() => selectLayout(layout.name)}
                 >
                   <span class="kind-dot"></span>
@@ -301,6 +367,7 @@
                   type="button"
                   class="layout-row muted {kindClass(layout.kind)}"
                   class:active={layout.name === selectedLayout}
+                  class:active-daemon={layout.name === activeDaemonLayout}
                   onclick={() => selectLayout(layout.name)}
                 >
                   <span class="kind-dot"></span>
@@ -493,7 +560,7 @@
     <span>BUILD 0.1.0</span>
     <span class="sep"></span>
     <span>
-      <span class={daemonState === "ok" ? "ok" : daemonState === "down" ? "warn" : ""}>
+      <span class={daemonClass()}>
         {daemonLabel()}
       </span>
     </span>

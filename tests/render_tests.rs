@@ -409,6 +409,93 @@ fn svg_renderer_renders_normally_without_background() {
     assert_eq!(frame.data[1], 0, "G should be 0");
 }
 
+#[test]
+fn svg_renderer_background_fallback_order_resolution() {
+    // Case 1: No override, no frontmatter default, no theme palette configured -> Fallback #08080f
+    let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+        <text x="240" y="240" fill="#ffffff" text-anchor="middle">test</text>
+    </svg>"##;
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[0], 8, "Case 1: R should be 8 (#08080f)");
+    assert_eq!(frame.data[1], 8, "Case 1: G should be 8 (#08080f)");
+    assert_eq!(frame.data[2], 15, "Case 1: B should be 15 (#08080f)");
+
+    // Case 2: Configured theme background overrides fallback. Theme bg: #123456 (R:18, G:52, B:86)
+    let mut theme = ThemePalette::default();
+    theme.background = "#123456".to_string();
+    renderer.set_theme(theme.clone());
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[0], 18, "Case 2: R should be 18 (#123456)");
+    assert_eq!(frame.data[1], 52, "Case 2: G should be 52 (#123456)");
+    assert_eq!(frame.data[2], 86, "Case 2: B should be 86 (#123456)");
+
+    // Case 3: Frontmatter default theme_background overrides theme background. Default: #112233 (R:17, G:34, B:51)
+    let template_with_default = r##"{# vars:
+theme_background: color = "#112233" "Custom default background"
+#}
+<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
+    <text x="240" y="240" fill="#ffffff" text-anchor="middle">test</text>
+</svg>"##;
+    let mut renderer = SvgRenderer::new(template_with_default, 480, 480).unwrap();
+    renderer.set_theme(theme);
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[0], 17, "Case 3: R should be 17 (#112233)");
+    assert_eq!(frame.data[1], 34, "Case 3: G should be 34 (#112233)");
+    assert_eq!(frame.data[2], 51, "Case 3: B should be 51 (#112233)");
+
+    // Case 4: Variable override overrides frontmatter default. Override: #445566 (R:68, G:85, B:102)
+    let mut overrides = HashMap::new();
+    overrides.insert("theme_background".to_string(), "#445566".to_string());
+    renderer.set_layout_vars(overrides);
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(frame.data[0], 68, "Case 4: R should be 68 (#445566)");
+    assert_eq!(frame.data[1], 85, "Case 4: G should be 85 (#445566)");
+    assert_eq!(frame.data[2], 102, "Case 4: B should be 102 (#445566)");
+}
+
+#[test]
+fn svg_renderer_theme_background_template_matches_fallback_fill() {
+    let template = r##"{# vars:
+theme_background: color = "#112233" "Custom default background"
+#}
+<svg viewBox="0 0 4 4" xmlns="http://www.w3.org/2000/svg">
+  <rect x="2" y="0" width="2" height="4" fill="{{ theme_background }}"/>
+</svg>"##;
+
+    let mut theme = ThemePalette::default();
+    theme.background = "#123456".to_string();
+
+    let mut renderer = SvgRenderer::new(template, 4, 4).unwrap();
+    renderer.set_theme(theme);
+
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(&frame.data[0..3], &[0x11, 0x22, 0x33]);
+    assert_eq!(&frame.data[9..12], &[0x11, 0x22, 0x33]);
+
+    renderer.set_layout_vars(HashMap::from([(
+        "theme_background".to_string(),
+        "#445566".to_string(),
+    )]));
+    let frame = renderer.render(&Default::default()).unwrap();
+    assert_eq!(&frame.data[0..3], &[0x44, 0x55, 0x66]);
+    assert_eq!(&frame.data[9..12], &[0x44, 0x55, 0x66]);
+}
+
+#[test]
+fn svg_renderer_fallback_accepts_rgba_hex_color() {
+    let template = r##"{# vars:
+theme_background: color = "#00ff00cc" "RGBA background"
+#}
+<svg viewBox="0 0 4 4" xmlns="http://www.w3.org/2000/svg">
+</svg>"##;
+
+    let mut renderer = SvgRenderer::new(template, 4, 4).unwrap();
+    let frame = renderer.render(&Default::default()).unwrap();
+
+    assert_eq!(&frame.data[0..3], &[0x00, 0xff, 0x00]);
+}
+
 /// Simulates the tick loop's `frame_source.set_background(bg)` call on a live
 /// Box<dyn FrameSource>. Verifies that calling set_background on the trait object
 /// immediately changes the rendered output — the fix for the cf2fd97 blocker.
@@ -425,9 +512,18 @@ fn frame_source_set_background_applies_to_running_renderer() {
 
     // Before: no background — pixel (0,0) should be black (transparent canvas)
     let frame_before = source.render(&Default::default()).unwrap();
-    assert_eq!(frame_before.data[0], 0, "R before: should be 0 (no bg)");
-    assert_eq!(frame_before.data[1], 0, "G before: should be 0 (no bg)");
-    assert_eq!(frame_before.data[2], 0, "B before: should be 0 (no bg)");
+    assert_eq!(
+        frame_before.data[0], 8,
+        "R before: should be 8 (themed fallback)"
+    );
+    assert_eq!(
+        frame_before.data[1], 8,
+        "G before: should be 8 (themed fallback)"
+    );
+    assert_eq!(
+        frame_before.data[2], 15,
+        "B before: should be 15 (themed fallback)"
+    );
 
     // Apply background via trait method — same path the tick loop uses
     let bg_bytes = make_solid_color_png(480, 480, 0, 255, 0); // solid green
@@ -446,9 +542,18 @@ fn frame_source_set_background_applies_to_running_renderer() {
     // Clear background — pixel (0,0) returns to black
     source.set_background(None);
     let frame_cleared = source.render(&Default::default()).unwrap();
-    assert_eq!(frame_cleared.data[0], 0, "R cleared: should be 0 (no bg)");
-    assert_eq!(frame_cleared.data[1], 0, "G cleared: should be 0 (no bg)");
-    assert_eq!(frame_cleared.data[2], 0, "B cleared: should be 0 (no bg)");
+    assert_eq!(
+        frame_cleared.data[0], 8,
+        "R cleared: should be 8 (themed fallback)"
+    );
+    assert_eq!(
+        frame_cleared.data[1], 8,
+        "G cleared: should be 8 (themed fallback)"
+    );
+    assert_eq!(
+        frame_cleared.data[2], 15,
+        "B cleared: should be 15 (themed fallback)"
+    );
 }
 
 // ---------------------------------------------------------------------------

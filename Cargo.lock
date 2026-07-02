@@ -5758,6 +5758,7 @@ dependencies = [
  "tempfile",
  "thermalwriter",
  "thiserror 2.0.18",
+ "tiny-skia",
  "tokio",
  "zbus",
 ]

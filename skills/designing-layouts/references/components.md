@@ -241,3 +241,5 @@ Inject the active theme palette by calling `theme.inject_into_context()` (done a
 | `theme_critical` | `#ff3333` |
 
 Use as SVG attribute values: `fill="{{ theme_primary }}"` or `stroke="{{ theme_secondary }}"`.
+
+`theme_background` is also the renderer's page-clear color when no image background is selected. Use opaque `#RRGGBB` for that variable; if an 8-digit `#RRGGBBAA` value is supplied, the alpha byte is ignored for page clearing and the resulting LCD background is opaque.
