@@ -148,9 +148,19 @@ fn parse_hex_color(value: &str) -> Option<Color> {
     };
     Some(Color::from_rgba8(r, g, b, a))
 }
-impl FrameSource for SvgRenderer<'static> {
-    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
-        // Step 1: Build Tera context from sensors
+
+// ---------------------------------------------------------------------------
+// Render pipeline sub-stages, extracted so `benches/` can time each in
+// isolation. Hidden from public docs — internal to the crate's bench/example
+// surface, not a supported API. `SvgRenderer::render` below is a composition
+// of these; behavior must stay byte-identical to the pre-extraction version.
+// ---------------------------------------------------------------------------
+
+impl<'a> SvgRenderer<'a> {
+    /// Build the Tera context from sensor data, frontmatter defaults, theme,
+    /// variable overrides, and history — in the layering order layouts rely on.
+    #[doc(hidden)]
+    pub fn build_context(&self, sensors: &SensorData) -> tera::Context {
         let mut context = tera::Context::new();
         for (key, value) in sensors {
             context.insert(key, &xml_escape(value));
@@ -191,54 +201,79 @@ impl FrameSource for SvgRenderer<'static> {
             hist.inject_into_context(&mut context, DEFAULT_HISTORY_SAMPLE_COUNT);
         }
 
-        // Step 2: Tera template substitution
-        let svg_string = self
-            .tera
-            .render(&self.template_name, &context)
-            .context("Tera template substitution failed")?;
+        context
+    }
 
-        // Step 3: Parse SVG with usvg
-        let tree =
-            usvg::Tree::from_str(&svg_string, &self.options).context("Failed to parse SVG")?;
+    /// Tera template substitution against a pre-built context.
+    #[doc(hidden)]
+    pub fn render_template(&self, context: &tera::Context) -> Result<String> {
+        self.tera
+            .render(&self.template_name, context)
+            .context("Tera template substitution failed")
+    }
+}
 
-        // Step 4: Render layout to its own transparent pixmap
-        let mut layout_pixmap =
-            Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
+/// Parse the substituted SVG string into a `usvg::Tree`.
+#[doc(hidden)]
+pub fn parse_svg(svg_string: &str, options: &usvg::Options) -> Result<usvg::Tree> {
+    usvg::Tree::from_str(svg_string, options).context("Failed to parse SVG")
+}
 
-        // Scale the SVG to fit the target canvas
-        let svg_size = tree.size();
-        let sx = self.width as f32 / svg_size.width();
-        let sy = self.height as f32 / svg_size.height();
-        let transform = Transform::from_scale(sx, sy);
+/// Rasterize a parsed SVG tree, scaled to fit the target canvas.
+#[doc(hidden)]
+pub fn rasterize(tree: &usvg::Tree, width: u32, height: u32) -> Result<Pixmap> {
+    let mut layout_pixmap = Pixmap::new(width, height).context("Failed to create pixmap")?;
 
-        resvg::render(&tree, transform, &mut layout_pixmap.as_mut());
+    let svg_size = tree.size();
+    let sx = width as f32 / svg_size.width();
+    let sy = height as f32 / svg_size.height();
+    let transform = Transform::from_scale(sx, sy);
 
-        // Step 5: Composite — if a background is set, blit it as base then draw layout on top.
-        let final_pixmap = if let Some(ref bg) = self.background {
-            let mut composed = bg.clone();
-            composed.draw_pixmap(
-                0,
-                0,
-                layout_pixmap.as_ref(),
-                &PixmapPaint::default(),
-                Transform::identity(),
-                None,
-            );
-            composed
-        } else {
-            let mut composed =
-                Pixmap::new(self.width, self.height).context("Failed to create pixmap")?;
-            composed.fill(self.fallback_background_color());
-            composed.draw_pixmap(
-                0,
-                0,
-                layout_pixmap.as_ref(),
-                &PixmapPaint::default(),
-                Transform::identity(),
-                None,
-            );
-            composed
-        };
+    resvg::render(tree, transform, &mut layout_pixmap.as_mut());
+    Ok(layout_pixmap)
+}
+
+/// Composite the rasterized layout over the background image (if set) or a
+/// flat fallback fill.
+#[doc(hidden)]
+pub fn composite(
+    layout_pixmap: &Pixmap,
+    background: Option<&Pixmap>,
+    width: u32,
+    height: u32,
+    fallback_color: Color,
+) -> Result<Pixmap> {
+    let mut composed = if let Some(bg) = background {
+        bg.clone()
+    } else {
+        let mut fill = Pixmap::new(width, height).context("Failed to create pixmap")?;
+        fill.fill(fallback_color);
+        fill
+    };
+    composed.draw_pixmap(
+        0,
+        0,
+        layout_pixmap.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    Ok(composed)
+}
+
+impl FrameSource for SvgRenderer<'static> {
+    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
+        let context = self.build_context(sensors);
+        let svg_string = self.render_template(&context)?;
+        let tree = parse_svg(&svg_string, &self.options)?;
+        let layout_pixmap = rasterize(&tree, self.width, self.height)?;
+        let final_pixmap = composite(
+            &layout_pixmap,
+            self.background.as_ref(),
+            self.width,
+            self.height,
+            self.fallback_background_color(),
+        )?;
 
         Ok(RawFrame::from_pixmap(&final_pixmap))
     }
