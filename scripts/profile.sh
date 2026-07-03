@@ -19,7 +19,8 @@
 #
 # Env overrides:
 #   WARMUP_SECONDS (default 10), MEASURE_SECONDS (default 60),
-#   STARTUP_MEASURE_SECONDS (default 10), RSS_SAMPLE_INTERVAL (default 0.5)
+#   STARTUP_MEASURE_SECONDS (default 10), RSS_SAMPLE_INTERVAL (default 0.5),
+#   SHUTDOWN_TIMEOUT_SECONDS (default 15)
 
 set -euo pipefail
 
@@ -34,6 +35,90 @@ WARMUP_SECONDS="${WARMUP_SECONDS:-10}"
 MEASURE_SECONDS="${MEASURE_SECONDS:-60}"
 STARTUP_MEASURE_SECONDS="${STARTUP_MEASURE_SECONDS:-10}"
 RSS_SAMPLE_INTERVAL="${RSS_SAMPLE_INTERVAL:-0.5}"
+SHUTDOWN_TIMEOUT_SECONDS="${SHUTDOWN_TIMEOUT_SECONDS:-15}"
+
+# ---------------------------------------------------------------------------
+# Cleanup + signal handling. Every in-flight resource a running scenario
+# owns (scratch dir, dbus-run-session wrapper, daemon PID, RSS sampler) is
+# tracked in these globals as run_pass acquires it, and cleared once run_pass
+# has handled it itself — so a signal arriving between scenarios never kills
+# an unrelated/recycled PID. Without this, Ctrl-C during a measurement
+# window was observed to leave the daemon+wrapper running: every command in
+# run_pass is `|| true`-guarded (by design, so one scenario's failure doesn't
+# abort the whole sweep), which also swallows a SIGINT-caused nonzero exit —
+# the loop just moved on to the next scenario. Explicit traps + `exit` make
+# signals actually terminate the script.
+# ---------------------------------------------------------------------------
+CURRENT_SCRATCH=""
+CURRENT_WRAPPER_PID=""
+CURRENT_DAEMON_PID=""
+CURRENT_RSS_PID=""
+LOCK_DIR=""
+
+cleanup_children() {
+  # Best-effort, idempotent — safe to call more than once (e.g. from both an
+  # INT/TERM trap's exit and the subsequent EXIT trap).
+  if [[ -n "$CURRENT_RSS_PID" ]]; then
+    kill -TERM "$CURRENT_RSS_PID" 2>/dev/null || true
+    CURRENT_RSS_PID=""
+  fi
+  if [[ -n "$CURRENT_DAEMON_PID" ]]; then
+    # SIGTERM (never SIGKILL) even during cleanup — gives dhat a chance to
+    # write its allocation report on Profiler drop if a dhat-heap pass was
+    # interrupted mid-window.
+    kill -TERM "$CURRENT_DAEMON_PID" 2>/dev/null || true
+    CURRENT_DAEMON_PID=""
+  fi
+  if [[ -n "$CURRENT_WRAPPER_PID" ]]; then
+    kill -TERM "$CURRENT_WRAPPER_PID" 2>/dev/null || true
+    wait "$CURRENT_WRAPPER_PID" 2>/dev/null || true
+    CURRENT_WRAPPER_PID=""
+  fi
+  if [[ -n "$CURRENT_SCRATCH" && -d "$CURRENT_SCRATCH" ]]; then
+    rm -rf "$CURRENT_SCRATCH"
+    CURRENT_SCRATCH=""
+  fi
+  if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    LOCK_DIR=""
+  fi
+}
+
+on_exit() {
+  local code=$?
+  cleanup_children
+  exit "$code"
+}
+
+on_interrupt() {
+  echo "" >&2
+  echo ">> Interrupted — terminating in-flight scenario and cleaning up." >&2
+  exit 130
+}
+
+on_terminate() {
+  echo "" >&2
+  echo ">> Terminated — cleaning up." >&2
+  exit 143
+}
+
+trap on_exit EXIT
+trap on_interrupt INT
+trap on_terminate TERM
+
+# Refuse concurrent invocations: two harness runs would both `pgrep -f` the
+# same binary path and could grab each other's daemon PID (see run_pass).
+# A plain `mkdir` is atomic across processes, so this doubles as the lock.
+acquire_lock() {
+  LOCK_DIR="$ROOT/.profiling-harness.lock"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: another scripts/profile.sh run appears to be in progress" >&2
+    echo "  (lock dir exists: $LOCK_DIR — remove it if this is stale)." >&2
+    LOCK_DIR="" # not ours — don't let cleanup remove someone else's lock
+    exit 1
+  fi
+  echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+}
 
 # ---------------------------------------------------------------------------
 # Scenario table — the curated ~12-scenario default sweep from the plan.
@@ -237,6 +322,7 @@ run_pass() {
 
   local scratch cfg_home run_home
   scratch=$(mktemp -d)
+  CURRENT_SCRATCH="$scratch"
   cfg_home="$scratch/config"
   run_home="$scratch/run"
   mkdir -p "$cfg_home" "$run_home"
@@ -259,9 +345,12 @@ run_pass() {
       THERMALWRITER_TRANSPORT=null RUST_LOG=info \
       dbus-run-session -- "$bin" daemon >"$log_file" 2>&1 ) &
   local wrapper_pid=$!
+  CURRENT_WRAPPER_PID="$wrapper_pid"
 
   # Anchored match: the dbus-run-session wrapper's own cmdline also contains
   # "$bin daemon" as a substring, so an unanchored pgrep would match both.
+  # NOTE: this still assumes a single profile.sh instance targeting this
+  # binary path — acquire_lock() in main() guards against concurrent runs.
   local pid=""
   for _ in $(seq 1 50); do
     pid=$(pgrep -f "^$bin daemon\$" 2>/dev/null | head -1 || true)
@@ -270,10 +359,14 @@ run_pass() {
   done
   if [[ -z "$pid" ]]; then
     echo "!! [$scenario/$pass] daemon did not start within 5s (see $log_file)" >&2
+    kill -TERM "$wrapper_pid" 2>/dev/null || true
     wait "$wrapper_pid" 2>/dev/null || true
+    CURRENT_WRAPPER_PID=""
     rm -rf "$scratch"
+    CURRENT_SCRATCH=""
     return 1
   fi
+  CURRENT_DAEMON_PID="$pid"
 
   local start_ticks
   start_ticks=$(proc_cpu_ticks "$pid")
@@ -287,6 +380,7 @@ run_pass() {
     echo "elapsed_seconds,rss_kb" > "$rss_csv"
     sample_rss "$pid" "$measure" "$rss_csv" &
     local rss_pid=$!
+    CURRENT_RSS_PID="$rss_pid"
 
     local perf_data="$out_dir/perf.data"
     if [[ "$HAVE_PERF" == 1 ]]; then
@@ -295,6 +389,7 @@ run_pass() {
       sleep "$measure"
     fi
     wait "$rss_pid" 2>/dev/null || true
+    CURRENT_RSS_PID=""
   else
     sleep "$measure"
   fi
@@ -302,27 +397,82 @@ run_pass() {
   local end_ticks
   end_ticks=$(proc_cpu_ticks "$pid")
 
+  # Positively confirm the daemon was alive right up to our own SIGTERM —
+  # otherwise a mid-window crash (proc_cpu_ticks falling back to 0 on a gone
+  # /proc/<pid>/stat) silently produces negative cpu_seconds and a
+  # frames_sent=0 that's indistinguishable from "legitimately sent 0 frames".
+  local daemon_ok=1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "!! [$scenario/$pass] daemon (pid $pid) was already dead before SIGTERM — mid-window crash, metrics unreliable (see $log_file)" >&2
+    daemon_ok=0
+  fi
+
   kill -TERM "$pid" 2>/dev/null || true
-  wait "$wrapper_pid" 2>/dev/null || true
+
+  # Bounded wait for clean shutdown. Never SIGKILL — dhat only writes its
+  # allocation report on `Profiler` drop, which requires a clean process
+  # exit; SIGKILL-ing a hung daemon would silently lose that data. If it
+  # doesn't exit in time, say so loudly, mark the scenario failed, and move
+  # on rather than hanging the whole sweep.
+  local waited=0 hung=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [[ "$waited" -ge "$SHUTDOWN_TIMEOUT_SECONDS" ]]; then
+      echo "!! [$scenario/$pass] daemon (pid $pid) didn't exit after ${SHUTDOWN_TIMEOUT_SECONDS}s; not killing (dhat output would be lost) — investigate PID $pid" >&2
+      daemon_ok=0
+      hung=1
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  CURRENT_DAEMON_PID=""
+
+  if [[ "$hung" -eq 1 ]]; then
+    # The wrapper (dbus-run-session) won't exit until its child (the hung
+    # daemon) does — blocking on `wait` here would hang the whole sweep on
+    # this one scenario. Leave both running, untracked, for investigation.
+    CURRENT_WRAPPER_PID=""
+  else
+    wait "$wrapper_pid" 2>/dev/null || true
+    CURRENT_WRAPPER_PID=""
+  fi
+
+  # Second half of the positive-confirmation check: the daemon's own SIGTERM
+  # handler logs "thermalwriter shutdown complete" as its last line, right
+  # after transport.close() (which logs "NullTransport closed: N frames
+  # sent"). Its absence means the process went away some other way even if
+  # the kill -0 loop above saw it exit (e.g. it was reaped by something else).
+  if [[ "$daemon_ok" -eq 1 ]] && ! grep -q "thermalwriter shutdown complete" "$log_file"; then
+    echo "!! [$scenario/$pass] daemon exited but no clean-shutdown log line found (see $log_file)" >&2
+    daemon_ok=0
+  fi
 
   local frames_sent
   frames_sent=$(grep -o 'NullTransport closed: [0-9]* frames sent' "$log_file" | grep -o '[0-9]*' | head -1 || true)
   frames_sent="${frames_sent:-0}"
 
   if [[ "$pass" == "cpu" ]]; then
-    local tck cpu_seconds cpu_per_frame_ms
-    tck=$(clk_tck)
-    cpu_seconds=$(awk -v s="$start_ticks" -v e="$end_ticks" -v t="$tck" 'BEGIN{printf "%.4f", (e-s)/t}')
-    if [[ "$frames_sent" -gt 0 ]]; then
-      cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_sent" 'BEGIN{printf "%.3f", (c*1000)/f}')
+    if [[ "$daemon_ok" -ne 1 ]]; then
+      {
+        echo "status=ERROR"
+        echo "error=daemon did not exit cleanly during the measurement window (see ${pass}_daemon.log)"
+      } > "$out_dir/cpu_metrics.txt"
     else
-      cpu_per_frame_ms="n/a"
+      local tck cpu_seconds cpu_per_frame_ms
+      tck=$(clk_tck)
+      cpu_seconds=$(awk -v s="$start_ticks" -v e="$end_ticks" -v t="$tck" 'BEGIN{printf "%.4f", (e-s)/t}')
+      if [[ "$frames_sent" -gt 0 ]]; then
+        cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_sent" 'BEGIN{printf "%.3f", (c*1000)/f}')
+      else
+        cpu_per_frame_ms="n/a"
+      fi
+      {
+        echo "status=OK"
+        echo "cpu_seconds=$cpu_seconds"
+        echo "frames_sent=$frames_sent"
+        echo "cpu_per_frame_ms=$cpu_per_frame_ms"
+      } > "$out_dir/cpu_metrics.txt"
     fi
-    {
-      echo "cpu_seconds=$cpu_seconds"
-      echo "frames_sent=$frames_sent"
-      echo "cpu_per_frame_ms=$cpu_per_frame_ms"
-    } > "$out_dir/cpu_metrics.txt"
 
     if [[ "$HAVE_PERF" == 1 && "$HAVE_INFERNO" == 1 && -f "$perf_data" ]]; then
       perf script -i "$perf_data" 2>>"$log_file" | inferno-collapse-perf 2>>"$log_file" | inferno-flamegraph > "$out_dir/flamegraph.svg" 2>>"$log_file" || \
@@ -332,26 +482,39 @@ run_pass() {
     if [[ -f "$scratch/dhat-heap.json" ]]; then
       mv "$scratch/dhat-heap.json" "$out_dir/dhat-heap.json"
     fi
-    # dhat-heap.json has no flat "total bytes" field (it's a per-callsite
-    # table under "pps") — the aggregate totals are on dhat's own stderr
-    # summary, which we've already captured in $log_file since it's written
-    # on Profiler drop, right after our SIGTERM.
-    {
-      echo "frames_sent=$frames_sent"
-      local total_line gmax_line
-      total_line=$(grep -m1 'dhat: Total:' "$log_file" || true)
-      gmax_line=$(grep -m1 'dhat: At t-gmax:' "$log_file" || true)
-      if [[ -n "$total_line" ]]; then
-        echo "total_bytes_allocated=$(echo "$total_line" | grep -oE '[0-9,]+ bytes' | tr -d ', bytes')"
-        echo "total_blocks_allocated=$(echo "$total_line" | grep -oE '[0-9,]+ blocks' | tr -d ', blocks')"
-      fi
-      if [[ -n "$gmax_line" ]]; then
-        echo "gmax_bytes=$(echo "$gmax_line" | grep -oE '[0-9,]+ bytes' | tr -d ', bytes')"
-      fi
-    } > "$out_dir/dhat_metrics.txt"
+    if [[ "$daemon_ok" -ne 1 ]]; then
+      {
+        echo "status=ERROR"
+        echo "error=daemon did not exit cleanly during the measurement window (see ${pass}_daemon.log)"
+      } > "$out_dir/dhat_metrics.txt"
+    else
+      # dhat-heap.json has no flat "total bytes" field (it's a per-callsite
+      # table under "pps") — the aggregate totals are on dhat's own stderr
+      # summary, which we've already captured in $log_file since it's written
+      # on Profiler drop, right after our SIGTERM.
+      {
+        echo "status=OK"
+        echo "frames_sent=$frames_sent"
+        local total_line gmax_line
+        total_line=$(grep -m1 'dhat: Total:' "$log_file" || true)
+        gmax_line=$(grep -m1 'dhat: At t-gmax:' "$log_file" || true)
+        if [[ -n "$total_line" ]]; then
+          echo "total_bytes_allocated=$(echo "$total_line" | grep -oE '[0-9,]+ bytes' | tr -d ', bytes')"
+          echo "total_blocks_allocated=$(echo "$total_line" | grep -oE '[0-9,]+ blocks' | tr -d ', blocks')"
+        fi
+        if [[ -n "$gmax_line" ]]; then
+          echo "gmax_bytes=$(echo "$gmax_line" | grep -oE '[0-9,]+ bytes' | tr -d ', bytes')"
+        fi
+      } > "$out_dir/dhat_metrics.txt"
+    fi
   fi
 
   rm -rf "$scratch"
+  CURRENT_SCRATCH=""
+
+  if [[ "$daemon_ok" -ne 1 ]]; then
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -374,13 +537,30 @@ emit_summary() {
     for s in "${scenarios[@]}"; do
       local out_dir="$RESULTS_DIR/$s"
       local cpu_per_frame="n/a" frames="n/a" avg_rss="n/a" peak_rss="n/a" total_bytes="n/a"
-      [[ -f "$out_dir/cpu_metrics.txt" ]] && cpu_per_frame=$(awk -F= '/cpu_per_frame_ms/{print $2}' "$out_dir/cpu_metrics.txt")
-      [[ -f "$out_dir/cpu_metrics.txt" ]] && frames=$(awk -F= '/frames_sent/{print $2}' "$out_dir/cpu_metrics.txt")
-      if [[ -f "$out_dir/rss_timeline.csv" ]]; then
+
+      local cpu_status=""
+      [[ -f "$out_dir/cpu_metrics.txt" ]] && cpu_status=$(awk -F= '/^status=/{print $2}' "$out_dir/cpu_metrics.txt")
+      if [[ "$cpu_status" == "ERROR" ]]; then
+        cpu_per_frame="ERROR"
+        frames="ERROR"
+      elif [[ -f "$out_dir/cpu_metrics.txt" ]]; then
+        cpu_per_frame=$(awk -F= '/cpu_per_frame_ms/{print $2}' "$out_dir/cpu_metrics.txt")
+        frames=$(awk -F= '/frames_sent/{print $2}' "$out_dir/cpu_metrics.txt")
+      fi
+
+      if [[ "$cpu_status" != "ERROR" && -f "$out_dir/rss_timeline.csv" ]]; then
         avg_rss=$(awk -F, 'NR>1{s+=$2;n++} END{if(n>0) printf "%.0f", s/n; else print "n/a"}' "$out_dir/rss_timeline.csv")
         peak_rss=$(awk -F, 'NR>1{if($2>m)m=$2} END{print (m>0)?m:"n/a"}' "$out_dir/rss_timeline.csv")
       fi
-      [[ -f "$out_dir/dhat_metrics.txt" ]] && total_bytes=$(awk -F= '/total_bytes_allocated/{print $2}' "$out_dir/dhat_metrics.txt")
+
+      local dhat_status=""
+      [[ -f "$out_dir/dhat_metrics.txt" ]] && dhat_status=$(awk -F= '/^status=/{print $2}' "$out_dir/dhat_metrics.txt")
+      if [[ "$dhat_status" == "ERROR" ]]; then
+        total_bytes="ERROR"
+      elif [[ -f "$out_dir/dhat_metrics.txt" ]]; then
+        total_bytes=$(awk -F= '/total_bytes_allocated/{print $2}' "$out_dir/dhat_metrics.txt")
+      fi
+
       echo "| $s | $cpu_per_frame | $frames | $avg_rss | $peak_rss | $total_bytes |"
     done
   } > "$summary"
@@ -422,6 +602,7 @@ main() {
     scenarios=("$1")
   fi
 
+  acquire_lock
   preflight "${scenarios[@]}"
 
   # Drop xvfb-conky from an --all sweep if binaries are missing (soft skip);
@@ -442,14 +623,17 @@ main() {
   cargo build --profile profiling
 
   for s in "${run_list[@]}"; do
-    run_pass "$s" "$PROFILE_BIN" "cpu"
+    # A crashed/hung daemon makes run_pass return 1 (after already writing an
+    # explicit status=ERROR marker for this scenario) — one bad scenario
+    # must not abort the rest of the sweep under `set -e`.
+    run_pass "$s" "$PROFILE_BIN" "cpu" || true
   done
 
   echo "== Building profiling profile + dhat-heap (allocation pass) =="
   cargo build --profile profiling --features dhat-heap
 
   for s in "${run_list[@]}"; do
-    run_pass "$s" "$PROFILE_BIN" "dhat"
+    run_pass "$s" "$PROFILE_BIN" "dhat" || true
   done
 
   emit_summary "${run_list[@]}"
