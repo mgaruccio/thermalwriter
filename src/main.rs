@@ -91,11 +91,11 @@ async fn main() -> Result<()> {
     builtin_layouts::seed_wrapper_dir(&wrapper_dir)?;
 
     // Decode the configured background image at startup (if set)
-    let initial_background: Option<tiny_skia::Pixmap> =
-        if let Some(ref image_name) = config.background.image {
+    let initial_background: Option<Arc<tiny_skia::Pixmap>> =
+        if let Some(image_name) = &config.background.image {
             let bg_path = background_dir.join(image_name);
             match bg_decode::decode_from_file(&bg_path) {
-                Ok(pixmap) => Some(pixmap),
+                Ok(pixmap) => Some(Arc::new(pixmap)),
                 Err(e) => {
                     log::warn!("Failed to decode background '{}': {}", image_name, e);
                     None
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
     let (template_tx, template_rx) = watch::channel(String::new());
     // Background watch channel: mode-change listener → tick loop (immediate apply)
     let (background_tx, background_rx) =
-        watch::channel::<Option<tiny_skia::Pixmap>>(initial_background.clone());
+        watch::channel::<Option<Arc<tiny_skia::Pixmap>>>(initial_background.clone());
     // Tick rate watch channel: D-Bus set_tick_rate → tick loop (no restart needed)
     let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(config.display.tick_rate);
     // Mode change channel (D-Bus → listener task)
@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
         // Tracks the active background so layout switches preserve it.
-        let mut current_background: Option<tiny_skia::Pixmap> = initial_background;
+        let mut current_background: Option<Arc<tiny_skia::Pixmap>> = initial_background;
         let mut current_display = *display_rx.borrow_and_update();
         let mut active_mode = initial_mode;
         let mut active_layout = initial_active_layout;

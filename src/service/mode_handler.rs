@@ -43,7 +43,7 @@ impl RuntimeDisplayDimensions {
         self,
         layout_path: &Path,
         vars: HashMap<String, String>,
-        background: Option<tiny_skia::Pixmap>,
+        background: Option<Arc<tiny_skia::Pixmap>>,
         sensor_history: Option<Arc<Mutex<SensorHistory>>>,
         theme: ThemePalette,
     ) -> anyhow::Result<Box<dyn FrameSource>> {
@@ -84,7 +84,7 @@ impl RuntimeDisplayDimensions {
 pub fn build_layout_source(
     layout_path: &Path,
     vars: HashMap<String, String>,
-    background: Option<tiny_skia::Pixmap>,
+    background: Option<Arc<tiny_skia::Pixmap>>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     theme: ThemePalette,
     width: u32,

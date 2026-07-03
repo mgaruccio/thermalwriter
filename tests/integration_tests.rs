@@ -1,6 +1,6 @@
 #![cfg(feature = "daemon")]
-
 use anyhow::Result;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thermalwriter::render::{FrameSource, RawFrame, SensorData};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
@@ -106,7 +106,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
             });
             let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
-            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<tiny_skia::Pixmap>>(None);
+            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Arc<tiny_skia::Pixmap>>>(None);
             run_tick_loop(
                 &mut t,
                 fs,
@@ -186,7 +186,7 @@ async fn tick_loop_applies_template_update() {
             });
             let (_source_tx, mut source_rx) = tokio::sync::mpsc::channel(1);
             let mut hub = SensorHub::new();
-            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<tiny_skia::Pixmap>>(None);
+            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Arc<tiny_skia::Pixmap>>>(None);
             run_tick_loop(
                 &mut t,
                 fs,
@@ -256,7 +256,7 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
         fn name(&self) -> &str {
             &self.name
         }
-        fn set_background(&mut self, bg: Option<tiny_skia::Pixmap>) {
+        fn set_background(&mut self, bg: Option<Arc<tiny_skia::Pixmap>>) {
             self.log
                 .lock()
                 .unwrap()
@@ -279,13 +279,13 @@ async fn tick_loop_reapplies_cached_bg_to_swapped_source() {
                 log: Arc::clone(&bg_log_inner),
             });
             let (source_tx, mut source_rx) = tokio::sync::mpsc::channel::<Box<dyn FrameSource>>(4);
-            let (bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Pixmap>>(None);
+            let (bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Arc<Pixmap>>>(None);
             let mut hub = SensorHub::new();
 
             // Send a 1x1 green Pixmap as background
             let mut px = Pixmap::new(1, 1).unwrap();
             px.fill(tiny_skia::Color::from_rgba8(0, 255, 0, 255));
-            bg_tx.send(Some(px)).unwrap();
+            bg_tx.send(Some(Arc::new(px))).unwrap();
 
             // Send two new sources (simulating Layout x2 from the GUI apply flow).
             // These sources are built without any background — they rely on the tick
@@ -375,7 +375,7 @@ async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
         fn name(&self) -> &str {
             &self.name
         }
-        fn set_background(&mut self, bg: Option<tiny_skia::Pixmap>) {
+        fn set_background(&mut self, bg: Option<Arc<tiny_skia::Pixmap>>) {
             self.log
                 .lock()
                 .unwrap()
@@ -403,7 +403,7 @@ async fn tick_loop_preserves_initial_bg_on_first_source_swap() {
             // [background] image configured. NO subsequent send on bg_tx.
             let mut px = Pixmap::new(1, 1).unwrap();
             px.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
-            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Pixmap>>(Some(px));
+            let (_bg_tx, bg_rx) = tokio::sync::watch::channel::<Option<Arc<Pixmap>>>(Some(Arc::new(px)));
 
             let mut hub = SensorHub::new();
 

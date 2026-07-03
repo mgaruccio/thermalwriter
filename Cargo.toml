@@ -123,6 +123,14 @@ required-features = ["daemon"]
 name = "test_display"
 required-features = ["daemon"]
 
+[[example]]
+name = "cpu_bench"
+required-features = ["daemon"]
+
+[[example]]
+name = "memory_bench"
+required-features = ["daemon"]
+
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
