@@ -4,7 +4,7 @@
 // so every build variant and CI run exercises the same code path.
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use std::time::Duration;
 
 use super::{DeviceInfo, Transport};
@@ -42,7 +42,15 @@ impl NullTransport {
     pub fn new() -> Self {
         let latency = std::env::var("THERMALWRITER_NULL_LATENCY_MS")
             .ok()
-            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(|v| match v.parse::<u64>() {
+                Ok(ms) => Some(ms),
+                Err(_) => {
+                    warn!(
+                        "THERMALWRITER_NULL_LATENCY_MS={v:?} is not a valid u64; ignoring (no artificial latency)"
+                    );
+                    None
+                }
+            })
             .filter(|&ms| ms > 0)
             .map(Duration::from_millis);
         Self {

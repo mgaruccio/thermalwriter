@@ -94,10 +94,30 @@ fn bench_render_sub_stages(c: &mut Criterion) {
     group.finish();
 }
 
+/// `builtin_layouts::BG_DARK_GRADIENT` is a 4x4 placeholder — too small to
+/// give a meaningful decode baseline. Generate solid-color PNGs at realistic
+/// sizes instead: a 480x480 (no resize) case and a 1920x1080 (real downscale)
+/// case, matching the decode path background images actually take.
+fn make_solid_color_png(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+    use image::{ImageBuffer, ImageFormat, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, ImageFormat::Png).unwrap();
+    buf.into_inner()
+}
+
 fn bench_decode_background(c: &mut Criterion) {
-    c.bench_function("background_decode_to_pixmap", |b| {
-        b.iter(|| decode_to_pixmap(black_box(builtin_layouts::BG_DARK_GRADIENT)).unwrap());
+    let png_480 = make_solid_color_png(480, 480, 32, 64, 128);
+    let png_1080p = make_solid_color_png(1920, 1080, 32, 64, 128);
+
+    let mut group = c.benchmark_group("background_decode");
+    group.bench_function("decode_480", |b| {
+        b.iter(|| decode_to_pixmap(black_box(&png_480)).unwrap());
     });
+    group.bench_function("decode_1080p_downscale", |b| {
+        b.iter(|| decode_to_pixmap(black_box(&png_1080p)).unwrap());
+    });
+    group.finish();
 }
 
 fn bench_raw_frame_from_pixmap(c: &mut Criterion) {
