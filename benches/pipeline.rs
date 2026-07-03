@@ -70,7 +70,9 @@ fn bench_encode_jpeg(c: &mut Criterion) {
             BenchmarkId::new("quality_sweep", quality),
             &quality,
             |b, &quality| {
-                b.iter(|| encode_jpeg(black_box(&frame), black_box(quality), black_box(180)).unwrap());
+                b.iter(|| {
+                    encode_jpeg(black_box(&frame), black_box(quality), black_box(180)).unwrap()
+                });
             },
         );
     }

@@ -21,6 +21,8 @@ jobs:
         run: cargo test --workspace --no-default-features
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check dhat-heap profiling feature
+        run: cargo check --features dhat-heap
       - name: Package daemon crate
         run: cargo package -p thermalwriter
 

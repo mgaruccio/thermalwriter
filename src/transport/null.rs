@@ -82,10 +82,7 @@ impl Transport for NullTransport {
     }
 
     fn close(&mut self) {
-        info!(
-            "NullTransport closed: {} frames sent",
-            self.frames_sent
-        );
+        info!("NullTransport closed: {} frames sent", self.frames_sent);
     }
 
     // is_connected() (always true) and try_reconnect() (bails) use the trait

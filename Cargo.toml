@@ -21,6 +21,7 @@ include = [
     "/src/**",
     "/examples/**",
     "/tests/**",
+    "/benches/**",
     "/assets/**",
     "/layouts/blitz-glass.html",
     "/layouts/blitz-rings.html",
