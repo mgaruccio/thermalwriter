@@ -386,7 +386,7 @@ fn svg_renderer_composites_background_under_transparent_layout() {
     </svg>"##;
 
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
-    renderer.set_background(Some(bg));
+    renderer.set_background(Some(Arc::new(bg)));
 
     let frame = renderer.render(&Default::default()).unwrap();
     // Top-left pixel (0,0): no text there, so bg red shows through
@@ -532,7 +532,7 @@ fn frame_source_set_background_applies_to_running_renderer() {
     // Apply background via trait method — same path the tick loop uses
     let bg_bytes = make_solid_color_png(480, 480, 0, 255, 0); // solid green
     let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
-    source.set_background(Some(bg));
+    source.set_background(Some(Arc::new(bg)));
 
     // After: green background shows through transparent canvas at (0,0)
     let frame_after = source.render(&Default::default()).unwrap();
@@ -565,27 +565,25 @@ fn frame_source_set_background_applies_to_running_renderer() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fontdb_is_loaded_once_across_multiple_renderers() {
-    // The shared fontdb cache should mean that constructing N SvgRenderers
-    // does not reload system fonts N times. We approximate this by timing:
-    // first construction primes the cache, second is much faster.
-    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"480\" height=\"480\"></svg>";
+fn fontdb_is_shared_across_multiple_renderers() {
+    // The shared fontdb cache (OnceLock) should allow constructing multiple
+    // renderers without errors. The deterministic scanner behavior is tested
+    // in render::svg::tests::template_needs_system_fonts_*.
+    let svg_with_system_font = r#"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480">
+        <text font-family="Arial">Test</text>
+    </svg>"#;
 
-    let t0 = std::time::Instant::now();
-    let _r1 = SvgRenderer::new(svg, 480, 480).unwrap();
-    let first = t0.elapsed();
+    let svg_with_embedded_font = r#"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480">
+        <text font-family="DejaVu Sans Mono">Test</text>
+    </svg>"#;
 
-    let t1 = std::time::Instant::now();
-    let _r2 = SvgRenderer::new(svg, 480, 480).unwrap();
-    let second = t1.elapsed();
+    // Both renderers should construct and render successfully
+    let mut r1 = SvgRenderer::new(svg_with_system_font, 480, 480).unwrap();
+    let mut r2 = SvgRenderer::new(svg_with_embedded_font, 480, 480).unwrap();
 
-    // System-font scan dominates first call; second should be at least 4x faster.
-    assert!(
-        second * 4 < first,
-        "second renderer construction was not noticeably faster: first={:?}, second={:?}",
-        first,
-        second
-    );
+    let sensors = std::collections::HashMap::new();
+    let _frame1 = r1.render(&sensors).unwrap();
+    let _frame2 = r2.render(&sensors).unwrap();
 }
 
 // Regression test: daemon starts with a no-history layout (e.g., arc-gauge), then

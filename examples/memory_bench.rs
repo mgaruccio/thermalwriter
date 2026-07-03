@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use thermalwriter::config::builtin_layouts;
+use thermalwriter::render::FrameSource;
 use thermalwriter::render::background::decode_to_pixmap;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::render::FrameSource;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::mock::{fill_synthetic_history, mock_sensors, mock_sensors_varying};
 use thermalwriter::service::tick::encode_jpeg;
@@ -163,7 +163,7 @@ fn build_renderer(
     // Decode the built-in background pixmap (same one the daemon loads at startup).
     let bg = decode_to_pixmap(builtin_layouts::BG_DARK_GRADIENT)
         .expect("built-in background must decode");
-    renderer.set_background(Some(bg));
+    renderer.set_background(Some(Arc::new(bg)));
 
     renderer
 }
@@ -251,11 +251,20 @@ fn main() {
     eprintln!("elapsed:           {:.3}s", elapsed.as_secs_f64());
     eprintln!("rss before:        {} KB", rss_before);
     eprintln!("rss after:         {} KB", rss_after);
-    eprintln!("peak rss (HWM):    {} KB (was {} KB before measure)", peak_rss_kb, hwm_before);
+    eprintln!(
+        "peak rss (HWM):    {} KB (was {} KB before measure)",
+        peak_rss_kb, hwm_before
+    );
     eprintln!("mallinfo before:   {} bytes", mallinfo_before);
     eprintln!("mallinfo after:    {} bytes", mallinfo_after);
-    eprintln!("total allocated:   {} bytes ({} allocs)", total_allocated, alloc_count);
-    eprintln!("total deallocated: {} bytes ({} deallocs)", total_deallocated, dealloc_count);
+    eprintln!(
+        "total allocated:   {} bytes ({} allocs)",
+        total_allocated, alloc_count
+    );
+    eprintln!(
+        "total deallocated: {} bytes ({} deallocs)",
+        total_deallocated, dealloc_count
+    );
     eprintln!("churn/frame:       {} bytes", churn_bytes_per_frame);
     eprintln!("live net growth:   {} bytes", live_net_bytes);
     eprintln!("avg jpeg size:     {} bytes", avg_jpeg_bytes);

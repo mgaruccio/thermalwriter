@@ -10,10 +10,10 @@
 
 use std::sync::{Arc, Mutex};
 use thermalwriter::config::builtin_layouts;
+use thermalwriter::render::FrameSource;
 use thermalwriter::render::background::decode_to_pixmap;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::render::FrameSource;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::mock::{fill_synthetic_history, mock_sensors, mock_sensors_varying};
 use thermalwriter::service::tick::encode_jpeg;
@@ -39,7 +39,7 @@ fn build_renderer(
 
     let bg = decode_to_pixmap(builtin_layouts::BG_DARK_GRADIENT)
         .expect("built-in background must decode");
-    renderer.set_background(Some(bg));
+    renderer.set_background(Some(Arc::new(bg)));
 
     renderer
 }

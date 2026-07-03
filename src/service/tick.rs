@@ -88,7 +88,7 @@ pub async fn run_tick_loop(
     jpeg_quality: u8,
     rotation: u16,
     mut template_rx: tokio::sync::watch::Receiver<String>,
-    mut background_rx: tokio::sync::watch::Receiver<Option<tiny_skia::Pixmap>>,
+    mut background_rx: tokio::sync::watch::Receiver<Option<Arc<tiny_skia::Pixmap>>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
@@ -103,7 +103,7 @@ pub async fn run_tick_loop(
 
     let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
-    let mut cached_background: Option<tiny_skia::Pixmap> = background_rx.borrow().clone();
+    let mut cached_background: Option<Arc<tiny_skia::Pixmap>> = background_rx.borrow().clone();
 
     loop {
         let tick_start = Instant::now();

@@ -16,6 +16,7 @@ pub mod blitz;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tiny_skia::Pixmap;
 
 /// Sensor data: flat map of key → string value.
@@ -73,7 +74,7 @@ pub trait FrameSource: Send {
     /// Hot-swap the template. Default no-op for frame sources that don't use templates.
     fn set_template(&mut self, _template: &str) {}
     /// Set or clear the global background image. Default no-op — only SvgRenderer overrides.
-    fn set_background(&mut self, _bg: Option<Pixmap>) {}
+    fn set_background(&mut self, _bg: Option<Arc<Pixmap>>) {}
     /// Returns true when this source is an Xvfb capture stream.
     /// Used by the tick loop to decide whether to dump the last frame to tmpfs
     /// for GUI preview.  Default false — only XvfbSource overrides.

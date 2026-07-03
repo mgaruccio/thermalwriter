@@ -56,7 +56,7 @@ pub enum ModeChange {
     },
     /// Set or clear the global background image.
     Background {
-        image: Option<tiny_skia::Pixmap>,
+        image: Option<Arc<tiny_skia::Pixmap>>,
         /// Confirmation channel: listener sends Ok once the background is
         /// applied to the tick loop. Callers that don't need confirmation
         /// may drop this sender by passing `oneshot::channel().0`.
@@ -117,7 +117,7 @@ pub struct ServiceState {
     /// Used by start_stream_preset to build absolute config paths for preset argv.
     pub wrapper_dir: PathBuf,
     /// Currently active decoded background pixmap (premultiplied RGBA 480x480).
-    pub current_background: Option<tiny_skia::Pixmap>,
+    pub current_background: Option<Arc<tiny_skia::Pixmap>>,
     /// Serializes all writes to config.toml so concurrent D-Bus calls don't lose
     /// each other's edits (each writer does a read-modify-write cycle).
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -940,8 +940,9 @@ impl DisplayInterface {
         // Throwaway ack: bg_guard + disk write already serialize correctness; no
         // need to block here on tick-loop confirmation.
         let (ack_tx, _ack_rx) = oneshot::channel();
+        let pixmap_arc = Arc::new(pixmap);
         tx.send(ModeChange::Background {
-            image: Some(pixmap.clone()),
+            image: Some(pixmap_arc.clone()),
             ack: ack_tx,
         })
         .await
@@ -950,7 +951,7 @@ impl DisplayInterface {
         // Brief commit lock: update in-memory state mirror.
         {
             let mut state = self.state.lock().await;
-            state.current_background = Some(pixmap);
+            state.current_background = Some(pixmap_arc);
             state.config.background.image = Some(name);
         }
         Ok(())
