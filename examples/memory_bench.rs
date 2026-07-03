@@ -8,12 +8,16 @@
 //! Usage:
 //!   cargo run --release --example memory_bench [frames] [warmup]
 //!
+//! Measurement frames must be greater than 0. Warmup frames may be 0 to skip
+//! the warmup loop.
+//!
 //! Defaults: 200 measurement frames, 50 warmup frames.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use anyhow::{Context, Result, bail};
 use thermalwriter::config::builtin_layouts;
 use thermalwriter::render::FrameSource;
 use thermalwriter::render::background::decode_to_pixmap;
@@ -99,42 +103,44 @@ fn reset_counters() {
 // /proc/self/status readers
 // ---------------------------------------------------------------------------
 
-fn vm_rss_kb() -> u64 {
+fn vm_rss_kb() -> Result<u64> {
     read_proc_status_field("VmRSS")
 }
 
-fn vm_hwm_kb() -> u64 {
+fn vm_hwm_kb() -> Result<u64> {
     read_proc_status_field("VmHWM")
 }
 
-fn read_proc_status_field(field: &str) -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+fn read_proc_status_field(field: &str) -> Result<u64> {
+    let status =
+        std::fs::read_to_string("/proc/self/status").context("failed to read /proc/self/status")?;
     for line in status.lines() {
-        if let Some(rest) = line.strip_prefix(field) {
-            if let Some(rest) = rest.strip_prefix(':') {
-                return rest
-                    .trim()
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-            }
+        if let Some(rest) = line
+            .strip_prefix(field)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            let Some(raw_value) = rest.split_whitespace().next() else {
+                bail!("{field} missing numeric value in /proc/self/status");
+            };
+            return raw_value
+                .parse()
+                .with_context(|| format!("failed to parse {field} from /proc/self/status"));
         }
     }
-    0
+    bail!("{field} missing from /proc/self/status");
 }
 
 /// Live heap in-use from glibc mallinfo (uordblks). Independent cross-check
 /// against the counting allocator's net (allocated - deallocated).
-fn mallinfo_in_use_bytes() -> u64 {
+fn mallinfo_in_use_bytes() -> Option<u64> {
     #[cfg(target_env = "gnu")]
     {
         let info = unsafe { libc::mallinfo() };
-        info.uordblks as u64
+        Some(info.uordblks as u64)
     }
     #[cfg(not(target_env = "gnu"))]
     {
-        0
+        None
     }
 }
 
@@ -168,14 +174,41 @@ fn build_renderer(
     renderer
 }
 
+fn parse_frame_arg(
+    args: &[String],
+    index: usize,
+    default: u64,
+    name: &str,
+    allow_zero: bool,
+) -> u64 {
+    let Some(raw) = args.get(index) else {
+        return default;
+    };
+
+    let value: u64 = match raw.parse() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("invalid {name}: {raw}");
+            std::process::exit(2);
+        }
+    };
+
+    if value == 0 && !allow_zero {
+        eprintln!("{name} must be greater than 0");
+        std::process::exit(2);
+    }
+
+    value
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let measure_frames: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
-    let warmup_frames: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
+    let measure_frames = parse_frame_arg(&args, 1, 200, "measure_frames", false);
+    let warmup_frames = parse_frame_arg(&args, 2, 50, "warmup_frames", true);
 
     // Deterministic mock sensor data (same every run).
     let sensors = mock_sensors();
@@ -191,8 +224,8 @@ fn main() {
     }
 
     // ---- Pre-measurement snapshot ----
-    let rss_before = vm_rss_kb();
-    let hwm_before = vm_hwm_kb();
+    let rss_before = vm_rss_kb()?;
+    let hwm_before = vm_hwm_kb()?;
     let mallinfo_before = mallinfo_in_use_bytes();
     reset_counters(); // zero the counting allocator for the measurement window
 
@@ -211,16 +244,18 @@ fn main() {
 
     let elapsed = start.elapsed();
 
-    // ---- Post-measurement snapshot ----
-    let rss_after = vm_rss_kb();
-    let hwm_after = vm_hwm_kb();
-    let mallinfo_after = mallinfo_in_use_bytes();
-
-    // Counting allocator totals for the measurement window.
+    // Counting allocator totals for the measurement window. Snapshot these before
+    // post-measurement probes so /proc reads and allocator introspection are not
+    // counted as render-loop allocation churn.
     let total_allocated = TOTAL_ALLOCATED.load(Ordering::Relaxed);
     let total_deallocated = TOTAL_DEALLOCATED.load(Ordering::Relaxed);
     let alloc_count = ALLOC_COUNT.load(Ordering::Relaxed);
     let dealloc_count = DEALLOC_COUNT.load(Ordering::Relaxed);
+
+    // ---- Post-measurement snapshot ----
+    let rss_after = vm_rss_kb()?;
+    let hwm_after = vm_hwm_kb()?;
+    let mallinfo_after = mallinfo_in_use_bytes();
 
     let steady_rss_kb = rss_after;
     let peak_rss_kb = hwm_after;
@@ -240,7 +275,9 @@ fn main() {
     // Secondary: live net allocation growth during measurement (bytes). ~0 means no leak.
     println!("METRIC live_net_bytes={}", live_net_bytes);
     // Secondary: live heap from mallinfo (bytes). Independent cross-check.
-    println!("METRIC mallinfo_in_use_bytes={}", mallinfo_after);
+    if let Some(mallinfo_after) = mallinfo_after {
+        println!("METRIC mallinfo_in_use_bytes={}", mallinfo_after);
+    }
     // Secondary: average JPEG output size.
     println!("METRIC avg_jpeg_bytes={}", avg_jpeg_bytes);
 
@@ -255,8 +292,13 @@ fn main() {
         "peak rss (HWM):    {} KB (was {} KB before measure)",
         peak_rss_kb, hwm_before
     );
-    eprintln!("mallinfo before:   {} bytes", mallinfo_before);
-    eprintln!("mallinfo after:    {} bytes", mallinfo_after);
+    match (mallinfo_before, mallinfo_after) {
+        (Some(before), Some(after)) => {
+            eprintln!("mallinfo before:   {} bytes", before);
+            eprintln!("mallinfo after:    {} bytes", after);
+        }
+        _ => eprintln!("mallinfo: unavailable on this target"),
+    }
     eprintln!(
         "total allocated:   {} bytes ({} allocs)",
         total_allocated, alloc_count
@@ -268,4 +310,5 @@ fn main() {
     eprintln!("churn/frame:       {} bytes", churn_bytes_per_frame);
     eprintln!("live net growth:   {} bytes", live_net_bytes);
     eprintln!("avg jpeg size:     {} bytes", avg_jpeg_bytes);
+    Ok(())
 }

@@ -7,6 +7,9 @@
 //!
 //! Usage:
 //!   cargo run --release --example cpu_bench [frames] [warmup]
+//!
+//! Measurement frames must be greater than 0. Warmup frames may be 0 to skip
+//! the warmup loop.
 
 use std::sync::{Arc, Mutex};
 use thermalwriter::config::builtin_layouts;
@@ -44,10 +47,37 @@ fn build_renderer(
     renderer
 }
 
+fn parse_frame_arg(
+    args: &[String],
+    index: usize,
+    default: u64,
+    name: &str,
+    allow_zero: bool,
+) -> u64 {
+    let Some(raw) = args.get(index) else {
+        return default;
+    };
+
+    let value: u64 = match raw.parse() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("invalid {name}: {raw}");
+            std::process::exit(2);
+        }
+    };
+
+    if value == 0 && !allow_zero {
+        eprintln!("{name} must be greater than 0");
+        std::process::exit(2);
+    }
+
+    value
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let measure_frames: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
-    let warmup_frames: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
+    let measure_frames = parse_frame_arg(&args, 1, 200, "measure_frames", false);
+    let warmup_frames = parse_frame_arg(&args, 2, 50, "warmup_frames", true);
 
     let sensors = mock_sensors();
     let mut renderer = build_renderer(builtin_layouts::SVG_NEON_DASH_V2, &sensors);

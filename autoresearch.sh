@@ -9,15 +9,44 @@
 # Diagnostics go to stderr. Exit 0 on success, non-zero on failure.
 #
 # Env overrides:
-#   MEMORY_BENCH_FRAMES (default 200) — measurement frames for memory_bench
-#   MEMORY_BENCH_WARMUP (default 50)  — warmup frames for memory_bench
-#   CPU_BENCH_FRAMES  (default 200)   — measurement frames for cpu_bench
-#   CPU_BENCH_WARMUP  (default 50)    — warmup frames for cpu_bench
+#   MEMORY_BENCH_FRAMES (default 200) — measurement frames for memory_bench; must be >0
+#   MEMORY_BENCH_WARMUP (default 50)  — warmup frames for memory_bench; may be 0
+#   CPU_BENCH_FRAMES  (default 200)   — measurement frames for cpu_bench; must be >0
+#   CPU_BENCH_WARMUP  (default 50)    — warmup frames for cpu_bench; may be 0
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+require_non_negative_integer() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "!! invalid ${name}: ${value}" >&2
+        exit 2
+    fi
+}
+
+require_positive_integer() {
+    local name="$1"
+    local value="$2"
+    require_non_negative_integer "$name" "$value"
+    if [[ "$value" == "0" ]]; then
+        echo "!! invalid ${name}: ${value}" >&2
+        exit 2
+    fi
+}
+
+MEMORY_FRAMES="${MEMORY_BENCH_FRAMES:-200}"
+MEMORY_WARMUP="${MEMORY_BENCH_WARMUP:-50}"
+CPU_FRAMES="${CPU_BENCH_FRAMES:-200}"
+CPU_WARMUP="${CPU_BENCH_WARMUP:-50}"
+
+require_positive_integer MEMORY_BENCH_FRAMES "$MEMORY_FRAMES"
+require_non_negative_integer MEMORY_BENCH_WARMUP "$MEMORY_WARMUP"
+require_positive_integer CPU_BENCH_FRAMES "$CPU_FRAMES"
+require_non_negative_integer CPU_BENCH_WARMUP "$CPU_WARMUP"
 
 # ---------------------------------------------------------------------------
 # Build
@@ -43,10 +72,6 @@ fi
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-MEMORY_FRAMES="${MEMORY_BENCH_FRAMES:-200}"
-MEMORY_WARMUP="${MEMORY_BENCH_WARMUP:-50}"
-CPU_FRAMES="${CPU_BENCH_FRAMES:-200}"
-CPU_WARMUP="${CPU_BENCH_WARMUP:-50}"
 
 # memory_bench: stdout = METRIC lines, stderr = diagnostics.
 echo ">> Running memory_bench (${MEMORY_WARMUP} warmup, ${MEMORY_FRAMES} measure)..." >&2

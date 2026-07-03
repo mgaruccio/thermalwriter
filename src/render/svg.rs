@@ -119,14 +119,47 @@ fn template_needs_system_fonts(template: &str) -> bool {
                 return true;
             }
         } else if after_trimmed.starts_with(':') {
-            // CSS property form: font-family: ... (in <style> blocks)
-            let value = after_trimmed[1..].trim_start();
-            // Extract until next semicolon, closing brace, or end of string
-            let value = value
-                .split(|c| c == ';' || c == '}')
-                .next()
-                .unwrap_or(value)
-                .trim();
+            // CSS property form: font-family: ... (in <style> blocks or inline style attributes).
+            let raw_value = after_trimmed[1..].trim_start();
+            // Extract until the CSS declaration ends. For inline style attributes
+            // without a trailing semicolon, quote/< boundaries stop before the
+            // surrounding SVG markup. Quotes at the start of a family item are CSS
+            // quotes and do not end the whole font-family list.
+            let mut end = raw_value.len();
+            let mut quoted_family = None;
+            for (idx, ch) in raw_value.char_indices() {
+                if let Some(quote) = quoted_family {
+                    if ch == quote {
+                        quoted_family = None;
+                    }
+                    continue;
+                }
+
+                match ch {
+                    '"' | '\'' => {
+                        let before = raw_value[..idx].trim_end();
+                        if before.is_empty() || before.ends_with(',') {
+                            quoted_family = Some(ch);
+                        } else {
+                            end = idx;
+                            break;
+                        }
+                    }
+                    ';' | '}' | '<' => {
+                        end = idx;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if quoted_family.is_some() {
+                return true;
+            }
+
+            let value = raw_value[..end].trim();
+            if value.is_empty() && !raw_value.is_empty() {
+                return true;
+            }
             if check_font_list(value) {
                 return true;
             }
@@ -147,6 +180,16 @@ fn shared_fontdb_for_template(template: &str) -> Arc<usvg::fontdb::Database> {
         full_fontdb()
     } else {
         slim_fontdb()
+    }
+}
+
+fn options_for_template(template: &str) -> usvg::Options<'static> {
+    usvg::Options {
+        font_family: EMBEDDED_FONT_FAMILY.to_string(),
+        // Use slim fontdb (no system fonts) when the template only references
+        // the embedded font. Custom layouts with system fonts get the full fontdb.
+        fontdb: shared_fontdb_for_template(template),
+        ..Default::default()
     }
 }
 
@@ -179,13 +222,7 @@ pub struct SvgRenderer<'a> {
 
 impl<'a> SvgRenderer<'a> {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
-        let options = usvg::Options {
-            font_family: EMBEDDED_FONT_FAMILY.to_string(),
-            // Use slim fontdb (no system fonts) when the template only references
-            // the embedded font. Custom layouts with system fonts get the full fontdb.
-            fontdb: shared_fontdb_for_template(template),
-            ..Default::default()
-        };
+        let options = options_for_template(template);
 
         let mut tera = Tera::default();
         tera.autoescape_on(vec![]); // Disable autoescaping for SVG
@@ -410,10 +447,14 @@ impl FrameSource for SvgRenderer<'static> {
     }
 
     fn set_template(&mut self, template: &str) {
-        // Re-add template to the persistent Tera instance
+        // Re-add template to the persistent Tera instance. Keep the active options
+        // and defaults unchanged if Tera rejects the replacement template.
         if let Err(e) = self.tera.add_raw_template(&self.template_name, template) {
             log::warn!("Failed to update template: {}", e);
+            return;
         }
+
+        self.options = options_for_template(template);
         let frontmatter = LayoutFrontmatter::parse(template);
         self.variable_defaults = frontmatter
             .variables
@@ -469,6 +510,43 @@ mod tests {
     }
 
     #[test]
+    fn style_attribute_quoted_arial_triggers_full_fontdb() {
+        let template = r#"<svg><text style="font-family: 'Arial'">Test</text></svg>"#;
+        assert!(
+            template_needs_system_fonts(template),
+            "quoted style attribute with Arial should trigger full fontdb"
+        );
+    }
+
+    #[test]
+    fn style_attribute_quoted_known_then_arial_triggers_full_fontdb() {
+        let template =
+            r#"<svg><text style="font-family: 'DejaVu Sans Mono', Arial">Test</text></svg>"#;
+        assert!(
+            template_needs_system_fonts(template),
+            "quoted embedded font followed by Arial should trigger full fontdb"
+        );
+    }
+
+    #[test]
+    fn inline_style_embedded_font_without_semicolon_uses_slim_fontdb() {
+        let template = r#"<svg><text style="font-family: DejaVu Sans Mono">Test</text></svg>"#;
+        assert!(
+            !template_needs_system_fonts(template),
+            "inline style with embedded font should use slim fontdb"
+        );
+    }
+
+    #[test]
+    fn inline_style_monospace_without_semicolon_uses_slim_fontdb() {
+        let template = r#"<svg><text style="font-family: monospace">Test</text></svg>"#;
+        assert!(
+            !template_needs_system_fonts(template),
+            "inline style with monospace should use slim fontdb"
+        );
+    }
+
+    #[test]
     fn style_block_triggers_full_fontdb() {
         let template = r#"<svg><style>text { font-family: Arial; }</style><text>Test</text></svg>"#;
         assert!(
@@ -510,6 +588,24 @@ mod tests {
         assert!(
             !template_needs_system_fonts(template),
             "whitespace around = should be tolerated"
+        );
+    }
+
+    #[test]
+    fn set_template_recomputes_fontdb_for_new_template() {
+        let initial_template =
+            r#"<svg><text font-family="DejaVu Sans Mono, monospace">Test</text></svg>"#;
+        let mut renderer = SvgRenderer::new(initial_template, 480, 480).expect("valid SVG");
+        assert!(
+            Arc::ptr_eq(&renderer.options().fontdb, &slim_fontdb()),
+            "initial embedded-font template should use slim fontdb"
+        );
+
+        let replacement_template = r#"<svg><text font-family="Arial">Test</text></svg>"#;
+        renderer.set_template(replacement_template);
+        assert!(
+            Arc::ptr_eq(&renderer.options().fontdb, &full_fontdb()),
+            "replacement template with Arial should use full fontdb"
         );
     }
 }
