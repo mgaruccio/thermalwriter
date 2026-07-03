@@ -17,8 +17,8 @@ not "did this commit make things worse everywhere."
 
 ## Metadata
 
-- **Commit**: `18a3c90`
-- **Date**: 2026-07-03T07:46:07Z (UTC)
+- **Commit**: `8b5fec8`
+- **Date**: 2026-07-03T08:37:33Z (UTC)
 - **Kernel**: 7.0.12-1-cachyos
 - **CPU**: AMD Ryzen 9 9950X3D 16-Core Processor
 - **GPU**: NVIDIA GeForce RTX 5080 (sensor polling active — `nvidia-smi` is
@@ -36,71 +36,78 @@ not "did this commit make things worse everywhere."
 - **Result**: all 12 scenarios completed with `status=OK` — zero crashes,
   zero hangs, zero flamegraph-generation failures across the full sweep
 
+**Superseded numbers note**: an earlier version of this document (commit
+`ca74ec3`) understated every non-startup `cpu/frame` figure by ~15-18% —
+`cpu_per_frame_ms`'s denominator (`frames_sent`) was the cumulative
+whole-session frame count (including the 10s warmup) divided into a
+numerator (`cpu_seconds`) that only covers the 60s measure window. Fixed in
+`8b5fec8` (`frames_measure_estimate = frames_sent - tick_rate * warmup`,
+used only for this ratio); see `docs/profiling.md`'s Output section for the
+full formula and rationale. The numbers below are the corrected re-run.
+
 ## Results
 
 | scenario | cpu/frame (ms) | frames sent | avg RSS (KB) | peak RSS (KB) | total allocated (bytes) | time to first frame (ms) |
 |---|---|---|---|---|---|---|
-| neon-dash-v2 | 6.879 | 141 | 48490 | 50836 | 859240310 | n/a |
-| neon-dash | 7.092 | 141 | 46916 | 49212 | 844551028 | n/a |
-| arc-gauge | 13.191 | 141 | 47156 | 49296 | 1256640332 | n/a |
-| cyber-grid | 9.362 | 141 | 46907 | 47748 | 877842761 | n/a |
-| system-stats | 4.539 | 141 | 54378 | 54380 | 659350314 | n/a |
-| neon-dash-v2-bg-off | 9.220 | 141 | 42255 | 42680 | 849395516 | n/a |
-| neon-dash-v2-15fps | 5.857 | 1033 | 47141 | 49332 | 4635184023 | n/a |
-| neon-dash-v2-60fps | 5.628 | 3859 | 47718 | 49492 | 16377015974 | n/a |
-| neon-dash-v2-bg-off-15fps | 5.874 | 1035 | 42579 | 44784 | 4665450029 | n/a |
-| neon-dash-v2-bg-off-60fps | 5.654 | 3838 | 42795 | 44696 | 16585966015 | n/a |
-| xvfb-conky | 3.091 | 1032 | 40171 | 40172 | 1721506313 | n/a |
-| startup | 7.619 | 21 | 46728 | 48932 | 366410308 | 731.5 |
+| neon-dash-v2 | 10.496 | 141 | 49627 | 51964 | 847951237 | n/a |
+| neon-dash | 10.413 | 141 | 49688 | 51956 | 836577589 | n/a |
+| arc-gauge | 14.215 | 141 | 46971 | 49132 | 1248318535 | n/a |
+| cyber-grid | 10.744 | 141 | 49795 | 50772 | 873396289 | n/a |
+| system-stats | 5.455 | 141 | 54202 | 54204 | 657001039 | n/a |
+| neon-dash-v2-bg-off | 9.256 | 141 | 42219 | 44580 | 850464381 | n/a |
+| neon-dash-v2-15fps | 7.045 | 1040 | 48598 | 50772 | 4615935974 | n/a |
+| neon-dash-v2-60fps | 6.639 | 3885 | 46327 | 48316 | 16284034208 | n/a |
+| neon-dash-v2-bg-off-15fps | 6.866 | 1037 | 40980 | 43264 | 4617674876 | n/a |
+| neon-dash-v2-bg-off-60fps | 6.548 | 3859 | 41655 | 43484 | 16389069420 | n/a |
+| xvfb-conky | 3.631 | 1034 | 38585 | 38588 | 1707920487 | n/a |
+| startup | 7.619 | 21 | 45361 | 45424 | 335670028 | 783.0 |
 
 `total allocated (bytes)` is the dhat-heap build's lifetime total across the
 whole measurement window (`dhat: Total:` from its drop-time summary), not a
 steady-state figure — it scales with frames rendered (compare
-`neon-dash-v2` at 141 frames / ~859 MB against `neon-dash-v2-60fps` at 3859
-frames / ~16.4 GB: roughly linear with frame count, as expected for a
+`neon-dash-v2` at 141 frames / ~848 MB against `neon-dash-v2-60fps` at 3885
+frames / ~16.3 GB: roughly linear with frame count, as expected for a
 render pipeline that allocates fresh buffers per frame rather than reusing
 them).
 
 ### Read-throughs worth calling out
 
-- **`arc-gauge` is the most CPU-expensive built-in layout** (13.2 ms/frame
-  vs. 6.9-9.4 ms/frame for the others) at the same 2 FPS / background-on
-  config — worth a look if arc-gauge ever needs to run at a higher tick
-  rate.
-- **Background compositing costs relatively little**: `neon-dash-v2`
-  (bg on) vs. `neon-dash-v2-bg-off` is 6.879 ms vs. 9.220 ms/frame — the
-  "off" run is actually *higher*, which is more likely run-to-run sensor
-  polling / scheduler noise than compositing overhead, given the criterion
-  micro-benches (`cargo bench`) show `composite` as a small fraction of
-  total render time. Machine-specific, single-sample harness numbers like
-  these are exactly why criterion (statistically repeated, per-stage) is
-  the tool for anything sensitive to noise at this scale — see
-  `docs/profiling.md`.
+- **`arc-gauge` is the most CPU-expensive built-in layout** (14.215 ms/frame
+  vs. 10.4-10.7 ms/frame for the other SVG layouts) at the same 2 FPS /
+  background-on config — worth a look if arc-gauge ever needs to run at a
+  higher tick rate. `system-stats` (5.455 ms/frame) is cheaper still, but
+  it's the legacy HTML `TemplateRenderer` path, not the SVG pipeline, so
+  it's not a fair apples-to-apples comparison with the others.
+- **Background compositing has a real, measurable cost**: `neon-dash-v2`
+  (bg on, 10.496 ms/frame) vs. `neon-dash-v2-bg-off` (9.256 ms/frame) — a
+  consistent ~1.2 ms/frame (~13%) for the background blit, matching
+  intuition (compositing is strictly more work than not compositing). The
+  criterion micro-benches (`cargo bench`) can isolate exactly how much of
+  that is the `composite` stage itself vs. incidental variance.
 - **RSS scales gently with tick rate, not frame count**: 2/15/60 FPS peak
-  RSS is ~49-50 MB across the board (background on) — the daemon doesn't
+  RSS is ~48-52 MB across the board (background on) — the daemon doesn't
   appear to leak or balloon at higher frame rates in a 60s window.
-- **`xvfb-conky` has the lowest cpu/frame** (3.091 ms) — plausible, since
+- **`xvfb-conky` has the lowest cpu/frame** (3.631 ms) — plausible, since
   Xvfb capture is a memory copy from a shared framebuffer rather than a full
   SVG parse+rasterize+composite pipeline per frame.
-- **Startup (`ttff_ms=731.5`)**: ~0.73s from process spawn to the first
+- **Startup (`ttff_ms=783.0`)**: ~0.78s from process spawn to the first
   frame actually being sent, dominated by fontdb's system font scan (the
   `fontdb_is_loaded_once_across_multiple_renderers` test already
   demonstrates the first `SvgRenderer::new()` call is the expensive one;
   subsequent renderer constructions are a cheap `Arc::clone`).
 - **CPU flamegraphs correctly show only the daemon's own code** —
-  `perf record --no-inherit` (added alongside this sweep) keeps
-  `nvidia-smi` (forked once per second by `NvidiaProvider`, confirmed
-  present and actively invoked on this machine) out of every flamegraph;
-  spot-checked `neon-dash-v2/flamegraph.svg` directly for zero nvidia
-  references despite ~70 nvidia-smi invocations during that scenario's
-  warmup+measurement window.
+  `perf record --no-inherit` keeps `nvidia-smi` (forked once per second by
+  `NvidiaProvider`, confirmed present and actively invoked on this machine)
+  out of every flamegraph; spot-checked `neon-dash-v2/flamegraph.svg`
+  directly for zero nvidia references despite ~70 nvidia-smi invocations
+  during that scenario's warmup+measurement window.
 - **The previously-reported spurious "flamegraph generation failed" on
-  `xvfb-conky` did not reproduce** in this run — `status=OK`, a
-  correctly-sized `flamegraph.svg` (35930 bytes, in line with the other
-  scenarios), and no `!! flamegraph generation failed` in the sweep log.
-  Consistent with `--no-inherit` having eliminated the underlying cause
-  (perf no longer follows/traces the Xvfb/conky children that were
-  previously torn down mid-trace).
+  `xvfb-conky` did not reproduce** in this run either (second sweep in a
+  row) — `status=OK`, a correctly-sized `flamegraph.svg`, and no
+  `!! flamegraph generation failed` in the sweep log. Consistent with
+  `--no-inherit` having eliminated the underlying cause (perf no longer
+  follows/traces the Xvfb/conky children that were previously torn down
+  mid-trace).
 
 ## TODO: headless-vs-hardware cross-check
 
