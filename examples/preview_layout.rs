@@ -9,13 +9,13 @@
 //!   cargo run --example preview_layout neon-dash                 # layouts/<name>.html
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, TemplateRenderer};
 use thermalwriter::sensor::history::SensorHistory;
+use thermalwriter::sensor::mock::{fill_synthetic_history, mock_sensors};
 use thermalwriter::theme::ThemePalette;
 
 /// Returns (content, display_name, is_svg).
@@ -74,51 +74,6 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
             other
         ),
     }
-}
-
-/// Generate synthetic history data for preview (60 points, sinusoidal wave around a base value).
-/// Uses a deterministic pattern so previews are reproducible.
-fn fill_synthetic_history(
-    history: &mut SensorHistory,
-    metrics: &[String],
-    sensor_data: &HashMap<String, String>,
-) {
-    let sample_count = 60usize;
-    for metric in metrics {
-        // Use current sensor value as base if available, otherwise pick a reasonable default
-        let base: f64 = sensor_data
-            .get(metric)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50.0);
-
-        for i in 0..sample_count {
-            // Sinusoidal variation ±20% of base
-            let phase = (i as f64 / sample_count as f64) * std::f64::consts::TAU;
-            let amplitude = base * 0.2;
-            let value = (base + amplitude * phase.sin()).max(0.0);
-
-            let mut data = HashMap::new();
-            data.insert(metric.clone(), format!("{:.1}", value));
-            history.record(&data);
-        }
-    }
-}
-
-/// Mock sensor data keeps preview generation deterministic and hardware-free.
-fn mock_sensors() -> HashMap<String, String> {
-    HashMap::from([
-        ("cpu_temp".into(), "67".into()),
-        ("cpu_util".into(), "42".into()),
-        ("gpu_temp".into(), "71".into()),
-        ("gpu_util".into(), "87".into()),
-        ("gpu_power".into(), "285".into()),
-        ("ram_used".into(), "24.2".into()),
-        ("ram_total".into(), "60.4".into()),
-        ("vram_used".into(), "9.8".into()),
-        ("vram_total".into(), "15.9".into()),
-        ("fps".into(), "144".into()),
-        ("frametime".into(), "6.9".into()),
-    ])
 }
 
 fn main() -> Result<()> {

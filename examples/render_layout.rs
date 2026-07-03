@@ -8,18 +8,18 @@
 //!   cargo run --example render_layout layouts/my.html      # file path, live, 30s
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
+use thermalwriter::render::{FrameSource, TemplateRenderer};
 use thermalwriter::sensor::SensorHub;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::mock::{mock_sensors, mock_sensors_varying};
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
@@ -83,34 +83,6 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
             other
         ),
     }
-}
-
-/// Mock sensor data simulating a gaming session under load.
-fn mock_sensors() -> SensorData {
-    let mut m = HashMap::new();
-    m.insert("cpu_temp".into(), "67".into());
-    m.insert("cpu_util".into(), "42".into());
-    m.insert("gpu_temp".into(), "71".into());
-    m.insert("gpu_util".into(), "87".into());
-    m.insert("gpu_power".into(), "285".into());
-    m.insert("ram_used".into(), "24.2".into());
-    m.insert("ram_total".into(), "60.4".into());
-    m.insert("vram_used".into(), "9.8".into());
-    m.insert("vram_total".into(), "15.9".into());
-    m.insert("fps".into(), "144".into());
-    m.insert("frametime".into(), "6.9".into());
-    m
-}
-
-/// Generate mock sensor data with slight variation for history (to make graphs visible).
-fn mock_sensors_varying(iteration: u64) -> SensorData {
-    let mut m = mock_sensors();
-    let phase = (iteration as f64 * 0.3).sin();
-    let cpu_util: f64 = 42.0 + phase * 15.0;
-    let cpu_temp: f64 = 67.0 + phase * 5.0;
-    m.insert("cpu_util".into(), format!("{:.1}", cpu_util));
-    m.insert("cpu_temp".into(), format!("{:.0}", cpu_temp));
-    m
 }
 
 fn main() -> Result<()> {
