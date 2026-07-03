@@ -85,6 +85,11 @@ pub struct BulkUsb {
     ep_out: u8,
     ep_in: u8,
     info: Option<DeviceInfo>,
+    /// Total frames successfully sent over this transport's lifetime —
+    /// mirrors NullTransport's counter so profiling can compute
+    /// cpu-per-frame on real hardware too. Persists across reconnects
+    /// (try_reconnect transplants handle/ep_out/ep_in/info but not this).
+    frames_sent: u64,
 }
 
 impl BulkUsb {
@@ -141,6 +146,7 @@ impl BulkUsb {
             ep_out,
             ep_in,
             info: None,
+            frames_sent: 0,
         })
     }
 
@@ -150,6 +156,7 @@ impl BulkUsb {
             ep_out: 0,
             ep_in: 0,
             info: None,
+            frames_sent: 0,
         }
     }
 }
@@ -259,6 +266,7 @@ impl Transport for BulkUsb {
         if let Err(ref e) = send_result {
             self.mark_disconnected_if_fatal(e);
         } else {
+            self.frames_sent += 1;
             debug!(
                 "Frame sent: {}x{}, cmd={}, {} bytes",
                 log_info.0, log_info.1, log_info.2, log_info.3
@@ -270,7 +278,7 @@ impl Transport for BulkUsb {
     fn close(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = handle.release_interface(0);
-            info!("BulkUSB device closed");
+            info!("BulkUsb closed: {} frames sent", self.frames_sent);
         }
         self.info = None;
     }

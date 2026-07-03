@@ -555,16 +555,20 @@ run_pass() {
 
   # Second half of the positive-confirmation check: the daemon's own SIGTERM
   # handler logs "thermalwriter shutdown complete" as its last line, right
-  # after transport.close() (which logs "NullTransport closed: N frames
-  # sent"). Its absence means the process went away some other way even if
-  # the kill -0 loop above saw it exit (e.g. it was reaped by something else).
+  # after transport.close() (which logs "<NullTransport|BulkUsb> closed: N
+  # frames sent"). Its absence means the process went away some other way
+  # even if the kill -0 loop above saw it exit (e.g. reaped by something else).
   if [[ "$daemon_ok" -eq 1 ]] && ! grep -q "thermalwriter shutdown complete" "$log_file"; then
     echo "!! [$scenario/$pass] daemon exited but no clean-shutdown log line found (see $log_file)" >&2
     daemon_ok=0
   fi
 
+  # NullTransport logs this exactly once (its try_reconnect never fires).
+  # BulkUsb (real --hardware runs) can log it multiple times — once per
+  # try_reconnect-triggered close, plus once at final shutdown — so take the
+  # LAST occurrence, which is the run's true final tally.
   local frames_sent
-  frames_sent=$(grep -o 'NullTransport closed: [0-9]* frames sent' "$log_file" | grep -o '[0-9]*' | head -1 || true)
+  frames_sent=$(grep -oE '(NullTransport|BulkUsb) closed: [0-9]+ frames sent' "$log_file" | grep -oE '[0-9]+' | tail -1 || true)
   frames_sent="${frames_sent:-0}"
 
   if [[ "$pass" == "cpu" ]]; then
@@ -658,7 +662,7 @@ emit_summary() {
     echo "- cpu: $(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
     echo "- build profile: profiling (CPU/RSS), profiling+dhat-heap (allocations)"
     if [[ "$HARDWARE_MODE" == 1 ]]; then
-      echo "- transport: real BulkUsb (--hardware) — frames sent/cpu-per-frame are n/a (no NullTransport frame-count log on this path)"
+      echo "- transport: real BulkUsb (--hardware)"
     else
       echo "- transport: NullTransport (headless)"
     fi
