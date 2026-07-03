@@ -12,6 +12,10 @@
 #   scripts/profile.sh --list                 # show available scenarios
 #   scripts/profile.sh <scenario>             # profile one scenario
 #   scripts/profile.sh --all                  # curated ~12-scenario sweep
+#   scripts/profile.sh --hardware <scenario>  # profile against the real device
+#                                              # (stops thermalwriter.service
+#                                              # for the duration, restores it
+#                                              # afterward iff it was running)
 #
 # Compare workflow for the criterion micro-benches (per-stage, cross-machine
 # comparable) lives in docs/profiling.md — this script captures whole-daemon,
@@ -55,6 +59,15 @@ CURRENT_DAEMON_PID=""
 CURRENT_RSS_PID=""
 LOCK_DIR=""
 
+# --hardware mode: the live systemd user service is stopped for the whole
+# invocation (not per-scenario — it just needs to not be holding the USB
+# device while our own test daemon runs) and restored on any exit path,
+# but ONLY if it was actually running beforehand — never start a service
+# the user had deliberately disabled/stopped.
+HARDWARE_MODE=0
+HARDWARE_SERVICE_WAS_ACTIVE=""
+HARDWARE_SERVICE_UNIT="thermalwriter.service"
+
 cleanup_children() {
   # Best-effort, idempotent — safe to call more than once (e.g. from both an
   # INT/TERM trap's exit and the subsequent EXIT trap).
@@ -82,6 +95,36 @@ cleanup_children() {
     rm -rf "$LOCK_DIR" 2>/dev/null || true
     LOCK_DIR=""
   fi
+  if [[ "$HARDWARE_SERVICE_WAS_ACTIVE" == "1" ]]; then
+    echo ">> --hardware: restoring $HARDWARE_SERVICE_UNIT (it was running before this profiling run)" >&2
+    systemctl --user start "$HARDWARE_SERVICE_UNIT" 2>/dev/null || \
+      echo "!! --hardware: failed to restart $HARDWARE_SERVICE_UNIT — restart it manually" >&2
+  fi
+  HARDWARE_SERVICE_WAS_ACTIVE=""
+}
+
+# Stops the live service so our own test daemon can claim the USB device.
+# Called at most once per invocation, before any scenario passes run.
+stop_live_service_for_hardware() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "ERROR: --hardware requires systemctl to manage $HARDWARE_SERVICE_UNIT (not found)." >&2
+    exit 1
+  fi
+
+  if systemctl --user is-active --quiet "$HARDWARE_SERVICE_UNIT"; then
+    HARDWARE_SERVICE_WAS_ACTIVE=1
+    echo ">> --hardware: stopping $HARDWARE_SERVICE_UNIT to free the USB device"
+    systemctl --user stop "$HARDWARE_SERVICE_UNIT"
+  else
+    HARDWARE_SERVICE_WAS_ACTIVE=0
+    echo ">> --hardware: $HARDWARE_SERVICE_UNIT was not active; nothing to stop"
+  fi
+
+  # The service may not have released the device's exclusive USB claim the
+  # instant `systemctl stop` returns. A short settle time here is cheap
+  # insurance; the daemon's own try_reconnect/handshake retry logic (see
+  # src/transport/bulk_usb.rs) covers any residual race beyond this.
+  sleep 2
 }
 
 on_exit() {
@@ -393,9 +436,17 @@ run_pass() {
   local log_file="$out_dir/${pass}_daemon.log"
   echo ">> [$scenario/$pass] launching (warmup=${warmup}s, measure=${measure}s)"
 
-  ( cd "$scratch" && XDG_CONFIG_HOME="$cfg_home" XDG_RUNTIME_DIR="$run_home" \
-      THERMALWRITER_TRANSPORT=null RUST_LOG=info \
-      dbus-run-session -- "$bin" daemon >"$log_file" 2>&1 ) &
+  # --hardware: leave THERMALWRITER_TRANSPORT unset so transport_from_env()
+  # picks TransportKind::Usb (the real BulkUsb path) instead of NullTransport.
+  if [[ "$HARDWARE_MODE" == 1 ]]; then
+    ( cd "$scratch" && XDG_CONFIG_HOME="$cfg_home" XDG_RUNTIME_DIR="$run_home" \
+        RUST_LOG=info \
+        dbus-run-session -- "$bin" daemon >"$log_file" 2>&1 ) &
+  else
+    ( cd "$scratch" && XDG_CONFIG_HOME="$cfg_home" XDG_RUNTIME_DIR="$run_home" \
+        THERMALWRITER_TRANSPORT=null RUST_LOG=info \
+        dbus-run-session -- "$bin" daemon >"$log_file" 2>&1 ) &
+  fi
   local wrapper_pid=$!
   CURRENT_WRAPPER_PID="$wrapper_pid"
 
@@ -606,6 +657,11 @@ emit_summary() {
     echo "- kernel: $(uname -r)"
     echo "- cpu: $(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
     echo "- build profile: profiling (CPU/RSS), profiling+dhat-heap (allocations)"
+    if [[ "$HARDWARE_MODE" == 1 ]]; then
+      echo "- transport: real BulkUsb (--hardware) — frames sent/cpu-per-frame are n/a (no NullTransport frame-count log on this path)"
+    else
+      echo "- transport: NullTransport (headless)"
+    fi
     echo
     echo "| scenario | cpu/frame (ms) | frames sent | avg RSS (KB) | peak RSS (KB) | total allocated (bytes) | time to first frame (ms) |"
     echo "|---|---|---|---|---|---|---|"
@@ -653,6 +709,12 @@ emit_summary() {
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <scenario> | --all | --list
+       $(basename "$0") --hardware <scenario>
+
+--hardware profiles against the real device instead of NullTransport: it
+stops $HARDWARE_SERVICE_UNIT for the duration (restoring it afterward iff it
+was running beforehand) and unsets THERMALWRITER_TRANSPORT so the daemon
+uses the real BulkUsb path.
 
 Scenarios:
 $(for s in "${DEFAULT_SWEEP[@]}"; do echo "  $s"; done)
@@ -670,6 +732,16 @@ main() {
     exit 0
   fi
 
+  if [[ "$1" == "--hardware" ]]; then
+    HARDWARE_MODE=1
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "ERROR: --hardware requires a scenario, e.g. '$(basename "$0") --hardware neon-dash-v2'." >&2
+      usage >&2
+      exit 1
+    fi
+  fi
+
   local scenarios=()
   if [[ "$1" == "--all" ]]; then
     scenarios=("${DEFAULT_SWEEP[@]}")
@@ -684,6 +756,10 @@ main() {
 
   acquire_lock
   preflight "${scenarios[@]}"
+
+  if [[ "$HARDWARE_MODE" == 1 ]]; then
+    stop_live_service_for_hardware
+  fi
 
   # Drop xvfb-conky from an --all sweep if binaries are missing (soft skip);
   # a single explicit "xvfb-conky" request without binaries already failed
