@@ -1,4 +1,5 @@
 /target
+/profiling-results/
 .worktrees/
 .agents/
 .claude/
