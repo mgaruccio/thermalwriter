@@ -31,6 +31,15 @@ use thermalwriter::transport::null::{NullTransport, TransportKind, transport_fro
 const FALLBACK_DISPLAY_WIDTH: u32 = 480;
 const FALLBACK_DISPLAY_HEIGHT: u32 = 480;
 
+// Heap allocation profiling, behind the `dhat-heap` feature (never enabled in
+// the shipped default build). The global allocator swap applies to the whole
+// process, but the `Profiler` below is only created for actual daemon runs —
+// it writes its output file (dhat-heap.json) when dropped, which happens on
+// any exit from `main` (clean SIGTERM shutdown or an early startup error).
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -48,6 +57,9 @@ async fn main() -> Result<()> {
         }
         Command::Daemon => {} // fall through to daemon startup below
     }
+
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
 
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
