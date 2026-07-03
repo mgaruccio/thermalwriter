@@ -26,6 +26,7 @@ use thermalwriter::service::tick;
 use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::Transport;
 use thermalwriter::transport::bulk_usb::BulkUsb;
+use thermalwriter::transport::null::{NullTransport, TransportKind, transport_from_env};
 
 const FALLBACK_DISPLAY_WIDTH: u32 = 480;
 const FALLBACK_DISPLAY_HEIGHT: u32 = 480;
@@ -92,32 +93,55 @@ async fn main() -> Result<()> {
             None
         };
 
-    // Setup USB transport. Absence at daemon startup must not prevent D-Bus from
-    // coming up; the tick loop retries reconnects until the display appears.
-    let (mut transport, connected, display) = match BulkUsb::new().and_then(|mut transport| {
-        let device_info = transport.handshake()?;
-        Ok((transport, device_info))
-    }) {
-        Ok((transport, device_info)) => {
-            info!(
-                "Device: {}x{}, PM={}, JPEG={}",
-                device_info.width, device_info.height, device_info.pm, device_info.use_jpeg
-            );
-            (
-                transport,
-                true,
-                RuntimeDisplayDimensions::new(device_info.width, device_info.height),
-            )
-        }
-        Err(e) => {
-            warn!("USB display unavailable at startup: {e:#}; daemon will keep running and retry");
-            (
-                BulkUsb::disconnected(),
-                false,
-                RuntimeDisplayDimensions::new(FALLBACK_DISPLAY_WIDTH, FALLBACK_DISPLAY_HEIGHT),
-            )
-        }
-    };
+    // Setup transport. Absence of the USB display at daemon startup must not
+    // prevent D-Bus from coming up; the tick loop retries reconnects until the
+    // display appears. THERMALWRITER_TRANSPORT=null swaps in NullTransport for
+    // headless profiling runs — no hardware, no USB claim.
+    let (mut transport, connected, display): (Box<dyn Transport>, bool, RuntimeDisplayDimensions) =
+        match transport_from_env(std::env::var("THERMALWRITER_TRANSPORT").ok().as_deref()) {
+            TransportKind::Null => {
+                let mut transport = NullTransport::new();
+                let device_info = transport.handshake()?; // NullTransport handshake never fails
+                info!(
+                    "NullTransport active (headless profiling): {}x{}",
+                    device_info.width, device_info.height
+                );
+                (
+                    Box::new(transport),
+                    true,
+                    RuntimeDisplayDimensions::new(device_info.width, device_info.height),
+                )
+            }
+            TransportKind::Usb => match BulkUsb::new().and_then(|mut transport| {
+                let device_info = transport.handshake()?;
+                Ok((transport, device_info))
+            }) {
+                Ok((transport, device_info)) => {
+                    info!(
+                        "Device: {}x{}, PM={}, JPEG={}",
+                        device_info.width, device_info.height, device_info.pm, device_info.use_jpeg
+                    );
+                    (
+                        Box::new(transport),
+                        true,
+                        RuntimeDisplayDimensions::new(device_info.width, device_info.height),
+                    )
+                }
+                Err(e) => {
+                    warn!(
+                        "USB display unavailable at startup: {e:#}; daemon will keep running and retry"
+                    );
+                    (
+                        Box::new(BulkUsb::disconnected()),
+                        false,
+                        RuntimeDisplayDimensions::new(
+                            FALLBACK_DISPLAY_WIDTH,
+                            FALLBACK_DISPLAY_HEIGHT,
+                        ),
+                    )
+                }
+            },
+        };
 
     // Setup sensor hub with all providers
     let mut sensor_hub = SensorHub::new();
@@ -547,7 +571,7 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         res = tick::run_tick_loop(
-            &mut transport,
+            transport.as_mut(),
             initial_frame_source,
             &mut source_rx,
             &mut sensor_hub,

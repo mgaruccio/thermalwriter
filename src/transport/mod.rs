@@ -2,6 +2,7 @@
 // Defines the Transport trait for sending frames to the cooler LCD.
 
 pub mod bulk_usb;
+pub mod null;
 
 use anyhow::Result;
 
