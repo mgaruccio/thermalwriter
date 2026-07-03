@@ -211,6 +211,14 @@ impl<'a> SvgRenderer<'a> {
             .render(&self.template_name, context)
             .context("Tera template substitution failed")
     }
+
+    /// The usvg parse options (embedded font family + shared fontdb) used by
+    /// `render()`. Exposed so benches can call `parse_svg` with the same
+    /// options the real pipeline uses.
+    #[doc(hidden)]
+    pub fn options(&self) -> &usvg::Options<'a> {
+        &self.options
+    }
 }
 
 /// Parse the substituted SVG string into a `usvg::Tree`.

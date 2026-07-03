@@ -40,7 +40,7 @@ pub fn mock_sensors_varying(iteration: u64) -> SensorData {
 pub fn fill_synthetic_history(
     history: &mut SensorHistory,
     metrics: &[String],
-    sensor_data: &HashMap<String, String>,
+    sensor_data: &SensorData,
 ) {
     let sample_count = 60usize;
     for metric in metrics {

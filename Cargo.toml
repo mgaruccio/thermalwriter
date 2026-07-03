@@ -125,3 +125,13 @@ required-features = ["daemon"]
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "pipeline"
+harness = false
+required-features = ["daemon"]
+
+[[bench]]
+name = "render"
+harness = false
