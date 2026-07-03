@@ -48,7 +48,11 @@ thermalwriter ctl status                 # query daemon via D-Bus
 thermalwriter ctl mirror "command"       # xvfb capture mode (any X11 app, freeform sh -c)
 thermalwriter ctl stream conky           # stream a built-in preset (conky/cava/btop) — session-only
 thermalwriter setup-udev                 # one-shot: install udev rule for RAPL cpu_power access (re-execs under sudo)
+cargo bench                              # criterion micro-benches, hot pipeline stages (NOT the `bench` subcommand above)
+scripts/profile.sh --list                # scenario profiling harness (flamegraphs/dhat/RSS)
 ```
+
+See `docs/profiling.md` for the full profiling harness + criterion workflow, and `docs/profiling-baselines.md` for the current committed baseline numbers.
 
 ### Layout Development
 
