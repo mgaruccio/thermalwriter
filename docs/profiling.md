@@ -26,9 +26,6 @@ they don't survive across machines. Cross-machine regression detection is
 this benchmark suite's job; the scenario harness (below) captures
 machine-specific, whole-daemon numbers instead.
 
-<!-- Scenario harness usage (flamegraphs, dhat allocation profiles, RSS
-     timelines) is documented here once scripts/profile.sh lands. -->
-
 ## Scenario harness (`scripts/profile.sh`)
 
 Not a shipped subcommand — a dev-only script, invoked directly from a
@@ -111,7 +108,7 @@ Checked up front with actionable messages, not assumed:
 Per scenario, under `profiling-results/<scenario>/` (gitignored):
 
 - `cpu_daemon.log` / `dhat_daemon.log` — full daemon stdout/stderr for each pass
-- `cpu_metrics.txt` — `status=OK|ERROR`, `cpu_seconds`, `frames_sent`, `cpu_per_frame_ms`
+- `cpu_metrics.txt` — `status=OK|ERROR`, `cpu_seconds`, `frames_sent`, `frames_measure_estimate`, `cpu_per_frame_ms`
 - `dhat_metrics.txt` — `status=OK|ERROR`, `frames_sent`, `total_bytes_allocated`, `total_blocks_allocated`, `gmax_bytes`
 - `rss_timeline.csv` — `elapsed_seconds,rss_kb` samples
 - `perf.data` / `flamegraph.svg` — CPU profile and rendered flamegraph
@@ -127,6 +124,28 @@ reason) instead of a derived number — a mid-window daemon exit makes
 compute one rather than print something misleadingly precise. `--all` keeps
 going past a single scenario's `ERROR`; it only stops on a preflight failure
 or a signal.
+
+**`cpu_per_frame_ms` formula.** `frames_sent` (the number transport.close()
+logs, e.g. `NullTransport closed: N frames sent`) is the *cumulative* total
+since the daemon spawned — it includes the warmup window. `cpu_seconds`
+(from `/proc/<pid>/stat` utime+stime deltas) only covers the post-warmup
+measure window, since `start_ticks` is deliberately captured *after* warmup
+sleeps (one-time costs like fontdb loading and config/layout seeding belong
+to the excluded warmup, not the steady-state number). Dividing measure-only
+CPU by the whole-session frame count understates `cpu_per_frame_ms` by
+roughly `warmup / (warmup + measure)` — about 17% at the default 10s/60s
+split. The harness corrects for this: `frames_measure_estimate = frames_sent
+- (tick_rate * warmup)`, and `cpu_per_frame_ms = (cpu_seconds * 1000) /
+frames_measure_estimate`. This is an *estimate*, not an exact post-warmup
+frame count (`tick_rate * warmup` assumes the tick loop hit its target rate
+exactly during warmup — in practice it's usually off by one or two frames of
+scheduler jitter) — sufficient for a whole-daemon sanity number; the
+criterion benches above are the tool for anything needing tighter precision.
+If `frames_measure_estimate` comes out non-positive (the daemon didn't even
+clear its own warmup-frame quota), `cpu_per_frame_ms` reads `ERROR` rather
+than a nonsensical or divide-by-zero value. The `startup` scenario has
+`warmup=0`, so the correction is a no-op there — its `frames_sent` already
+*is* the measure-window count.
 
 `profiling-results/summary.md` is the machine-generated rollup: a metadata
 block (commit hash, date, kernel, CPU model, build profile, transport) and

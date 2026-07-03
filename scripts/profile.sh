@@ -441,6 +441,13 @@ run_pass() {
     measure="$MEASURE_SECONDS"
   fi
 
+  # tick_rate is needed below to separate warmup-window frames from
+  # measure-window frames for the cpu_per_frame_ms denominator. The other
+  # three fields are already handled by write_scenario_config above.
+  local sf_layout sf_mode sf_bg tick_rate
+  # shellcheck disable=SC2034 # sf_layout/sf_mode/sf_bg: only tick_rate is used here
+  IFS='|' read -r sf_layout sf_mode sf_bg tick_rate <<< "$(scenario_fields "$scenario")"
+
   local log_file="$out_dir/${pass}_daemon.log"
   echo ">> [$scenario/$pass] launching (warmup=${warmup}s, measure=${measure}s)"
 
@@ -609,15 +616,32 @@ run_pass() {
       local tck cpu_seconds cpu_per_frame_ms
       tck=$(clk_tck)
       cpu_seconds=$(awk -v s="$start_ticks" -v e="$end_ticks" -v t="$tck" 'BEGIN{printf "%.4f", (e-s)/t}')
-      if [[ "$frames_sent_numeric" -gt 0 ]]; then
-        cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_sent_numeric" 'BEGIN{printf "%.3f", (c*1000)/f}')
+      # frames_sent_numeric is the CUMULATIVE total since daemon spawn
+      # (transport.close()'s tally), but cpu_seconds only covers the
+      # post-warmup measure window (start_ticks is captured after warmup,
+      # see above) — dividing measure-window CPU by the whole-session frame
+      # count understates cpu_per_frame_ms by roughly
+      # warmup/(warmup+measure) (~17% at the default 10s warmup / 60s
+      # measure split; verified against the committed neon-dash-v2 baseline:
+      # 141 frames at 2 FPS is a ~70s session, not the 60s measure window).
+      # Subtract the warmup window's own frame count (tick_rate * warmup —
+      # the one span we deliberately don't need to measure precisely) to
+      # recover a frames-during-measure-window estimate; "startup" has
+      # warmup=0 so this is a no-op there. A non-positive result means the
+      # daemon didn't even clear its own warmup-frame quota (e.g. it fell
+      # badly behind or barely started) — render ERROR rather than a
+      # nonsensical or divide-by-zero value.
+      local frames_measure=$(( frames_sent_numeric - tick_rate * warmup ))
+      if [[ "$frames_measure" -gt 0 ]]; then
+        cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_measure" 'BEGIN{printf "%.3f", (c*1000)/f}')
       else
-        cpu_per_frame_ms="n/a"
+        cpu_per_frame_ms="ERROR"
       fi
       {
         echo "status=OK"
         echo "cpu_seconds=$cpu_seconds"
         echo "frames_sent=$frames_sent"
+        echo "frames_measure_estimate=$frames_measure"
         echo "cpu_per_frame_ms=$cpu_per_frame_ms"
         echo "device_never_claimed=$device_never_claimed"
       } > "$out_dir/cpu_metrics.txt"
