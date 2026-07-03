@@ -26,7 +26,8 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
     Arc::clone(SHARED_FONTDB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_font_data(EMBEDDED_FONT.to_vec());
-        db.load_system_fonts();
+        // Skip load_system_fonts() — all built-in layouts only use the embedded
+        // "DejaVu Sans Mono" font. System font scan adds ~3MB RSS for no benefit.
         db.set_monospace_family(EMBEDDED_FONT_FAMILY);
         Arc::new(db)
     }))
