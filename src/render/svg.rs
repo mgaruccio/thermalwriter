@@ -20,17 +20,133 @@ const EMBEDDED_FONT_FAMILY: &str = "DejaVu Sans Mono";
 
 // Shared fontdb — system font scan runs once at startup; all SvgRenderer instances share
 // the same Arc<Database>. Construction is a pure refcount bump — no Database::clone.
-static SHARED_FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+//
+// Two fontdb variants are cached: slim (embedded font only, ~400KB RSS) and full
+// (embedded + system fonts, ~3MB RSS). The slim variant is used when the template
+// only references the embedded font or generic families that map to it. Custom
+// layouts with system fonts automatically get the full fontdb.
+static SLIM_FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+static FULL_FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
 
-fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
-    Arc::clone(SHARED_FONTDB.get_or_init(|| {
+fn slim_fontdb() -> Arc<usvg::fontdb::Database> {
+    Arc::clone(SLIM_FONTDB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_font_data(EMBEDDED_FONT.to_vec());
-        // Skip load_system_fonts() — all built-in layouts only use the embedded
-        // "DejaVu Sans Mono" font. System font scan adds ~3MB RSS for no benefit.
         db.set_monospace_family(EMBEDDED_FONT_FAMILY);
         Arc::new(db)
     }))
+}
+
+fn full_fontdb() -> Arc<usvg::fontdb::Database> {
+    Arc::clone(FULL_FONTDB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(EMBEDDED_FONT.to_vec());
+        db.load_system_fonts();
+        db.set_monospace_family(EMBEDDED_FONT_FAMILY);
+        Arc::new(db)
+    }))
+}
+
+/// Scan a template for font-family references. Returns true if any font-family
+/// value is NOT the embedded font or "monospace". Conservative: if parsing fails
+/// or unknown syntax is encountered, returns true (load system fonts).
+fn template_needs_system_fonts(template: &str) -> bool {
+    // Only these two font families are available without system fonts:
+    // - "DejaVu Sans Mono": the embedded font
+    // - "monospace": mapped to the embedded font via set_monospace_family
+    // All other generics (serif, sans-serif, cursive, fantasy, system-ui) require
+    // system fonts because we don't map them to the embedded font.
+    fn is_known_family(family: &str) -> bool {
+        let family = family.trim();
+        family.eq_ignore_ascii_case(EMBEDDED_FONT_FAMILY)
+            || family.eq_ignore_ascii_case("monospace")
+    }
+
+    // Check a font-family value (comma-separated list)
+    fn check_font_list(value: &str) -> bool {
+        for family in value.split(',') {
+            let family = family.trim().trim_matches('"').trim_matches('\'').trim();
+            if family.is_empty() {
+                continue;
+            }
+            // If it contains a Tera variable, conservatively assume it needs system fonts
+            if family.contains("{{") || family.contains("}}") {
+                return true;
+            }
+            if !is_known_family(family) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Conservative: scan for ALL occurrences of "font-family" (case-insensitive).
+    // For each occurrence:
+    // - If followed by '=' (with optional whitespace), parse the attribute value
+    // - Otherwise (CSS in <style> blocks, unknown syntax), return true
+    let template_lower = template.to_ascii_lowercase();
+    let mut search_start = 0;
+    
+    while let Some(pos) = template_lower[search_start..].find("font-family") {
+        let abs_pos = search_start + pos;
+        let after = &template[abs_pos + 11..]; // Skip "font-family"
+        let after_trimmed = after.trim_start();
+        
+        if after_trimmed.starts_with('=') {
+            // Attribute form: font-family="..." or font-family='...'
+            let rest = after_trimmed[1..].trim_start();
+            if rest.starts_with('"') {
+                if let Some(end) = rest[1..].find('"') {
+                    let value = &rest[1..1+end];
+                    if check_font_list(value) {
+                        return true;
+                    }
+                } else {
+                    // Unclosed quote
+                    return true;
+                }
+            } else if rest.starts_with('\'') {
+                if let Some(end) = rest[1..].find('\'') {
+                    let value = &rest[1..1+end];
+                    if check_font_list(value) {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            } else {
+                // Unquoted or unknown syntax
+                return true;
+            }
+        } else if after_trimmed.starts_with(':') {
+            // CSS property form: font-family: ... (in <style> blocks)
+            let value = after_trimmed[1..].trim_start();
+            // Extract until next semicolon, closing brace, or end of string
+            let value = value.split(|c| c == ';' || c == '}')
+                .next()
+                .unwrap_or(value)
+                .trim();
+            if check_font_list(value) {
+                return true;
+            }
+        } else {
+            // font-family not followed by = or :, unknown context (e.g., in a comment)
+            // Conservatively return true
+            return true;
+        }
+        
+        search_start = abs_pos + 11; // Move past this "font-family"
+    }
+    
+    false
+}
+
+fn shared_fontdb_for_template(template: &str) -> Arc<usvg::fontdb::Database> {
+    if template_needs_system_fonts(template) {
+        full_fontdb()
+    } else {
+        slim_fontdb()
+    }
 }
 
 fn xml_escape(value: &str) -> String {
@@ -64,8 +180,9 @@ impl<'a> SvgRenderer<'a> {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
         let options = usvg::Options {
             font_family: EMBEDDED_FONT_FAMILY.to_string(),
-            // Pure refcount bump — no Database::clone on layout switches.
-            fontdb: shared_fontdb(),
+            // Use slim fontdb (no system fonts) when the template only references
+            // the embedded font. Custom layouts with system fonts get the full fontdb.
+            fontdb: shared_fontdb_for_template(template),
             ..Default::default()
         };
 
@@ -306,5 +423,65 @@ impl FrameSource for SvgRenderer<'static> {
 
     fn set_background(&mut self, bg: Option<Pixmap>) {
         self.background = bg;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_layout_uses_slim_fontdb() {
+        // Built-in layouts only reference "DejaVu Sans Mono, monospace"
+        let template = r#"<svg><text font-family="DejaVu Sans Mono, monospace">Test</text></svg>"#;
+        assert!(!template_needs_system_fonts(template), "builtin layout should use slim fontdb");
+    }
+
+    #[test]
+    fn monospace_only_uses_slim_fontdb() {
+        let template = r#"<svg><text font-family="monospace">Test</text></svg>"#;
+        assert!(!template_needs_system_fonts(template), "monospace-only should use slim fontdb");
+    }
+
+    #[test]
+    fn arial_triggers_full_fontdb() {
+        let template = r#"<svg><text font-family="Arial">Test</text></svg>"#;
+        assert!(template_needs_system_fonts(template), "Arial should trigger full fontdb");
+    }
+
+    #[test]
+    fn style_attribute_triggers_full_fontdb() {
+        let template = r#"<svg><text style="font-family: Arial">Test</text></svg>"#;
+        assert!(template_needs_system_fonts(template), "style attribute with Arial should trigger full fontdb");
+    }
+
+    #[test]
+    fn style_block_triggers_full_fontdb() {
+        let template = r#"<svg><style>text { font-family: Arial; }</style><text>Test</text></svg>"#;
+        assert!(template_needs_system_fonts(template), "<style> block with Arial should trigger full fontdb");
+    }
+
+    #[test]
+    fn tera_variable_triggers_full_fontdb() {
+        let template = r#"<svg><text font-family="{{ custom_font }}">Test</text></svg>"#;
+        assert!(template_needs_system_fonts(template), "Tera variable should conservatively trigger full fontdb");
+    }
+
+    #[test]
+    fn mixed_known_and_unknown_triggers_full_fontdb() {
+        let template = r#"<svg><text font-family="DejaVu Sans Mono, Arial">Test</text></svg>"#;
+        assert!(template_needs_system_fonts(template), "mixed known+unknown should trigger full fontdb");
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        let template = r#"<svg><text font-family="DEJAVU SANS MONO">Test</text></svg>"#;
+        assert!(!template_needs_system_fonts(template), "case-insensitive match should use slim fontdb");
+    }
+
+    #[test]
+    fn whitespace_tolerance() {
+        let template = r#"<svg><text font-family = "DejaVu Sans Mono">Test</text></svg>"#;
+        assert!(!template_needs_system_fonts(template), "whitespace around = should be tolerated");
     }
 }
