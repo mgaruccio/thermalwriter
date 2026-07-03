@@ -109,21 +109,65 @@ them).
   follows/traces the Xvfb/conky children that were previously torn down
   mid-trace).
 
-## TODO: headless-vs-hardware cross-check
+## Headless-vs-hardware cross-check
 
-Not done in this sweep — running `scripts/profile.sh --hardware <scenario>`
-stops the live `thermalwriter.service` for its duration, which needs
-explicit user go/no-go before it's run for real (see `docs/profiling.md`'s
-`--hardware` warning). The plan's acceptance criteria call for at least one
-scenario cross-checked headless vs. hardware, with deltas noted (expected:
-USB send/handshake cost, `try_reconnect` polling if the device is slow to
-claim, and now real `frames_sent`/`cpu_per_frame_ms` numbers instead of
-`n/a`, since `BulkUsb` gained a frame counter alongside this sweep).
+Done with explicit user go-ahead on 2026-07-03: `thermalwriter.service` was
+confirmed active beforehand (PID 25349, running for 2 days), stopped by
+`scripts/profile.sh --hardware neon-dash-v2` for the run's ~2m26s duration,
+and confirmed restored afterward — clean SIGTERM shutdown, then a fresh
+successful handshake (`Handshake OK: PM=4, SUB=5, resolution=480x480,
+jpeg=true`) and tick loop restart, verified via `systemctl --user status`
+and `journalctl --user -u thermalwriter`. No manual intervention was needed.
 
-- [ ] Get user go/no-go to run `scripts/profile.sh --hardware neon-dash-v2`
-      (or another representative scenario)
-- [ ] Compare against the headless `neon-dash-v2` row above: cpu/frame,
-      frames sent, RSS, and note anything USB-transport-specific (fatal
-      error handling / reconnect polling overhead, `BulkUsb::send_frame`'s
-      per-frame chunked-write cost vs. `NullTransport`'s no-op)
-- [ ] Append the hardware row + delta notes to this document
+| | headless (`NullTransport`) | hardware (`BulkUsb`) | delta |
+|---|---|---|---|
+| cpu/frame (ms) | 10.496 | 10.579 | +0.083 ms (+0.8%) |
+| frames sent | 141 | 141 | same (identical warmup/measure window) |
+| avg RSS (KB) | 49627 | 55147 | +5520 KB (+11.1%) |
+| peak RSS (KB) | 51964 | 55232 | +3268 KB (+6.3%) |
+| total allocated (bytes) | 847951237 | 924815533 | +76864296 bytes (+9.1%) |
+
+Same scenario (`neon-dash-v2`), same harness settings (`WARMUP_SECONDS=10`,
+`MEASURE_SECONDS=60`, tick_rate=2) — only the transport differs, so this is
+a like-for-like comparison of what `BulkUsb` costs on top of the
+NullTransport baseline.
+
+**Findings:**
+
+- **RSS/allocations are consistently ~6-11% higher on real hardware.**
+  Plausible attribution: `rusb`'s `DeviceHandle`, USB context, and endpoint
+  descriptor bookkeeping, plus each `send_frame` building a fresh
+  `Vec::with_capacity(64 + data.len())` header+payload frame and doing
+  chunked `write_bulk` calls — none of which `NullTransport::send_frame`
+  does (it's a no-op past the optional artificial-latency sleep). This is
+  the real, expected shape of "USB transport has real costs NullTransport
+  doesn't model" that headless profiling can't see.
+- **cpu/frame is only ~0.8% higher** — much smaller than expected going in.
+  Two honest caveats on this one: (1) this is a single-sample measurement
+  per transport, not a statistically repeated one (that's what the
+  criterion benches are for), so a sub-1%, same-order-of-magnitude
+  difference is within plausible run-to-run noise and shouldn't be read as
+  "USB writes are free"; (2) I looked for the USB bulk-write cost as a
+  distinct region in the hardware flamegraph and couldn't isolate it — 82%
+  of sampled stack frames in `neon-dash-v2/flamegraph.svg` (hardware run)
+  resolve to `[unknown]`, most likely because the system's `libusb`
+  (dynamically linked, called via `rusb`'s FFI) lacks the debug symbols
+  `perf --call-graph dwarf` needs to unwind through it cleanly. The
+  bulk-write cost is real (it shows up in the RSS/allocation deltas above)
+  but this flamegraph capture can't visually attribute CPU time to it
+  specifically — a caveat for anyone using these flamegraphs to hunt for
+  USB-specific hot spots, not a claim that the cost doesn't exist.
+- **No reconnect/retry overhead observed** — the daemon claimed the device
+  and completed its handshake on the very first attempt in both the cpu and
+  dhat passes (no `USB reconnect` or `USB display unavailable` log lines),
+  because `scripts/profile.sh`'s `stop_live_service_for_hardware` had
+  already cleanly released the interface (`BulkUSB device closed` in the
+  live service's shutdown log) before our test daemon ever started. The
+  2-second settle sleep plus the daemon's own retry logic were not needed
+  on this run, but remain in place for a slower-releasing device or a
+  flakier reconnect scenario.
+- **`BulkUsb`'s frame counter (`18a3c90`) worked correctly on its first real
+  exercise**: `BulkUsb closed: 141 frames sent` (cpu pass) / `135 frames
+  sent` (dhat pass) in the daemon logs — `frames_sent` and `cpu_per_frame_ms`
+  are real numbers above, not `n/a`, closing out the gap that motivated
+  adding the counter in the first place.
