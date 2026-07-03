@@ -241,6 +241,27 @@ proc_rss_kb() {
   grep -m1 '^VmRSS:' "/proc/$pid/status" 2>/dev/null | awk '{print $2}' || echo 0
 }
 
+# Wall-clock epoch (fractional seconds) a PID started, from /proc/<pid>/stat's
+# starttime (clock ticks since boot, field 22) + /proc/stat's btime (boot
+# time, epoch seconds). Used for time-to-first-frame on the "startup"
+# scenario — more precise than approximating "spawn time" as "whenever the
+# harness's pgrep polling loop happened to notice the PID".
+proc_start_epoch() {
+  local pid="$1" stat rest tck btime
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || { echo ""; return; }
+  rest=${stat##*) }
+  local -a f
+  read -ra f <<< "$rest"
+  local starttime_ticks="${f[19]:-0}"
+  tck=$(clk_tck)
+  btime=$(awk '/^btime/{print $2; exit}' /proc/stat 2>/dev/null)
+  if [[ -z "$btime" ]]; then
+    echo ""
+    return
+  fi
+  awk -v b="$btime" -v s="$starttime_ticks" -v t="$tck" 'BEGIN{printf "%.4f", b + (s/t)}'
+}
+
 sample_rss() {
   local pid="$1" duration="$2" csv="$3"
   local elapsed=0
@@ -266,6 +287,37 @@ sample_rss() {
 }
 
 clk_tck() { getconf CLK_TCK 2>/dev/null || echo 100; }
+
+# Time-to-first-frame for the "startup" scenario: poll the daemon's own log
+# for NullTransport's one-time "first frame sent" marker (src/transport/null.rs)
+# and diff its wall-clock arrival against the process's /proc start time.
+# Writes ttff_ms=<value|n/a> to $out_dir/${pass}_ttff.txt. Bounded — a daemon
+# that never renders a first frame must not hang the sweep.
+measure_ttff() {
+  local scenario="$1" pass="$2" pid="$3" log_file="$4" out_dir="$5"
+  local spawn_epoch
+  spawn_epoch=$(proc_start_epoch "$pid")
+  local ttff_ms="n/a"
+
+  if [[ -n "$spawn_epoch" ]]; then
+    local waited=0 max_wait=100 # 100 * 0.05s = 5s
+    while ! grep -q "NullTransport: first frame sent" "$log_file" 2>/dev/null; do
+      if [[ "$waited" -ge "$max_wait" ]]; then
+        echo "!! [$scenario/$pass] first-frame marker not seen within 5s — ttff_ms not recorded" >&2
+        break
+      fi
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    if grep -q "NullTransport: first frame sent" "$log_file" 2>/dev/null; then
+      local first_frame_epoch
+      first_frame_epoch=$(date +%s.%N)
+      ttff_ms=$(awk -v s="$spawn_epoch" -v e="$first_frame_epoch" 'BEGIN{printf "%.1f", (e-s)*1000}')
+    fi
+  fi
+
+  echo "ttff_ms=$ttff_ms" > "$out_dir/${pass}_ttff.txt"
+}
 
 # ---------------------------------------------------------------------------
 # Config generation — one scratch XDG_CONFIG_HOME/XDG_RUNTIME_DIR per run so
@@ -368,12 +420,19 @@ run_pass() {
   fi
   CURRENT_DAEMON_PID="$pid"
 
-  local start_ticks
-  start_ticks=$(proc_cpu_ticks "$pid")
+  if [[ "$scenario" == "startup" ]]; then
+    measure_ttff "$scenario" "$pass" "$pid" "$log_file" "$out_dir"
+  fi
 
   if [[ "$warmup" -gt 0 ]]; then
     sleep "$warmup"
   fi
+
+  # Captured AFTER warmup, not before: one-time startup costs (fontdb load,
+  # config/layout seeding) belong to the warmup window the caller asked us to
+  # exclude, not to the steady-state cpu_per_frame_ms this produces.
+  local start_ticks
+  start_ticks=$(proc_cpu_ticks "$pid")
 
   if [[ "$pass" == "cpu" ]]; then
     local rss_csv="$out_dir/rss_timeline.csv"
@@ -384,7 +443,13 @@ run_pass() {
 
     local perf_data="$out_dir/perf.data"
     if [[ "$HAVE_PERF" == 1 ]]; then
-      perf record --call-graph dwarf -p "$pid" -o "$perf_data" -- sleep "$measure" 2>>"$log_file" || true
+      # --no-inherit: perf's default is to follow newly-forked children of
+      # the attached PID, which would fold nvidia-smi poll children into the
+      # daemon's own flamegraph — exactly what the plan's "daemon PID only"
+      # decision excludes. Neither reviewer had perf on hand to confirm this
+      # flag does what the docs say in practice — verify on the first real
+      # `--hardware`/sweep run with perf installed.
+      perf record --call-graph dwarf --no-inherit -p "$pid" -o "$perf_data" -- sleep "$measure" 2>>"$log_file" || true
     else
       sleep "$measure"
     fi
@@ -475,8 +540,18 @@ run_pass() {
     fi
 
     if [[ "$HAVE_PERF" == 1 && "$HAVE_INFERNO" == 1 && -f "$perf_data" ]]; then
-      perf script -i "$perf_data" 2>>"$log_file" | inferno-collapse-perf 2>>"$log_file" | inferno-flamegraph > "$out_dir/flamegraph.svg" 2>>"$log_file" || \
+      # Under `set -o pipefail`, a nonzero exit from ANY stage fails this
+      # pipeline — but on the xvfb-conky scenario this was observed to fire
+      # even when flamegraph.svg came out fine, most likely `perf script`/
+      # `perf record` grumbling about a followed child (Xvfb/conky) that
+      # exited during teardown while being traced. --no-inherit above should
+      # eliminate that (we no longer follow forked children at all), but
+      # judge success by the artifact actually existing rather than trusting
+      # the pipeline's exit code, in case some other transient still trips it.
+      perf script -i "$perf_data" 2>>"$log_file" | inferno-collapse-perf 2>>"$log_file" | inferno-flamegraph > "$out_dir/flamegraph.svg" 2>>"$log_file" || true
+      if [[ ! -s "$out_dir/flamegraph.svg" ]]; then
         echo "!! [$scenario/cpu] flamegraph generation failed (see $log_file)" >&2
+      fi
     fi
   else
     if [[ -f "$scratch/dhat-heap.json" ]]; then
@@ -532,11 +607,11 @@ emit_summary() {
     echo "- cpu: $(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
     echo "- build profile: profiling (CPU/RSS), profiling+dhat-heap (allocations)"
     echo
-    echo "| scenario | cpu/frame (ms) | frames sent | avg RSS (KB) | peak RSS (KB) | total allocated (bytes) |"
-    echo "|---|---|---|---|---|---|"
+    echo "| scenario | cpu/frame (ms) | frames sent | avg RSS (KB) | peak RSS (KB) | total allocated (bytes) | time to first frame (ms) |"
+    echo "|---|---|---|---|---|---|---|"
     for s in "${scenarios[@]}"; do
       local out_dir="$RESULTS_DIR/$s"
-      local cpu_per_frame="n/a" frames="n/a" avg_rss="n/a" peak_rss="n/a" total_bytes="n/a"
+      local cpu_per_frame="n/a" frames="n/a" avg_rss="n/a" peak_rss="n/a" total_bytes="n/a" ttff="n/a"
 
       local cpu_status=""
       [[ -f "$out_dir/cpu_metrics.txt" ]] && cpu_status=$(awk -F= '/^status=/{print $2}' "$out_dir/cpu_metrics.txt")
@@ -561,7 +636,12 @@ emit_summary() {
         total_bytes=$(awk -F= '/total_bytes_allocated/{print $2}' "$out_dir/dhat_metrics.txt")
       fi
 
-      echo "| $s | $cpu_per_frame | $frames | $avg_rss | $peak_rss | $total_bytes |"
+      # Only the "startup" scenario writes this — time-to-first-frame is
+      # meaningless for the rest, where the daemon has been rendering for a
+      # full warmup window before we ever start measuring.
+      [[ -f "$out_dir/cpu_ttff.txt" ]] && ttff=$(awk -F= '/^ttff_ms=/{print $2}' "$out_dir/cpu_ttff.txt")
+
+      echo "| $s | $cpu_per_frame | $frames | $avg_rss | $peak_rss | $total_bytes | $ttff |"
     done
   } > "$summary"
   echo "Summary written to $summary"

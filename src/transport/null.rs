@@ -86,6 +86,14 @@ impl Transport for NullTransport {
             std::thread::sleep(latency);
         }
         self.frames_sent += 1;
+        if self.frames_sent == 1 {
+            // One-time marker for the profiling harness's "startup" scenario:
+            // it diffs this log line's wall-clock arrival against the
+            // process's own /proc start time to get time-to-first-frame.
+            // #[doc(hidden)]-class plumbing — not part of the transport's
+            // default-build behavior beyond one extra log line.
+            info!("NullTransport: first frame sent");
+        }
         Ok(())
     }
 
