@@ -70,7 +70,21 @@ HARDWARE_SERVICE_UNIT="thermalwriter.service"
 
 cleanup_children() {
   # Best-effort, idempotent — safe to call more than once (e.g. from both an
-  # INT/TERM trap's exit and the subsequent EXIT trap).
+  # INT/TERM trap's exit and the subsequent EXIT trap). Every command here is
+  # explicitly `|| true`-guarded: under `set -e`, an unguarded failure aborts
+  # the *rest of this function*, silently skipping whatever comes after it —
+  # reproduced empirically with a forced-failure `rm` stub, which left the
+  # hardware-service restore below unreached. Ordering matters for the same
+  # reason: restore the live service FIRST, since it's the only step with
+  # real user-facing consequences (temp-dir clutter or a leftover lock file
+  # is nothing next to an LCD stuck without its daemon).
+  if [[ "$HARDWARE_SERVICE_WAS_ACTIVE" == "1" ]]; then
+    echo ">> --hardware: restoring $HARDWARE_SERVICE_UNIT (it was running before this profiling run)" >&2
+    systemctl --user start "$HARDWARE_SERVICE_UNIT" 2>/dev/null || \
+      echo "!! --hardware: failed to restart $HARDWARE_SERVICE_UNIT — restart it manually" >&2
+  fi
+  HARDWARE_SERVICE_WAS_ACTIVE=""
+
   if [[ -n "$CURRENT_RSS_PID" ]]; then
     kill -TERM "$CURRENT_RSS_PID" 2>/dev/null || true
     CURRENT_RSS_PID=""
@@ -88,19 +102,13 @@ cleanup_children() {
     CURRENT_WRAPPER_PID=""
   fi
   if [[ -n "$CURRENT_SCRATCH" && -d "$CURRENT_SCRATCH" ]]; then
-    rm -rf "$CURRENT_SCRATCH"
+    rm -rf "$CURRENT_SCRATCH" 2>/dev/null || true
     CURRENT_SCRATCH=""
   fi
   if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
     rm -rf "$LOCK_DIR" 2>/dev/null || true
     LOCK_DIR=""
   fi
-  if [[ "$HARDWARE_SERVICE_WAS_ACTIVE" == "1" ]]; then
-    echo ">> --hardware: restoring $HARDWARE_SERVICE_UNIT (it was running before this profiling run)" >&2
-    systemctl --user start "$HARDWARE_SERVICE_UNIT" 2>/dev/null || \
-      echo "!! --hardware: failed to restart $HARDWARE_SERVICE_UNIT — restart it manually" >&2
-  fi
-  HARDWARE_SERVICE_WAS_ACTIVE=""
 }
 
 # Stops the live service so our own test daemon can claim the USB device.
@@ -567,9 +575,29 @@ run_pass() {
   # BulkUsb (real --hardware runs) can log it multiple times — once per
   # try_reconnect-triggered close, plus once at final shutdown — so take the
   # LAST occurrence, which is the run's true final tally.
-  local frames_sent
-  frames_sent=$(grep -oE '(NullTransport|BulkUsb) closed: [0-9]+ frames sent' "$log_file" | grep -oE '[0-9]+' | tail -1 || true)
-  frames_sent="${frames_sent:-0}"
+  local frames_sent_raw
+  frames_sent_raw=$(grep -oE '(NullTransport|BulkUsb) closed: [0-9]+ frames sent' "$log_file" | grep -oE '[0-9]+' | tail -1 || true)
+  # An absent marker (e.g. the daemon crashed before transport.close() ever
+  # ran) is not the same thing as "0 frames sent" (marker present, value
+  # legitimately zero) — render honestly as "n/a" rather than a misleading
+  # literal 0. frames_sent_numeric is only for the arithmetic below.
+  local frames_sent="${frames_sent_raw:-n/a}"
+  local frames_sent_numeric="${frames_sent_raw:-0}"
+
+  # --hardware only: a scenario where the device was never actually claimed
+  # (e.g. no cooler attached, or something else still held the USB claim)
+  # still looks like a normal row otherwise — RSS/CPU of an idle reconnect
+  # loop is indistinguishable from a real workload. Flag it explicitly:
+  # main.rs logs "USB display unavailable at startup" when BulkUsb::new()
+  # fails and falls back to a disconnected transport; tick.rs logs "USB
+  # device reconnected" if try_reconnect ever succeeds afterward.
+  local device_never_claimed=0
+  if [[ "$HARDWARE_MODE" == 1 ]] \
+      && grep -q "USB display unavailable at startup" "$log_file" 2>/dev/null \
+      && ! grep -q "USB device reconnected" "$log_file" 2>/dev/null; then
+    device_never_claimed=1
+    echo "!! [$scenario/$pass] --hardware: device was never claimed/driven during this run (see $log_file)" >&2
+  fi
 
   if [[ "$pass" == "cpu" ]]; then
     if [[ "$daemon_ok" -ne 1 ]]; then
@@ -581,8 +609,8 @@ run_pass() {
       local tck cpu_seconds cpu_per_frame_ms
       tck=$(clk_tck)
       cpu_seconds=$(awk -v s="$start_ticks" -v e="$end_ticks" -v t="$tck" 'BEGIN{printf "%.4f", (e-s)/t}')
-      if [[ "$frames_sent" -gt 0 ]]; then
-        cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_sent" 'BEGIN{printf "%.3f", (c*1000)/f}')
+      if [[ "$frames_sent_numeric" -gt 0 ]]; then
+        cpu_per_frame_ms=$(awk -v c="$cpu_seconds" -v f="$frames_sent_numeric" 'BEGIN{printf "%.3f", (c*1000)/f}')
       else
         cpu_per_frame_ms="n/a"
       fi
@@ -591,6 +619,7 @@ run_pass() {
         echo "cpu_seconds=$cpu_seconds"
         echo "frames_sent=$frames_sent"
         echo "cpu_per_frame_ms=$cpu_per_frame_ms"
+        echo "device_never_claimed=$device_never_claimed"
       } > "$out_dir/cpu_metrics.txt"
     fi
 
@@ -625,6 +654,7 @@ run_pass() {
       {
         echo "status=OK"
         echo "frames_sent=$frames_sent"
+        echo "device_never_claimed=$device_never_claimed"
         local total_line gmax_line
         total_line=$(grep -m1 'dhat: Total:' "$log_file" || true)
         gmax_line=$(grep -m1 'dhat: At t-gmax:' "$log_file" || true)
@@ -701,7 +731,15 @@ emit_summary() {
       # full warmup window before we ever start measuring.
       [[ -f "$out_dir/cpu_ttff.txt" ]] && ttff=$(awk -F= '/^ttff_ms=/{print $2}' "$out_dir/cpu_ttff.txt")
 
-      echo "| $s | $cpu_per_frame | $frames | $avg_rss | $peak_rss | $total_bytes | $ttff |"
+      # --hardware only: RSS/CPU of an idle reconnect loop (device never
+      # actually claimed) looks like a normal row otherwise — flag it in the
+      # scenario name itself so it can't be misread as a real workload.
+      local scenario_label="$s"
+      if [[ "$cpu_status" != "ERROR" ]] && grep -q '^device_never_claimed=1$' "$out_dir/cpu_metrics.txt" 2>/dev/null; then
+        scenario_label="$s ⚠ device not claimed"
+      fi
+
+      echo "| $scenario_label | $cpu_per_frame | $frames | $avg_rss | $peak_rss | $total_bytes | $ttff |"
     done
   } > "$summary"
   echo "Summary written to $summary"
