@@ -609,6 +609,38 @@ fn hid_type2_handshake_retries_then_succeeds() {
     assert!(io.sleeps.iter().any(|d| *d == Duration::from_millis(500)));
 }
 
+#[test]
+fn hid_type3_both_pids_handshake_send_and_read_exact_ack() {
+    for (pid, response_code, expected_fbl) in [(0x5303, 0x65, 100), (0x5304, 0x66, 101)] {
+        let mut response = vec![0; 14];
+        response[0] = response_code;
+        let mut io = MemHidIo::new(vec![response, vec![0xaa]]);
+
+        let info = hid_lcd::handshake_type3_with_io(&mut io, 0x0418, pid).unwrap();
+        assert_eq!((info.vid, info.pid), (0x0418, pid));
+        assert_eq!(info.fbl, expected_fbl);
+        assert_eq!(info.protocol, WireProtocol::HidType3);
+        assert_eq!(info.encoding(), FrameEncoding::Rgb565Be);
+
+        let (width, height) = info.wire_dimensions().unwrap();
+        let frame = EncodedFrame {
+            data: vec![0; width as usize * height as usize * 2],
+            width,
+            height,
+            encoding: info.encoding(),
+        };
+        hid_lcd::send_frame_type3_with_io(&mut io, &info, &frame).unwrap();
+
+        assert_eq!(io.log.len(), 6, "pid={pid:04x}: {:?}", io.log);
+        assert!(matches!(io.log[0], IoOp::Wait(d) if d == Duration::from_millis(50)));
+        assert!(matches!(io.log[1], IoOp::Write(ref data) if data.len() == 1040));
+        assert!(matches!(io.log[2], IoOp::Wait(d) if d == Duration::from_millis(200)));
+        assert!(matches!(io.log[3], IoOp::Read(1024)));
+        assert!(matches!(io.log[4], IoOp::Write(ref data) if data.len() == 16 + 204_800));
+        assert!(matches!(io.log[5], IoOp::Read(16)));
+    }
+}
+
 struct MemLyIo {
     reads: std::collections::VecDeque<Vec<u8>>,
     log: Vec<IoOp>,

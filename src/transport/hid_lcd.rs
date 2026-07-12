@@ -49,6 +49,38 @@ pub trait HidIo: Send {
     fn sleep(&mut self, d: std::time::Duration);
 }
 
+struct UsbHidIo<'a> {
+    handle: &'a DeviceHandle<GlobalContext>,
+    ep_out: u8,
+    ep_in: u8,
+    write_timeout: Option<Duration>,
+    read_timeout: Duration,
+}
+
+impl HidIo for UsbHidIo<'_> {
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        let timeout = self
+            .write_timeout
+            .unwrap_or_else(|| frame_timeout(data.len()));
+        super::bulk_usb::write_all(data, |remaining| {
+            self.handle.write_bulk(self.ep_out, remaining, timeout)
+        })
+    }
+
+    fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
+        let mut data = vec![0; max_len];
+        let len = self
+            .handle
+            .read_bulk(self.ep_in, &mut data, self.read_timeout)?;
+        data.truncate(len);
+        Ok(data)
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
 /// Type2 handshake control flow over injectable I/O (retries included).
 pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
     let init = build_init_packet_type2();
@@ -78,6 +110,36 @@ pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
         io.sleep(HANDSHAKE_RETRY_DELAY);
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type2 handshake failed")))
+}
+
+/// Type3 handshake control flow over injectable I/O (retries included).
+pub fn handshake_type3_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
+    let init = build_init_packet_type3();
+    let mut last_err = None;
+    for attempt in 1..=HANDSHAKE_MAX_RETRIES {
+        io.sleep(DELAY_PRE_INIT);
+        if let Err(error) = io.write(&init) {
+            last_err = Some(anyhow::anyhow!("HID init write failed: {error}"));
+            io.sleep(HANDSHAKE_RETRY_DELAY);
+            continue;
+        }
+        io.sleep(DELAY_POST_INIT);
+        match io.read(TYPE3_RESPONSE_SIZE) {
+            Ok(response) if validate_response_type3(&response) => {
+                let fbl = response[0].saturating_sub(1);
+                return build_device_info(WireProtocol::HidType3, vid, pid, fbl, 0, Some(fbl));
+            }
+            Ok(response) => {
+                last_err = Some(anyhow::anyhow!(
+                    "invalid HID Type3 response attempt {attempt} len={}",
+                    response.len()
+                ));
+            }
+            Err(error) => last_err = Some(anyhow::anyhow!("HID init read failed: {error}")),
+        }
+        io.sleep(HANDSHAKE_RETRY_DELAY);
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type3 handshake failed")))
 }
 
 pub struct HidLcd {
@@ -301,6 +363,41 @@ fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) ->
     Ok(())
 }
 
+fn send_frame_with_io(
+    io: &mut dyn HidIo,
+    kind: HidType,
+    info: &DeviceInfo,
+    frame: &EncodedFrame,
+) -> Result<usize> {
+    validate_hid_frame(kind, info, frame)?;
+    let packet = match kind {
+        HidType::Type2 => build_frame_type2(&frame.data, frame.width, frame.height, frame.encoding),
+        HidType::Type3 => build_frame_type3(&frame.data)?,
+    };
+    io.write(&packet).context("HID frame write failed")?;
+    match kind {
+        HidType::Type2 => io.sleep(DELAY_FRAME_TYPE2),
+        HidType::Type3 => {
+            let ack = io
+                .read(TYPE3_ACK_SIZE)
+                .context("HID Type3 ACK read failed")?;
+            if ack.is_empty() {
+                bail!("HID Type3 ACK empty");
+            }
+        }
+    }
+    Ok(packet.len())
+}
+
+/// Type3 frame send control flow over injectable I/O.
+pub fn send_frame_type3_with_io(
+    io: &mut dyn HidIo,
+    info: &DeviceInfo,
+    frame: &EncodedFrame,
+) -> Result<()> {
+    send_frame_with_io(io, HidType::Type3, info, frame).map(|_| ())
+}
+
 fn frame_timeout(packet_size: usize) -> Duration {
     let ms = (packet_size / 4 + 100).max(100) as u64;
     Duration::from_millis(ms)
@@ -308,128 +405,66 @@ fn frame_timeout(packet_size: usize) -> Duration {
 
 impl Transport for HidLcd {
     fn handshake(&mut self) -> Result<DeviceInfo> {
-        let init = match self.kind {
-            HidType::Type2 => build_init_packet_type2(),
-            HidType::Type3 => build_init_packet_type3(),
-        };
-        let response_size = match self.kind {
-            HidType::Type2 => TYPE2_RESPONSE_SIZE,
-            HidType::Type3 => TYPE3_RESPONSE_SIZE,
-        };
-
-        let mut last_err = None;
-        for attempt in 1..=HANDSHAKE_MAX_RETRIES {
+        let result = {
             let handle = self.handle.as_ref().context("HID device not open")?;
-            std::thread::sleep(DELAY_PRE_INIT);
-            if let Err(e) = handle.write_bulk(self.ep_out, &init, HANDSHAKE_TIMEOUT) {
-                last_err = Some(anyhow::anyhow!("HID init write failed: {e}"));
-                std::thread::sleep(HANDSHAKE_RETRY_DELAY);
-                continue;
+            let mut io = UsbHidIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: Some(HANDSHAKE_TIMEOUT),
+                read_timeout: HANDSHAKE_TIMEOUT,
+            };
+            match self.kind {
+                HidType::Type2 => handshake_type2_with_io(&mut io, self.vid, self.pid),
+                HidType::Type3 => handshake_type3_with_io(&mut io, self.vid, self.pid),
             }
-            std::thread::sleep(DELAY_POST_INIT);
-            let mut resp = vec![0u8; response_size];
-            let n = match handle.read_bulk(self.ep_in, &mut resp, HANDSHAKE_TIMEOUT) {
-                Ok(n) => n,
-                Err(e) => {
-                    last_err = Some(anyhow::anyhow!("HID init read failed: {e}"));
-                    std::thread::sleep(HANDSHAKE_RETRY_DELAY);
-                    continue;
-                }
-            };
-            resp.truncate(n);
+        };
 
-            let valid = match self.kind {
-                HidType::Type2 => validate_response_type2(&resp),
-                HidType::Type3 => validate_response_type3(&resp),
-            };
-            if !valid {
-                last_err = Some(anyhow::anyhow!(
-                    "invalid HID {:?} handshake response (attempt {attempt}/{HANDSHAKE_MAX_RETRIES}, len={n})",
-                    self.kind
-                ));
-                std::thread::sleep(HANDSHAKE_RETRY_DELAY);
-                continue;
+        match result {
+            Ok(info) => {
+                info!(
+                    "HID {:?} handshake OK: PM={} SUB={} {}x{} {}",
+                    self.kind,
+                    info.pm,
+                    info.sub,
+                    info.width(),
+                    info.height(),
+                    info.encoding()
+                );
+                self.info = Some(info.clone());
+                Ok(info)
             }
-
-            let info = match self.kind {
-                HidType::Type2 => {
-                    let pm = resp[5];
-                    let sub = resp[4];
-                    build_device_info(WireProtocol::HidType2, self.vid, self.pid, pm, sub, None)?
-                }
-                HidType::Type3 => {
-                    let fbl = resp[0].saturating_sub(1);
-                    build_device_info(
-                        WireProtocol::HidType3,
-                        self.vid,
-                        self.pid,
-                        fbl,
-                        0,
-                        Some(fbl),
-                    )?
-                }
-            };
-
-            info!(
-                "HID {:?} handshake OK: PM={} SUB={} {}x{} {}",
-                self.kind,
-                info.pm,
-                info.sub,
-                info.width(),
-                info.height(),
-                info.encoding()
-            );
-            self.info = Some(info.clone());
-            return Ok(info);
+            Err(error) => {
+                self.mark_disconnected();
+                Err(error)
+            }
         }
-
-        self.mark_disconnected();
-        Err(last_err.unwrap_or_else(|| {
-            anyhow::anyhow!("HID handshake failed after {HANDSHAKE_MAX_RETRIES} attempts")
-        }))
     }
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
-        let info = self.info.as_ref().context("Handshake not performed")?;
-        validate_hid_frame(self.kind, info, frame)?;
-        let packet = match self.kind {
-            HidType::Type2 => {
-                build_frame_type2(&frame.data, frame.width, frame.height, frame.encoding)
-            }
-            HidType::Type3 => build_frame_type3(&frame.data)?,
-        };
-        let timeout = frame_timeout(packet.len());
-
-        let send_result: Result<()> = {
+        let send_result = {
+            let info = self.info.as_ref().context("Handshake not performed")?;
             let handle = self.handle.as_ref().context("HID device not open")?;
-            super::bulk_usb::write_all(&packet, |remaining| {
-                handle.write_bulk(self.ep_out, remaining, timeout)
-            })
-            .context("HID frame write failed")?;
-            match self.kind {
-                HidType::Type2 => {
-                    std::thread::sleep(DELAY_FRAME_TYPE2);
-                    Ok(())
-                }
-                HidType::Type3 => {
-                    let mut ack = [0u8; TYPE3_ACK_SIZE];
-                    let an = handle
-                        .read_bulk(self.ep_in, &mut ack, DEFAULT_FRAME_TIMEOUT)
-                        .context("HID Type3 ACK read failed")?;
-                    if an == 0 {
-                        bail!("HID Type3 ACK empty");
-                    }
-                    Ok(())
-                }
-            }
+            let mut io = UsbHidIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: None,
+                read_timeout: DEFAULT_FRAME_TIMEOUT,
+            };
+            send_frame_with_io(&mut io, self.kind, info, frame)
         };
 
-        if let Err(e) = &send_result {
-            self.mark_disconnected_if_fatal(e);
-        } else {
-            debug!("HID {:?} frame sent ({} bytes)", self.kind, packet.len());
+        match send_result {
+            Ok(packet_len) => {
+                debug!("HID {:?} frame sent ({} bytes)", self.kind, packet_len);
+                Ok(())
+            }
+            Err(error) => {
+                self.mark_disconnected_if_fatal(&error);
+                Err(error)
+            }
         }
-        send_result
     }
 
     fn close(&mut self) {
