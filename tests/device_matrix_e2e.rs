@@ -206,20 +206,16 @@ fn wait_for_capture_after(dir: &Path, minimum_sequence: u64) -> (u64, PathBuf, P
     )
 }
 
-fn wait_for_changed_capture(
-    dir: &Path,
-    mut minimum_sequence: u64,
-    previous_payload: &[u8],
-) -> (PathBuf, PathBuf) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let (sequence, payload, sidecar) =
-            wait_for_capture_after_until(dir, minimum_sequence, deadline);
-        if std::fs::read(&payload).unwrap() != previous_payload {
-            return (payload, sidecar);
-        }
-        minimum_sequence = sequence;
-    }
+fn latest_complete_capture_sequence(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
+        .filter(|sidecar| sidecar.with_extension("bin").exists())
+        .filter_map(|sidecar| capture_sequence(&sidecar))
+        .max()
+        .unwrap_or(0)
 }
 
 fn assert_rgb565_be_pixel(data: &[u8], width: u32, x: u32, y: u32, expected: [u8; 2]) {
@@ -281,16 +277,18 @@ device = "auto"
         &stderr_path,
     );
 
-    let (initial_sequence, initial_bin, _) = wait_for_capture_after(&capture, 0);
-    let initial_payload = std::fs::read(initial_bin).unwrap();
+    let (initial_sequence, _, _) = wait_for_capture_after(&capture, 0);
     let layout = ctl(&bus, &xdg, &runtime, &["layout", "svg/neon-dash-v2.svg"]);
     assert!(
         layout.status.success(),
         "set-layout failed: {}",
         String::from_utf8_lossy(&layout.stderr)
     );
-    let (bin_path, toml_path) =
-        wait_for_changed_capture(&capture, initial_sequence, &initial_payload);
+    // set_layout acknowledges only after the tick loop installs the replacement
+    // source. Snapshot every complete capture at that commit boundary, then
+    // require a strictly newer frame; dynamic pre-layout frames cannot qualify.
+    let committed_sequence = latest_complete_capture_sequence(&capture).max(initial_sequence);
+    let (_, bin_path, toml_path) = wait_for_capture_after(&capture, committed_sequence);
     let status_after_switch = ctl(&bus, &xdg, &runtime, &["status"]);
     let status_text = String::from_utf8_lossy(&status_after_switch.stdout);
     assert!(
@@ -340,6 +338,26 @@ device = "auto"
             assert_rgb565_be_pixel(&data, expect_w, expect_w - 1, y, expected_background);
         }
     }
+}
+
+#[test]
+fn committed_capture_barrier_skips_differing_pre_layout_frames() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (sequence, payload) in [(1, b"baseline".as_slice()), (2, b"dynamic".as_slice())] {
+        let stem = format!("frame-{sequence:06}");
+        std::fs::write(dir.path().join(format!("{stem}.bin")), payload).unwrap();
+        std::fs::write(dir.path().join(format!("{stem}.toml")), b"complete").unwrap();
+    }
+
+    let committed_sequence = latest_complete_capture_sequence(dir.path());
+    assert_eq!(committed_sequence, 2);
+
+    std::fs::write(dir.path().join("frame-000003.bin"), b"replacement").unwrap();
+    std::fs::write(dir.path().join("frame-000003.toml"), b"complete").unwrap();
+    let (sequence, payload, _) = wait_for_capture_after(dir.path(), committed_sequence);
+
+    assert_eq!(sequence, 3);
+    assert_eq!(std::fs::read(payload).unwrap(), b"replacement");
 }
 
 #[test]
