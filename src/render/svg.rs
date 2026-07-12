@@ -290,6 +290,15 @@ impl<'a> SvgRenderer<'a> {
     /// Rasterizes once to this renderer's dimensions (centered cover) and caches
     /// the premultiplied pixmap. Failures leave prior background state unchanged.
     pub fn set_background(&mut self, bg: Option<Arc<BackgroundImage>>) -> anyhow::Result<()> {
+        let unchanged = match (&self.background_source, &bg) {
+            (None, None) => true,
+            (Some(current), Some(next)) => Arc::ptr_eq(current, next),
+            _ => false,
+        };
+        if unchanged {
+            return Ok(());
+        }
+
         match bg {
             None => {
                 self.background_source = None;
@@ -745,6 +754,40 @@ token_hero: number = "1" "reserved collision"
 
         let frame = renderer.render(&SensorData::new()).unwrap();
         assert_eq!((frame.width, frame.height), (854, 480));
+    }
+
+    #[test]
+    fn setting_same_background_source_reuses_rasterized_pixmap() {
+        let mut renderer =
+            SvgRenderer::new("<svg xmlns=\"http://www.w3.org/2000/svg\"/>", 480, 480)
+                .expect("valid SVG");
+        let source = Arc::new(
+            BackgroundImage::decode(include_bytes!("../../assets/backgrounds/dark-solid.png"))
+                .expect("valid background fixture"),
+        );
+
+        renderer
+            .set_background(Some(Arc::clone(&source)))
+            .expect("initial background rasterization");
+        let initial = Arc::clone(
+            renderer
+                .background
+                .as_ref()
+                .expect("rasterized background should be cached"),
+        );
+
+        renderer
+            .set_background(Some(source))
+            .expect("unchanged background should be accepted");
+        let repeated = renderer
+            .background
+            .as_ref()
+            .expect("rasterized background should remain cached");
+
+        assert!(
+            Arc::ptr_eq(&initial, repeated),
+            "unchanged source must not replace the rasterized background"
+        );
     }
 
     #[test]
