@@ -658,6 +658,41 @@ fn ly_handshake_and_send_with_io_records_ack() {
     assert!(matches!(io.log[0], IoOp::Write(ref w) if w.len() == 2048));
     assert!(io.log.iter().any(|op| matches!(op, IoOp::Read(512))));
 }
+
+#[test]
+fn ly_rgb565_send_rejects_nonexact_payload_without_io() {
+    for invalid_len in [7, 9] {
+        let mut io = MemLyIo::new(vec![vec![0u8; 16]]);
+        let frame = EncodedFrame {
+            data: vec![0; invalid_len],
+            width: 2,
+            height: 2,
+            encoding: FrameEncoding::Rgb565Le,
+        };
+
+        let error = ly_lcd::send_ly_with_io(&mut io, 0x5409, &frame).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("RGB565 payload length {invalid_len}")),
+            "{error:#}"
+        );
+        assert!(io.log.is_empty(), "invalid frame performed I/O");
+    }
+
+    let mut io = MemLyIo::new(vec![vec![0u8; 16]]);
+    let exact = EncodedFrame {
+        data: vec![0; 8],
+        width: 2,
+        height: 2,
+        encoding: FrameEncoding::Rgb565Le,
+    };
+    ly_lcd::send_ly_with_io(&mut io, 0x5409, &exact).expect("exact payload should be sent");
+    assert!(matches!(
+        io.log.as_slice(),
+        [IoOp::Write(_), IoOp::Read(512)]
+    ));
+}
 #[test]
 fn ly1_fixture_matches_handshake_producible_pm_and_fbl() {
     let mut response = vec![0u8; 64];

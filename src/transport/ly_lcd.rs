@@ -138,8 +138,34 @@ pub fn handshake_ly_with_io(io: &mut dyn LyIo, vid: u16, pid: u16) -> Result<Dev
     build_device_info(WireProtocol::Ly, vid, pid, pm, sub, Some(fbl))
 }
 
+fn validate_rgb565_payload(frame: &EncodedFrame) -> Result<()> {
+    if !frame.encoding.is_rgb565() {
+        return Ok(());
+    }
+    let expected_len = usize::try_from(frame.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(frame.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(2))
+        .context("LY RGB565 wire payload size overflow")?;
+    if frame.data.len() != expected_len {
+        bail!(
+            "RGB565 payload length {} does not match {}x{} wire frame ({} bytes)",
+            frame.data.len(),
+            frame.width,
+            frame.height,
+            expected_len
+        );
+    }
+    Ok(())
+}
+
 /// LY frame send control flow over injectable I/O.
 pub fn send_ly_with_io(io: &mut dyn LyIo, pid: u16, frame: &EncodedFrame) -> Result<()> {
+    validate_rgb565_payload(frame)?;
     let send_buf = pack_ly_payload(&frame.data, pid)?;
     let plan = ly_write_plan(send_buf.len(), pid);
     let mut pos = 0usize;
@@ -150,6 +176,28 @@ pub fn send_ly_with_io(io: &mut dyn LyIo, pid: u16, frame: &EncodedFrame) -> Res
         pos = end;
     }
     let _ack = io.read(HANDSHAKE_READ_SIZE).context("LY ACK read failed")?;
+    Ok(())
+}
+
+fn validate_ly_frame(info: &DeviceInfo, frame: &EncodedFrame) -> Result<()> {
+    let (wire_width, wire_height) = info.wire_dimensions()?;
+    if frame.width != wire_width || frame.height != wire_height {
+        bail!(
+            "frame {}x{} does not match wire dimensions {}x{}",
+            frame.width,
+            frame.height,
+            wire_width,
+            wire_height
+        );
+    }
+    if frame.encoding != info.encoding() {
+        bail!(
+            "frame encoding {} does not match device {}",
+            frame.encoding,
+            info.encoding()
+        );
+    }
+    validate_rgb565_payload(frame)?;
     Ok(())
 }
 
@@ -292,23 +340,7 @@ impl Transport for LyLcd {
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
         let info = self.info.as_ref().context("Handshake not performed")?;
-        let (wire_width, wire_height) = info.wire_dimensions()?;
-        if frame.width != wire_width || frame.height != wire_height {
-            bail!(
-                "frame {}x{} does not match wire dimensions {}x{}",
-                frame.width,
-                frame.height,
-                wire_width,
-                wire_height
-            );
-        }
-        if frame.encoding != info.encoding() {
-            bail!(
-                "frame encoding {} does not match device {}",
-                frame.encoding,
-                info.encoding()
-            );
-        }
+        validate_ly_frame(info, frame)?;
         let send_buf = pack_ly_payload(&frame.data, self.pid)?;
         let plan = ly_write_plan(send_buf.len(), self.pid);
 
@@ -411,6 +443,46 @@ mod tests {
         assert_eq!(plan, vec![4096, 100]);
         let plan = ly_write_plan(4096 + 3000, PID_LY);
         assert_eq!(plan, vec![4096, 2048, 952]);
+    }
+
+    #[test]
+    fn rgb565_frame_requires_exact_wire_payload_size() {
+        let info =
+            crate::transport::device_info_from_fixture("ly-0416-5409-pm50-sub0-fbl50").unwrap();
+        let (width, height) = info.wire_dimensions().unwrap();
+        let expected_len = width as usize * height as usize * 2;
+        let frame = |len| EncodedFrame {
+            data: vec![0; len],
+            width,
+            height,
+            encoding: info.encoding(),
+        };
+
+        validate_ly_frame(&info, &frame(expected_len)).expect("exact payload should be accepted");
+        for invalid_len in [expected_len - 1, expected_len + 1] {
+            let error = validate_ly_frame(&info, &frame(invalid_len)).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "RGB565 payload length {invalid_len} does not match {width}x{height} wire frame"
+                )),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_frame_remains_variable_length() {
+        let info =
+            crate::transport::device_info_from_fixture("ly-0416-5408-pm65-sub3-fbl192").unwrap();
+        let (width, height) = info.wire_dimensions().unwrap();
+        let frame = EncodedFrame {
+            data: vec![0xff],
+            width,
+            height,
+            encoding: info.encoding(),
+        };
+
+        validate_ly_frame(&info, &frame).expect("JPEG payload length is variable");
     }
 
     #[test]
