@@ -222,6 +222,15 @@ fn wait_for_changed_capture(
     }
 }
 
+fn assert_rgb565_be_pixel(data: &[u8], width: u32, x: u32, y: u32, expected: [u8; 2]) {
+    let offset = ((y * width + x) * 2) as usize;
+    assert_eq!(
+        data[offset..offset + 2],
+        expected,
+        "unexpected RGB565-BE pixel at ({x}, {y})"
+    );
+}
+
 fn run_fixture_capture(profile: &str, encoding: &str, expect_w: u32, expect_h: u32) {
     let dir = tempfile::tempdir().expect("tempdir");
     let xdg = dir.path().join("xdg");
@@ -317,6 +326,19 @@ device = "auto"
         assert_eq!((decoded.width(), decoded.height()), (expect_w, expect_h));
     } else {
         assert_eq!(data.len(), expect_w as usize * expect_h as usize * 2);
+        // neon-dash-v2 leaves the outer border at its deterministic #08080f
+        // background. RGB565 quantization yields 0x0841, encoded big-endian.
+        // Checking all four edges catches byte-order swaps and length-preserving
+        // corruption of these representative pixels.
+        let expected_background = [0x08, 0x41];
+        for x in 0..expect_w {
+            assert_rgb565_be_pixel(&data, expect_w, x, 0, expected_background);
+            assert_rgb565_be_pixel(&data, expect_w, x, expect_h - 1, expected_background);
+        }
+        for y in 1..expect_h - 1 {
+            assert_rgb565_be_pixel(&data, expect_w, 0, y, expected_background);
+            assert_rgb565_be_pixel(&data, expect_w, expect_w - 1, y, expected_background);
+        }
     }
 }
 
