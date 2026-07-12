@@ -204,7 +204,8 @@ fn hid_type2_init_response_and_aligned_frame() {
     resp[4] = 0; // SUB
     assert!(hid_lcd::validate_response_type2(&resp));
 
-    let frame = hid_lcd::build_frame_type2(&[0xFF, 0xD8, 0x00, 0x01], 320, 240);
+    let frame =
+        hid_lcd::build_frame_type2(&[0xFF, 0xD8, 0x00, 0x01], 320, 240, FrameEncoding::Jpeg);
     assert_eq!(frame.len() % 512, 0);
     assert_eq!(&frame[0..4], &[0xDA, 0xDB, 0xDC, 0xDD]);
 }

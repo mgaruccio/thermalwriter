@@ -211,8 +211,13 @@ pub fn validate_response_type3(resp: &[u8]) -> bool {
 }
 
 /// Type 2 frame: 20-byte header + image data, 512-aligned.
-pub fn build_frame_type2(image_data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let is_jpeg = image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8;
+pub fn build_frame_type2(
+    image_data: &[u8],
+    width: u32,
+    height: u32,
+    encoding: FrameEncoding,
+) -> Vec<u8> {
+    let is_jpeg = encoding.is_jpeg();
     let mut header = Vec::with_capacity(20);
     header.extend_from_slice(&TYPE2_MAGIC);
     header.extend_from_slice(&[0x02, 0x00]); // PICTURE
@@ -388,7 +393,9 @@ impl Transport for HidLcd {
         let info = self.info.as_ref().context("Handshake not performed")?;
         validate_hid_frame(self.kind, info, frame)?;
         let packet = match self.kind {
-            HidType::Type2 => build_frame_type2(&frame.data, frame.width, frame.height),
+            HidType::Type2 => {
+                build_frame_type2(&frame.data, frame.width, frame.height, frame.encoding)
+            }
             HidType::Type3 => build_frame_type3(&frame.data)?,
         };
         let timeout = frame_timeout(packet.len());
@@ -464,11 +471,19 @@ mod tests {
     }
 
     #[test]
-    fn type2_frame_aligns_to_512() {
+    fn type2_frame_uses_negotiated_encoding_not_payload_magic() {
         let data = vec![0xFFu8, 0xD8, 0x00];
-        let pkt = build_frame_type2(&data, 320, 240);
-        assert_eq!(pkt.len() % 512, 0);
-        assert_eq!(&pkt[0..4], &TYPE2_MAGIC);
+        let jpeg = build_frame_type2(&data, 320, 240, FrameEncoding::Jpeg);
+        assert_eq!(jpeg.len() % 512, 0);
+        assert_eq!(&jpeg[0..4], &TYPE2_MAGIC);
+        assert_eq!(&jpeg[6..8], &[0x00, 0x00]);
+
+        let rgb565 = build_frame_type2(&data, 320, 240, FrameEncoding::Rgb565Le);
+        assert_eq!(
+            &rgb565[6..8],
+            &[0x01, 0x00],
+            "RGB565 bytes beginning with JPEG SOI must keep raw framing"
+        );
     }
 
     #[test]
