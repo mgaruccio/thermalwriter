@@ -51,6 +51,35 @@ impl FrameSource for MockFrameSource {
     fn set_template(&mut self, _template: &str) {}
 }
 
+struct BackgroundTrackingSource {
+    applied_tx: Option<tokio::sync::oneshot::Sender<Option<Arc<BackgroundImage>>>>,
+    release_rx: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+impl FrameSource for BackgroundTrackingSource {
+    fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+        Ok(RawFrame {
+            data: vec![0u8; 480 * 480 * 3],
+            width: 480,
+            height: 480,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "background-tracking"
+    }
+
+    fn set_background(&mut self, background: Option<Arc<BackgroundImage>>) -> Result<()> {
+        if let Some(applied_tx) = self.applied_tx.take() {
+            let _ = applied_tx.send(background);
+        }
+        if let Some(release_rx) = self.release_rx.take() {
+            release_rx.recv().expect("background apply release");
+        }
+        Ok(())
+    }
+}
+
 struct SizedMockSource {
     width: u32,
     height: u32,
@@ -429,11 +458,14 @@ async fn tick_loop_accepts_background_updates() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
-    let (generation_tx, _) = tokio::sync::watch::channel(0u64);
+    let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
     let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
-    let helper = tokio::spawn(source_build_helper(source_build_rx, source_result_tx));
+    let helper = tokio::spawn(source_build_helper(
+        source_build_rx,
+        source_result_tx.clone(),
+    ));
 
     let handle = spawn_tick(
         frames_sent,
@@ -450,7 +482,37 @@ async fn tick_loop_accepts_background_updates() {
         20,
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if *generation_rx.borrow() >= 1 {
+                break;
+            }
+            generation_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("generation commit timed out");
+    let generation = *generation_rx.borrow();
+
+    let (seed_background_tx, seed_background_rx) = tokio::sync::oneshot::channel();
+    let (seed_commit_tx, seed_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(BackgroundTrackingSource {
+                applied_tx: Some(seed_background_tx),
+                release_rx: None,
+            })),
+            commit: Some(seed_commit_tx),
+        })
+        .await
+        .expect("send seed source");
+    tokio::time::timeout(std::time::Duration::from_secs(2), seed_commit_rx)
+        .await
+        .expect("seed source commit timed out")
+        .expect("seed source commit channel closed")
+        .expect("seed source commit rejected");
+
     let mut img = image::RgbaImage::new(8, 8);
     for p in img.pixels_mut() {
         *p = image::Rgba([255, 0, 0, 255]);
@@ -459,10 +521,54 @@ async fn tick_loop_accepts_background_updates() {
     image::DynamicImage::ImageRgba8(img)
         .write_to(&mut cursor, image::ImageFormat::Png)
         .unwrap();
-    let bg = BackgroundImage::decode(&cursor.into_inner()).unwrap();
-    let _ = bg_tx.send(Some(Arc::new(bg)));
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let background = Arc::new(BackgroundImage::decode(&cursor.into_inner()).unwrap());
+    let _ = bg_tx.send(Some(Arc::clone(&background)));
+    let seed_background =
+        tokio::time::timeout(std::time::Duration::from_secs(2), seed_background_rx)
+            .await
+            .expect("seed background apply timed out")
+            .expect("seed background apply channel closed")
+            .expect("seed background was cleared");
+    assert!(Arc::ptr_eq(&seed_background, &background));
+
+    let (replacement_background_tx, replacement_background_rx) = tokio::sync::oneshot::channel();
+    let (replacement_release_tx, replacement_release_rx) = std::sync::mpsc::channel();
+    let (replacement_commit_tx, mut replacement_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(BackgroundTrackingSource {
+                applied_tx: Some(replacement_background_tx),
+                release_rx: Some(replacement_release_rx),
+            })),
+            commit: Some(replacement_commit_tx),
+        })
+        .await
+        .expect("send replacement source");
+    let replacement_background =
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacement_background_rx)
+            .await
+            .expect("replacement background apply timed out")
+            .expect("replacement background apply channel closed")
+            .expect("replacement background was cleared");
+    assert!(Arc::ptr_eq(&replacement_background, &background));
+    assert!(matches!(
+        replacement_commit_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    replacement_release_tx
+        .send(())
+        .expect("release replacement background apply");
+    tokio::time::timeout(std::time::Duration::from_secs(2), replacement_commit_rx)
+        .await
+        .expect("replacement source commit timed out")
+        .expect("replacement source commit channel closed")
+        .expect("replacement source commit rejected");
+
     let _ = shutdown_tx.send(true);
-    handle.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
     helper.abort();
 }
