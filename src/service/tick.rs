@@ -47,7 +47,7 @@ pub struct BackgroundApply {
 /// Encode a RawFrame to JPEG bytes, with optional rotation.
 /// Kept for xvfb frame-dump preview path and tests.
 pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u8>> {
-    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation);
+    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation)?;
     let img: image::ImageBuffer<image::Rgb<u8>, _> =
         image::ImageBuffer::from_raw(out_w, out_h, rotated)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;

@@ -11,14 +11,42 @@ use crate::render::RawFrame;
 
 use super::{DeviceInfo, EncodedFrame, FrameEncoding, wire_angle};
 
+fn validate_raw_rgb(data: &[u8], width: u32, height: u32) -> Result<()> {
+    let expected_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("raw RGB frame size overflow")?;
+    if data.len() != expected_len {
+        bail!(
+            "raw RGB payload length {} does not match {}x{} frame ({} bytes)",
+            data.len(),
+            width,
+            height,
+            expected_len
+        );
+    }
+    Ok(())
+}
+
 /// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
 /// Returns (new_data, new_width, new_height).
-pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec<u8>, u32, u32) {
+pub fn rotate_pixels(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    degrees: u16,
+) -> Result<(Vec<u8>, u32, u32)> {
+    validate_raw_rgb(data, width, height)?;
     let w = width as usize;
     let h = height as usize;
     let pixel_count = w * h;
 
-    match degrees {
+    let rotated = match degrees {
         0 => (data.to_vec(), width, height),
         180 => {
             let mut out = vec![0u8; data.len()];
@@ -55,7 +83,8 @@ pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec
             log::warn!("Unsupported rotation {}, using 0", degrees);
             (data.to_vec(), width, height)
         }
-    }
+    };
+    Ok(rotated)
 }
 
 /// Encode `frame` for `info` at the given user `rotation` and JPEG `quality`.
@@ -84,7 +113,7 @@ pub fn encode_frame(
     }
 
     let angle = wire_angle(&info.profile, rotation)?;
-    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, angle);
+    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, angle)?;
 
     let encoding = info.encoding();
     let data = match encoding {
@@ -199,6 +228,37 @@ mod tests {
         let info = build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).unwrap();
         let frame = solid_frame(320, 320, [0, 0, 0]);
         assert!(encode_frame(&frame, &info, 0, 85).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_raw_rgb_before_nonzero_wire_rotation() {
+        let info = build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, 50, 0, Some(50)).unwrap();
+        let exact_len = 320 * 240 * 3;
+        for invalid_len in [exact_len - 1, exact_len + 1] {
+            let frame = RawFrame {
+                data: vec![0; invalid_len],
+                width: 320,
+                height: 240,
+            };
+            let error = encode_frame(&frame, &info, 0, 85).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("raw RGB payload length {invalid_len}")),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_raw_rgb_size_overflow() {
+        let frame = RawFrame {
+            data: Vec::new(),
+            width: u32::MAX,
+            height: u32::MAX,
+        };
+        let error = rotate_pixels(&frame.data, frame.width, frame.height, 0).unwrap_err();
+        assert!(error.to_string().contains("size overflow"), "{error:#}");
     }
     const RED: [u8; 3] = [240, 24, 24];
     const GREEN: [u8; 3] = [24, 240, 24];

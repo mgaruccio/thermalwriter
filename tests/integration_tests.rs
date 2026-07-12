@@ -213,6 +213,22 @@ fn jpeg_encode_produces_valid_output() {
 }
 
 #[test]
+fn jpeg_encode_rejects_malformed_rgb_before_rotation() {
+    use thermalwriter::service::tick::encode_jpeg;
+    let frame = RawFrame {
+        data: vec![0; 2 * 2 * 3 - 1],
+        width: 2,
+        height: 2,
+    };
+
+    let error = encode_jpeg(&frame, 85, 90).unwrap_err();
+    assert!(
+        error.to_string().contains("raw RGB payload length 11"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn jpeg_quality_affects_size() {
     use thermalwriter::service::tick::encode_jpeg;
     let frame = RawFrame {
