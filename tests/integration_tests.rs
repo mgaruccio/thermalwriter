@@ -172,30 +172,43 @@ fn spawn_tick(
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_time()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            run_mock_tick(
-                frames_sent,
-                Box::new(MockFrameSource),
-                source_build_tx,
-                source_result_rx,
-                template_rx,
-                bg_rx,
-                bg_apply_rx,
-                shutdown_rx,
-                connected_tx,
-                display_tx,
-                generation_tx,
-                tick_rate_rx,
-                fps,
-            )
-            .await;
-        })
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                run_mock_tick(
+                    frames_sent,
+                    Box::new(MockFrameSource),
+                    source_build_tx,
+                    source_result_rx,
+                    template_rx,
+                    bg_rx,
+                    bg_apply_rx,
+                    shutdown_rx,
+                    connected_tx,
+                    display_tx,
+                    generation_tx,
+                    tick_rate_rx,
+                    fps,
+                )
+                .await;
+            })
+        }));
+        let _ = finished_tx.send(result);
+    });
+    tokio::spawn(async move {
+        match finished_rx
+            .await
+            .expect("tick thread exited without reporting")
+        {
+            Ok(()) => {}
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     })
 }
 
@@ -386,15 +399,16 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
             commit: Some(stale_commit_tx),
         })
         .await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        stale_commit_rx
-            .await
-            .expect("stale commit acknowledgement")
-            .is_err()
-    );
+    let stale_commit = tokio::time::timeout(std::time::Duration::from_secs(2), stale_commit_rx)
+        .await
+        .expect("stale commit acknowledgement timed out")
+        .expect("stale commit acknowledgement channel closed");
+    assert!(stale_commit.is_err());
     let _ = shutdown_tx.send(true);
-    handle.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
     helper.abort();
 }
 
