@@ -384,13 +384,20 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
     .expect("generation commit timed out");
 
     let generation = *generation_rx.borrow();
+    let (matching_commit_tx, matching_commit_rx) = tokio::sync::oneshot::channel();
     let _ = source_result_tx
         .send(SourceBuildResult {
             generation,
             source: Ok(Box::new(MockFrameSource)),
-            commit: None,
+            commit: Some(matching_commit_tx),
         })
         .await;
+    let matching_commit =
+        tokio::time::timeout(std::time::Duration::from_secs(2), matching_commit_rx)
+            .await
+            .expect("matching source commit acknowledgement timed out")
+            .expect("matching source commit acknowledgement channel closed");
+    assert_eq!(matching_commit, Ok(()));
     let (stale_commit_tx, stale_commit_rx) = tokio::sync::oneshot::channel();
     let _ = source_result_tx
         .send(SourceBuildResult {
