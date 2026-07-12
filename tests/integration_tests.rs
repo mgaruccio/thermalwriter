@@ -51,6 +51,30 @@ impl FrameSource for MockFrameSource {
     fn set_template(&mut self, _template: &str) {}
 }
 
+struct TemplateTrackingSource {
+    applied_tx: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl FrameSource for TemplateTrackingSource {
+    fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+        Ok(RawFrame {
+            data: vec![0u8; 480 * 480 * 3],
+            width: 480,
+            height: 480,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "template-tracking"
+    }
+
+    fn set_template(&mut self, template: &str) {
+        if let Some(applied_tx) = self.applied_tx.take() {
+            let _ = applied_tx.send(template.to_owned());
+        }
+    }
+}
+
 struct BackgroundTrackingSource {
     applied_tx: Option<tokio::sync::oneshot::Sender<Option<Arc<BackgroundImage>>>>,
     release_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -337,11 +361,14 @@ async fn tick_loop_applies_template_updates() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
-    let (generation_tx, _) = tokio::sync::watch::channel(0u64);
+    let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
     let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
-    let helper = tokio::spawn(source_build_helper(source_build_rx, source_result_tx));
+    let helper = tokio::spawn(source_build_helper(
+        source_build_rx,
+        source_result_tx.clone(),
+    ));
 
     let handle = spawn_tick(
         frames_sent,
@@ -358,11 +385,51 @@ async fn tick_loop_applies_template_updates() {
         20,
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let _ = template_tx.send("updated".into());
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if *generation_rx.borrow() >= 1 {
+                break;
+            }
+            generation_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("generation commit timed out");
+    let generation = *generation_rx.borrow();
+
+    let (template_applied_tx, template_applied_rx) = tokio::sync::oneshot::channel();
+    let (source_commit_tx, source_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(TemplateTrackingSource {
+                applied_tx: Some(template_applied_tx),
+            })),
+            commit: Some(source_commit_tx),
+        })
+        .await
+        .expect("send template-tracking source");
+    tokio::time::timeout(std::time::Duration::from_secs(2), source_commit_rx)
+        .await
+        .expect("template-tracking source commit timed out")
+        .expect("template-tracking source commit channel closed")
+        .expect("template-tracking source commit rejected");
+
+    let expected = "updated";
+    template_tx
+        .send(expected.into())
+        .expect("send template update");
+    let applied = tokio::time::timeout(std::time::Duration::from_secs(2), template_applied_rx)
+        .await
+        .expect("template update apply timed out")
+        .expect("template update apply channel closed");
+    assert_eq!(applied, expected);
+
     let _ = shutdown_tx.send(true);
-    handle.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
     helper.abort();
 }
 
