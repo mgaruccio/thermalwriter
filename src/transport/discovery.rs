@@ -7,7 +7,7 @@
 //! Scan for Thermalright full-pixel LCDs and connect the selected device.
 
 use anyhow::{Context, Result, bail};
-use log::{info, warn};
+use log::info;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -130,80 +130,82 @@ fn protocol_for_id(vid: u16, pid: u16) -> Option<WireProtocol> {
         .map(|(_, _, proto)| *proto)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScsiUsbCandidate {
+    vid: u16,
+    pid: u16,
+    bus: u8,
+    address: u8,
+}
+
+fn ensure_scsi_candidates_resolved(
+    candidates: &[ScsiUsbCandidate],
+    devices: &[DiscoveredDevice],
+) -> Result<()> {
+    for candidate in candidates {
+        let resolved = devices.iter().any(|device| {
+            device.vid == candidate.vid
+                && device.pid == candidate.pid
+                && matches!(
+                    device.path,
+                    DevicePath::Scsi {
+                        usb_bus: Some(bus),
+                        usb_address: Some(address),
+                        ..
+                    } if bus == candidate.bus && address == candidate.address
+                )
+        });
+        if !resolved {
+            bail!(
+                "SCSI LCD {:04x}:{:04x} bus={} addr={} was detected over USB but no usable scsi_generic device was found",
+                candidate.vid,
+                candidate.pid,
+                candidate.bus,
+                candidate.address
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Scan libusb + scsi_generic for full-pixel LCDs.
 pub fn scan_devices() -> Result<Vec<DiscoveredDevice>> {
     let mut devices = Vec::new();
-    scan_usb(&mut devices)?;
+    let mut scsi_candidates = Vec::new();
+    scan_usb(&mut devices, &mut scsi_candidates)?;
     scan_scsi(&mut devices)?;
+    ensure_scsi_candidates_resolved(&scsi_candidates, &devices)?;
     Ok(devices)
 }
 
-fn scan_usb(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
-    let list = match rusb::devices() {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("libusb device list failed: {e}");
-            return Ok(());
-        }
-    };
+fn scan_usb(
+    out: &mut Vec<DiscoveredDevice>,
+    scsi_candidates: &mut Vec<ScsiUsbCandidate>,
+) -> Result<()> {
+    let list = rusb::devices().context("libusb device list failed")?;
     for device in list.iter() {
-        let desc = match device.device_descriptor() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let vid = desc.vendor_id();
-        let pid = desc.product_id();
-        let Some(mut protocol) = protocol_for_id(vid, pid) else {
-            continue;
-        };
-
         let bus = device.bus_number();
         let address = device.address();
+        let desc = device.device_descriptor().with_context(|| {
+            format!("failed to read USB descriptor at bus={bus} addr={address}")
+        })?;
+        let vid = desc.vendor_id();
+        let pid = desc.product_id();
+        let Some(protocol) = protocol_for_id(vid, pid) else {
+            continue;
+        };
 
         // 0416:5406 — prefer vendor bulk endpoints; else leave for SCSI scan.
         if vid == 0x0416 && pid == 0x5406 {
-            match find_bulk_endpoints(&device) {
-                Ok(Some((iface, ep_in, ep_out))) => {
-                    out.push(DiscoveredDevice {
-                        vid,
-                        pid,
-                        protocol: WireProtocol::Bulk,
-                        serial: None,
-                        path: DevicePath::Usb {
-                            bus,
-                            address,
-                            interface: iface,
-                            ep_in,
-                            ep_out,
-                        },
-                    });
-                }
-                Ok(None) => {
-                    // No vendor bulk pair — SCSI path may claim it.
-                }
-                Err(e) => warn!("0416:5406 endpoint probe failed: {e:#}"),
-            }
-            continue;
-        }
-
-        // SCSI IDs are claimed via /dev/sg* (scan_scsi), not raw bulk.
-        if matches!(protocol, WireProtocol::Scsi) {
-            continue;
-        }
-
-        match find_bulk_endpoints(&device) {
-            Ok(Some((iface, ep_in, ep_out))) => {
-                // LY/HID claim interface 0 with descriptor endpoints.
-                if matches!(protocol, WireProtocol::HidType2 | WireProtocol::HidType3) {
-                    // HID uses fixed OUT02/IN81 when present; still record descriptor pair.
-                }
-                if matches!(protocol, WireProtocol::Ly) {
-                    protocol = WireProtocol::Ly;
-                }
+            if let Some((iface, ep_in, ep_out)) =
+                find_bulk_endpoints(&device).with_context(|| {
+                    format!("0416:5406 endpoint probe failed at bus={bus} addr={address}")
+                })?
+            {
                 out.push(DiscoveredDevice {
                     vid,
                     pid,
-                    protocol,
+                    protocol: WireProtocol::Bulk,
                     serial: None,
                     path: DevicePath::Usb {
                         bus,
@@ -213,15 +215,56 @@ fn scan_usb(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
                         ep_out,
                     },
                 });
+            } else {
+                scsi_candidates.push(ScsiUsbCandidate {
+                    vid,
+                    pid,
+                    bus,
+                    address,
+                });
             }
-            Ok(None) => {
-                warn!(
-                    "device {:04x}:{:04x} bus={} addr={} has no bulk endpoints",
-                    vid, pid, bus, address
-                );
-            }
-            Err(e) => warn!("failed to read config for {:04x}:{:04x}: {e:#}", vid, pid),
+            continue;
         }
+
+        // SCSI IDs are claimed via /dev/sg* (scan_scsi), not raw bulk.
+        if matches!(protocol, WireProtocol::Scsi) {
+            scsi_candidates.push(ScsiUsbCandidate {
+                vid,
+                pid,
+                bus,
+                address,
+            });
+            continue;
+        }
+
+        let Some((iface, ep_in, ep_out)) = find_bulk_endpoints(&device).with_context(|| {
+            format!(
+                "failed to read config for {:04x}:{:04x} bus={} addr={}",
+                vid, pid, bus, address
+            )
+        })?
+        else {
+            bail!(
+                "device {:04x}:{:04x} bus={} addr={} has no bulk endpoints",
+                vid,
+                pid,
+                bus,
+                address
+            );
+        };
+        out.push(DiscoveredDevice {
+            vid,
+            pid,
+            protocol,
+            serial: None,
+            path: DevicePath::Usb {
+                bus,
+                address,
+                interface: iface,
+                ep_in,
+                ep_out,
+            },
+        });
     }
     Ok(())
 }
@@ -265,24 +308,16 @@ fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
     if !sg_root.exists() {
         return Ok(());
     }
-    let entries = match std::fs::read_dir(sg_root) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("failed to read {}: {e}", sg_root.display());
-            return Ok(());
-        }
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(sg_root)
+        .with_context(|| format!("failed to read {}", sg_root.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to enumerate {}", sg_root.display()))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if !name.starts_with("sg") {
             continue;
         }
         let sysfs = entry.path();
-        let devnode = PathBuf::from(format!("/dev/{name}"));
-        if !devnode.exists() {
-            continue;
-        }
         let Some(ancestor) = resolve_usb_ancestor(&sysfs) else {
             continue;
         };
@@ -302,6 +337,16 @@ fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
             }
             _ => continue,
         };
+        let devnode = PathBuf::from(format!("/dev/{name}"));
+        if !devnode.exists() {
+            bail!(
+                "SCSI LCD {:04x}:{:04x} discovered at {} but {} is unavailable",
+                vid,
+                pid,
+                sysfs.display(),
+                devnode.display()
+            );
+        }
         out.push(DiscoveredDevice {
             vid,
             pid,
@@ -369,18 +414,22 @@ fn resolve_usb_ancestor(sysfs_sg: &Path) -> Option<UsbAncestor> {
     None
 }
 
+fn selector_matches(device: &DiscoveredDevice, selector: &DeviceSelector) -> bool {
+    match selector {
+        DeviceSelector::Auto => true,
+        DeviceSelector::UsbId { vid, pid } => device.vid == *vid && device.pid == *pid,
+    }
+}
+
 /// Select devices matching `selector`. Errors on zero or ambiguous matches.
 pub fn select_devices(
     devices: &[DiscoveredDevice],
     selector: &DeviceSelector,
 ) -> Result<DiscoveredDevice> {
-    let matched: Vec<&DiscoveredDevice> = match selector {
-        DeviceSelector::Auto => devices.iter().collect(),
-        DeviceSelector::UsbId { vid, pid } => devices
-            .iter()
-            .filter(|d| d.vid == *vid && d.pid == *pid)
-            .collect(),
-    };
+    let matched: Vec<&DiscoveredDevice> = devices
+        .iter()
+        .filter(|device| selector_matches(device, selector))
+        .collect();
 
     match matched.as_slice() {
         [] => {
@@ -411,6 +460,60 @@ pub fn select_devices(
                 many.len()
             );
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HardwareConnectError {
+    #[error(transparent)]
+    NoDevice(anyhow::Error),
+    #[error(transparent)]
+    Failed(anyhow::Error),
+}
+
+impl HardwareConnectError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::NoDevice(error) | Self::Failed(error) => error,
+        }
+    }
+}
+
+fn select_scanned_device(
+    scan: Result<Vec<DiscoveredDevice>>,
+    selector: &DeviceSelector,
+) -> std::result::Result<DiscoveredDevice, HardwareConnectError> {
+    let devices = scan.map_err(HardwareConnectError::Failed)?;
+    if !devices
+        .iter()
+        .any(|device| selector_matches(device, selector))
+    {
+        let error = select_devices(&devices, selector)
+            .expect_err("zero matching devices must produce a selection error");
+        return Err(HardwareConnectError::NoDevice(error));
+    }
+    select_devices(&devices, selector).map_err(HardwareConnectError::Failed)
+}
+
+fn connect_scanned_with<T, F>(
+    scan: Result<Vec<DiscoveredDevice>>,
+    selector: &DeviceSelector,
+    open: F,
+) -> std::result::Result<T, HardwareConnectError>
+where
+    F: FnOnce(&DiscoveredDevice) -> Result<T>,
+{
+    let selected = select_scanned_device(scan, selector)?;
+    open(&selected).map_err(HardwareConnectError::Failed)
+}
+
+fn hardware_or_no_device<T>(
+    result: std::result::Result<T, HardwareConnectError>,
+) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(HardwareConnectError::NoDevice(_)) => Ok(None),
+        Err(HardwareConnectError::Failed(error)) => Err(error),
     }
 }
 
@@ -464,27 +567,33 @@ impl TransportConnector {
         }
 
         if let Some(id) = &profile_id {
-            // Prefer real hardware when present; otherwise synthetic fixture.
-            match self.connect_hardware() {
-                Ok(pair) => return Ok(pair),
-                Err(_) => {
-                    let info = device_info_from_fixture(id)?;
-                    let mut t = NullTransport::with_profile(info.clone());
-                    let _ = t.handshake()?;
-                    info!("THERMALWRITER_PROFILE={id}: using fixture profile without hardware");
-                    return Ok((Box::new(t), info));
-                }
+            // Prefer real hardware when present. A fixture fallback is valid only
+            // after a successful scan positively establishes no selector match.
+            if let Some(pair) = hardware_or_no_device(self.connect_hardware())? {
+                return Ok(pair);
             }
+            let info = device_info_from_fixture(id)?;
+            let mut t = NullTransport::with_profile(info.clone());
+            let _ = t.handshake()?;
+            info!("THERMALWRITER_PROFILE={id}: using fixture profile without hardware");
+            return Ok((Box::new(t), info));
         }
 
         self.connect_hardware()
+            .map_err(HardwareConnectError::into_anyhow)
     }
 
-    fn connect_hardware(&self) -> Result<(Box<dyn Transport>, DeviceInfo)> {
-        let devices = scan_devices().context("device scan failed")?;
-        let selected = select_devices(&devices, &self.selector)?;
-        info!("Selected device {}", selected.identity());
-        open_discovered(&selected)
+    fn connect_hardware(
+        &self,
+    ) -> std::result::Result<(Box<dyn Transport>, DeviceInfo), HardwareConnectError> {
+        connect_scanned_with(
+            scan_devices().context("device scan failed"),
+            &self.selector,
+            |selected| {
+                info!("Selected device {}", selected.identity());
+                open_discovered(selected)
+            },
+        )
     }
 }
 
@@ -621,6 +730,105 @@ mod tests {
             *address = 9;
         }
         assert!(select_devices(&[d, d2], &DeviceSelector::Auto).is_err());
+    }
+
+    #[test]
+    fn fixture_fallback_classification_requires_successful_zero_match_scan() {
+        let device = |address| DiscoveredDevice {
+            vid: 0x87ad,
+            pid: 0x70db,
+            protocol: WireProtocol::Bulk,
+            serial: None,
+            path: DevicePath::Usb {
+                bus: 1,
+                address,
+                interface: 0,
+                ep_in: 0x81,
+                ep_out: 0x01,
+            },
+        };
+
+        let scan_error = select_scanned_device(
+            Err(anyhow::anyhow!("permission denied")),
+            &DeviceSelector::Auto,
+        )
+        .unwrap_err();
+        assert!(matches!(scan_error, HardwareConnectError::Failed(_)));
+
+        let no_devices = select_scanned_device(Ok(Vec::new()), &DeviceSelector::Auto).unwrap_err();
+        assert!(matches!(no_devices, HardwareConnectError::NoDevice(_)));
+
+        let no_selector_match = select_scanned_device(
+            Ok(vec![device(2)]),
+            &DeviceSelector::UsbId {
+                vid: 0x0416,
+                pid: 0x5408,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            no_selector_match,
+            HardwareConnectError::NoDevice(_)
+        ));
+
+        let ambiguous =
+            select_scanned_device(Ok(vec![device(2), device(3)]), &DeviceSelector::Auto)
+                .unwrap_err();
+        assert!(matches!(ambiguous, HardwareConnectError::Failed(_)));
+
+        let selected = select_scanned_device(Ok(vec![device(2)]), &DeviceSelector::Auto).unwrap();
+        assert_eq!(selected, device(2));
+
+        let open_error = connect_scanned_with(
+            Ok(vec![device(2)]),
+            &DeviceSelector::Auto,
+            |_| -> Result<()> { Err(anyhow::anyhow!("permission/open/handshake failure")) },
+        )
+        .unwrap_err();
+        assert!(matches!(open_error, HardwareConnectError::Failed(_)));
+        let propagated = hardware_or_no_device::<()>(Err(open_error)).unwrap_err();
+        assert!(
+            propagated
+                .to_string()
+                .contains("permission/open/handshake failure"),
+            "{propagated:#}"
+        );
+
+        let fallback = hardware_or_no_device::<()>(Err(HardwareConnectError::NoDevice(
+            anyhow::anyhow!("no matching device"),
+        )))
+        .unwrap();
+        assert!(fallback.is_none(), "only NoDevice should permit fallback");
+    }
+
+    #[test]
+    fn detected_scsi_usb_device_requires_resolved_generic_node() {
+        let candidate = ScsiUsbCandidate {
+            vid: 0x87cd,
+            pid: 0x70db,
+            bus: 1,
+            address: 2,
+        };
+        let error = ensure_scsi_candidates_resolved(&[candidate], &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("no usable scsi_generic"),
+            "{error:#}"
+        );
+
+        let resolved = DiscoveredDevice {
+            vid: candidate.vid,
+            pid: candidate.pid,
+            protocol: WireProtocol::Scsi,
+            serial: None,
+            path: DevicePath::Scsi {
+                devnode: PathBuf::from("/dev/sg0"),
+                sysfs_device: PathBuf::from("/sys/class/scsi_generic/sg0"),
+                usb_bus: Some(candidate.bus),
+                usb_address: Some(candidate.address),
+            },
+        };
+        ensure_scsi_candidates_resolved(&[candidate], &[resolved])
+            .expect("matching scsi_generic node should resolve candidate");
     }
 
     #[test]
