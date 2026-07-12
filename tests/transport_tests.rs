@@ -227,15 +227,6 @@ fn hid_type3_init_and_fixed_frame_with_ack_size() {
     let _ = build_device_info(WireProtocol::HidType3, 0x0418, 0x5304, 101, 0, Some(101)).unwrap();
 }
 
-#[test]
-fn hid_retry_timing_constants() {
-    // Documented protocol: 3 attempts, 50ms pre, 200ms post, 500ms retry.
-    // Pure builders don't sleep; timings are asserted as constants via code paths
-    // exercised when real I/O is injected in unit tests of the helpers above.
-    assert_eq!(hid_lcd::build_init_packet_type2().len(), 512);
-    assert_eq!(hid_lcd::build_init_packet_type3().len(), 1040);
-}
-
 // ---------------------------------------------------------------------------
 // LY pure sequence helpers
 // ---------------------------------------------------------------------------
@@ -555,6 +546,7 @@ struct MemHidIo {
     reads: std::collections::VecDeque<Vec<u8>>,
     log: Vec<IoOp>,
     sleeps: Vec<Duration>,
+    write_failures: usize,
 }
 
 impl MemHidIo {
@@ -563,6 +555,14 @@ impl MemHidIo {
             reads: reads.into(),
             log: Vec::new(),
             sleeps: Vec::new(),
+            write_failures: 0,
+        }
+    }
+
+    fn with_write_failures(write_failures: usize) -> Self {
+        Self {
+            write_failures,
+            ..Self::new(Vec::new())
         }
     }
 }
@@ -570,6 +570,10 @@ impl MemHidIo {
 impl hid_lcd::HidIo for MemHidIo {
     fn write(&mut self, data: &[u8]) -> Result<()> {
         self.log.push(IoOp::Write(data.to_vec()));
+        if self.write_failures > 0 {
+            self.write_failures -= 1;
+            bail!("injected HID write failure");
+        }
         Ok(())
     }
     fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
@@ -584,29 +588,98 @@ impl hid_lcd::HidIo for MemHidIo {
     }
 }
 
+fn expected_hid_handshake_schedule(
+    init: Vec<u8>,
+    response_size: usize,
+    attempts: usize,
+) -> Vec<IoOp> {
+    let mut expected = Vec::new();
+    for attempt in 0..attempts {
+        expected.push(IoOp::Wait(Duration::from_millis(50)));
+        expected.push(IoOp::Write(init.clone()));
+        expected.push(IoOp::Wait(Duration::from_millis(200)));
+        expected.push(IoOp::Read(response_size));
+        if attempt + 1 < attempts {
+            expected.push(IoOp::Wait(Duration::from_millis(500)));
+        }
+    }
+    expected
+}
+
+fn expected_hid_write_failure_schedule(init: Vec<u8>, attempts: usize) -> Vec<IoOp> {
+    let mut expected = Vec::new();
+    for attempt in 0..attempts {
+        expected.push(IoOp::Wait(Duration::from_millis(50)));
+        expected.push(IoOp::Write(init.clone()));
+        if attempt + 1 < attempts {
+            expected.push(IoOp::Wait(Duration::from_millis(500)));
+        }
+    }
+    expected
+}
+
 #[test]
-fn hid_type2_handshake_retries_then_succeeds() {
-    // First two reads invalid; third valid. Expect 3 attempts with pre/post/retry sleeps.
+fn hid_type2_handshake_retries_once_then_stops_on_success() {
+    // First read invalid; second valid. Success must stop before a third attempt.
     let bad = vec![0u8; 20];
     let mut good = vec![0u8; 20];
     good[0..4].copy_from_slice(&[0xDA, 0xDB, 0xDC, 0xDD]);
     good[12] = 1;
     good[5] = 58;
     good[4] = 0;
-    let mut io = MemHidIo::new(vec![bad.clone(), bad, good]);
+    let mut io = MemHidIo::new(vec![bad, good]);
     let info = hid_lcd::handshake_type2_with_io(&mut io, 0x0416, 0x5302).unwrap();
     assert_eq!((info.width(), info.height()), (320, 240));
-    // 3 writes of 512-byte init
-    let writes: Vec<_> = io
-        .log
-        .iter()
-        .filter(|op| matches!(op, IoOp::Write(w) if w.len() == 512))
-        .collect();
-    assert_eq!(writes.len(), 3);
-    // sleeps: each attempt pre(50)+post(200), failed attempts also retry(500)
-    assert!(io.sleeps.iter().any(|d| *d == Duration::from_millis(50)));
-    assert!(io.sleeps.iter().any(|d| *d == Duration::from_millis(200)));
-    assert!(io.sleeps.iter().any(|d| *d == Duration::from_millis(500)));
+    assert_eq!(
+        io.log,
+        expected_hid_handshake_schedule(hid_lcd::build_init_packet_type2(), 512, 2)
+    );
+}
+
+#[test]
+fn hid_handshake_exhaustion_has_exact_schedule_without_trailing_retry() {
+    let type2_bad = vec![0; 20];
+    let mut type2 = MemHidIo::new(vec![type2_bad.clone(); 3]);
+    let error = hid_lcd::handshake_type2_with_io(&mut type2, 0x0416, 0x5302).unwrap_err();
+    assert!(error.to_string().contains("invalid HID Type2"), "{error:#}");
+    assert_eq!(
+        type2.log,
+        expected_hid_handshake_schedule(hid_lcd::build_init_packet_type2(), 512, 3)
+    );
+
+    let type3_bad = vec![0x64; 14];
+    let mut type3 = MemHidIo::new(vec![type3_bad; 3]);
+    let error = hid_lcd::handshake_type3_with_io(&mut type3, 0x0418, 0x5303).unwrap_err();
+    assert!(error.to_string().contains("invalid HID Type3"), "{error:#}");
+    assert_eq!(
+        type3.log,
+        expected_hid_handshake_schedule(hid_lcd::build_init_packet_type3(), 1024, 3)
+    );
+}
+
+#[test]
+fn hid_write_failure_exhaustion_has_exact_schedule_without_reads_or_trailing_retry() {
+    let mut type2 = MemHidIo::with_write_failures(3);
+    let error = hid_lcd::handshake_type2_with_io(&mut type2, 0x0416, 0x5302).unwrap_err();
+    assert!(
+        error.to_string().contains("HID init write failed"),
+        "{error:#}"
+    );
+    assert_eq!(
+        type2.log,
+        expected_hid_write_failure_schedule(hid_lcd::build_init_packet_type2(), 3)
+    );
+
+    let mut type3 = MemHidIo::with_write_failures(3);
+    let error = hid_lcd::handshake_type3_with_io(&mut type3, 0x0418, 0x5303).unwrap_err();
+    assert!(
+        error.to_string().contains("HID init write failed"),
+        "{error:#}"
+    );
+    assert_eq!(
+        type3.log,
+        expected_hid_write_failure_schedule(hid_lcd::build_init_packet_type3(), 3)
+    );
 }
 
 #[test]

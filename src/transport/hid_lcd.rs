@@ -89,7 +89,9 @@ pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
         io.sleep(DELAY_PRE_INIT);
         if let Err(e) = io.write(&init) {
             last_err = Some(anyhow::anyhow!("HID init write failed: {e}"));
-            io.sleep(HANDSHAKE_RETRY_DELAY);
+            if attempt < HANDSHAKE_MAX_RETRIES {
+                io.sleep(HANDSHAKE_RETRY_DELAY);
+            }
             continue;
         }
         io.sleep(DELAY_POST_INIT);
@@ -107,7 +109,9 @@ pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
             }
             Err(e) => last_err = Some(anyhow::anyhow!("HID init read failed: {e}")),
         }
-        io.sleep(HANDSHAKE_RETRY_DELAY);
+        if attempt < HANDSHAKE_MAX_RETRIES {
+            io.sleep(HANDSHAKE_RETRY_DELAY);
+        }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type2 handshake failed")))
 }
@@ -120,7 +124,9 @@ pub fn handshake_type3_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
         io.sleep(DELAY_PRE_INIT);
         if let Err(error) = io.write(&init) {
             last_err = Some(anyhow::anyhow!("HID init write failed: {error}"));
-            io.sleep(HANDSHAKE_RETRY_DELAY);
+            if attempt < HANDSHAKE_MAX_RETRIES {
+                io.sleep(HANDSHAKE_RETRY_DELAY);
+            }
             continue;
         }
         io.sleep(DELAY_POST_INIT);
@@ -137,7 +143,9 @@ pub fn handshake_type3_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
             }
             Err(error) => last_err = Some(anyhow::anyhow!("HID init read failed: {error}")),
         }
-        io.sleep(HANDSHAKE_RETRY_DELAY);
+        if attempt < HANDSHAKE_MAX_RETRIES {
+            io.sleep(HANDSHAKE_RETRY_DELAY);
+        }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type3 handshake failed")))
 }
