@@ -236,18 +236,64 @@ pub fn build_frame_type2(image_data: &[u8], width: u32, height: u32) -> Vec<u8> 
 }
 
 /// Type 3 frame: 16-byte prefix + exactly 204800 RGB565 bytes.
-pub fn build_frame_type3(image_data: &[u8]) -> Vec<u8> {
+pub fn build_frame_type3(image_data: &[u8]) -> Result<Vec<u8>> {
+    if image_data.len() != TYPE3_DATA_SIZE {
+        bail!(
+            "HID Type3 RGB565 payload length {} does not match fixed size {}",
+            image_data.len(),
+            TYPE3_DATA_SIZE
+        );
+    }
     let mut pkt = Vec::with_capacity(16 + TYPE3_DATA_SIZE);
     pkt.extend_from_slice(&TYPE3_FRAME_PREFIX);
     pkt.extend_from_slice(&[0, 0, 0, 0]);
     pkt.extend_from_slice(&(TYPE3_DATA_SIZE as u32).to_le_bytes());
-    if image_data.len() < TYPE3_DATA_SIZE {
-        pkt.extend_from_slice(image_data);
-        pkt.resize(16 + TYPE3_DATA_SIZE, 0);
-    } else {
-        pkt.extend_from_slice(&image_data[..TYPE3_DATA_SIZE]);
+    pkt.extend_from_slice(image_data);
+    Ok(pkt)
+}
+
+fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) -> Result<()> {
+    let (wire_width, wire_height) = info.wire_dimensions()?;
+    if frame.width != wire_width || frame.height != wire_height {
+        bail!(
+            "frame {}x{} does not match wire dimensions {}x{}",
+            frame.width,
+            frame.height,
+            wire_width,
+            wire_height
+        );
     }
-    pkt
+    if frame.encoding != info.encoding() {
+        bail!(
+            "frame encoding {} does not match device {}",
+            frame.encoding,
+            info.encoding()
+        );
+    }
+    if kind == HidType::Type3 && !frame.encoding.is_rgb565() {
+        bail!("HID Type3 requires RGB565, got {}", frame.encoding);
+    }
+    if frame.encoding.is_rgb565() {
+        let expected_len = usize::try_from(wire_width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(wire_height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(2))
+            .context("HID RGB565 wire payload size overflow")?;
+        if frame.data.len() != expected_len {
+            bail!(
+                "RGB565 payload length {} does not match {}x{} wire frame ({} bytes)",
+                frame.data.len(),
+                wire_width,
+                wire_height,
+                expected_len
+            );
+        }
+    }
+    Ok(())
 }
 
 fn frame_timeout(packet_size: usize) -> Duration {
@@ -340,27 +386,10 @@ impl Transport for HidLcd {
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
         let info = self.info.as_ref().context("Handshake not performed")?;
-        let (wire_width, wire_height) = info.wire_dimensions()?;
-        if frame.width != wire_width || frame.height != wire_height {
-            bail!(
-                "frame {}x{} does not match wire dimensions {}x{}",
-                frame.width,
-                frame.height,
-                wire_width,
-                wire_height
-            );
-        }
+        validate_hid_frame(self.kind, info, frame)?;
         let packet = match self.kind {
             HidType::Type2 => build_frame_type2(&frame.data, frame.width, frame.height),
-            HidType::Type3 => {
-                if !matches!(
-                    frame.encoding,
-                    FrameEncoding::Rgb565Le | FrameEncoding::Rgb565Be
-                ) {
-                    bail!("HID Type3 requires RGB565, got {}", frame.encoding);
-                }
-                build_frame_type3(&frame.data)
-            }
+            HidType::Type3 => build_frame_type3(&frame.data)?,
         };
         let timeout = frame_timeout(packet.len());
 
@@ -443,9 +472,94 @@ mod tests {
     }
 
     #[test]
-    fn type3_frame_is_fixed_size() {
-        let data = vec![0u8; 100];
-        let pkt = build_frame_type3(&data);
+    fn type3_frame_requires_fixed_size() {
+        let exact = vec![0u8; TYPE3_DATA_SIZE];
+        let pkt = build_frame_type3(&exact).expect("exact Type3 payload");
         assert_eq!(pkt.len(), 16 + TYPE3_DATA_SIZE);
+
+        for invalid_len in [TYPE3_DATA_SIZE - 1, TYPE3_DATA_SIZE + 1] {
+            let error = build_frame_type3(&vec![0; invalid_len]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("payload length {invalid_len}")),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn hid_frame_validation_enforces_encoding_and_rgb565_size() {
+        let cases = [
+            (
+                HidType::Type2,
+                build_device_info(WireProtocol::HidType2, 0x0416, 0x5302, 58, 0, None).unwrap(),
+            ),
+            (
+                HidType::Type2,
+                build_device_info(WireProtocol::HidType2, 0x0416, 0x5302, 49, 0, None).unwrap(),
+            ),
+            (
+                HidType::Type3,
+                build_device_info(WireProtocol::HidType3, 0x0418, 0x5303, 100, 0, Some(100))
+                    .unwrap(),
+            ),
+        ];
+        for (kind, info) in cases {
+            let (width, height) = info.wire_dimensions().unwrap();
+            let expected_len = width as usize * height as usize * 2;
+            let matching = EncodedFrame {
+                data: vec![0; expected_len],
+                width,
+                height,
+                encoding: info.encoding(),
+            };
+            validate_hid_frame(kind, &info, &matching).expect("matching frame");
+
+            let mut opposite = matching.clone();
+            opposite.encoding = match info.encoding() {
+                FrameEncoding::Rgb565Le => FrameEncoding::Rgb565Be,
+                FrameEncoding::Rgb565Be => FrameEncoding::Rgb565Le,
+                other => panic!("expected RGB565 profile, got {other}"),
+            };
+            let error = validate_hid_frame(kind, &info, &opposite).unwrap_err();
+            assert!(
+                error.to_string().contains("does not match device"),
+                "{error:#}"
+            );
+
+            for invalid_len in [expected_len - 1, expected_len + 1] {
+                let mut invalid = matching.clone();
+                invalid.data.resize(invalid_len, 0);
+                let error = validate_hid_frame(kind, &info, &invalid).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("RGB565 payload length {invalid_len}")),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn type2_keeps_jpeg_variable_length_while_type3_rejects_it() {
+        let info = build_device_info(WireProtocol::HidType2, 0x0416, 0x5302, 65, 3, None).unwrap();
+        assert_eq!(info.encoding(), FrameEncoding::Jpeg);
+        let (width, height) = info.wire_dimensions().unwrap();
+        let frame = EncodedFrame {
+            data: vec![0xff, 0xd8, 0xff, 0xd9],
+            width,
+            height,
+            encoding: FrameEncoding::Jpeg,
+        };
+
+        validate_hid_frame(HidType::Type2, &info, &frame)
+            .expect("Type2 JPEG payload length is variable");
+        let error = validate_hid_frame(HidType::Type3, &info, &frame).unwrap_err();
+        assert!(
+            error.to_string().contains("Type3 requires RGB565"),
+            "{error:#}"
+        );
     }
 }

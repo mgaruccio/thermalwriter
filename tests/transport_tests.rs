@@ -219,7 +219,7 @@ fn hid_type3_init_and_fixed_frame_with_ack_size() {
     assert!(hid_lcd::validate_response_type3(&[0x66; 14]));
     assert!(!hid_lcd::validate_response_type3(&[0x64; 14]));
 
-    let frame = hid_lcd::build_frame_type3(&[0u8; 100]);
+    let frame = hid_lcd::build_frame_type3(&vec![0u8; 204800]).unwrap();
     assert_eq!(frame.len(), 16 + 204800);
     // Both PIDs 5303/5304 share Type3 framing.
     let _ = build_device_info(WireProtocol::HidType3, 0x0418, 0x5303, 100, 0, Some(100)).unwrap();
