@@ -123,11 +123,24 @@ pub const KNOWN_LCD_IDS: &[(u16, u16, WireProtocol)] = &[
     (0x0416, 0x5406, WireProtocol::Bulk),
 ];
 
+const SCSI_ONLY_LCD_IDS: &[(u16, u16)] = &[(0x87cd, 0x70db), (0x0402, 0x3922)];
+const DUAL_PATH_LCD_ID: (u16, u16) = (0x0416, 0x5406);
+
 fn protocol_for_id(vid: u16, pid: u16) -> Option<WireProtocol> {
     KNOWN_LCD_IDS
         .iter()
         .find(|(v, p, _)| *v == vid && *p == pid)
         .map(|(_, _, proto)| *proto)
+}
+
+fn scsi_protocol_for_id(vid: u16, pid: u16, bulk_claimed: bool) -> Option<WireProtocol> {
+    if SCSI_ONLY_LCD_IDS.contains(&(vid, pid)) {
+        return Some(WireProtocol::Scsi);
+    }
+    if (vid, pid) == DUAL_PATH_LCD_ID && !bulk_claimed {
+        return Some(WireProtocol::Scsi);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +181,13 @@ fn ensure_scsi_candidates_resolved(
     Ok(())
 }
 
+fn vendor_bulk_endpoints(endpoints: Option<(u8, u8, u8, bool)>) -> Option<(u8, u8, u8)> {
+    match endpoints {
+        Some((interface, ep_in, ep_out, true)) => Some((interface, ep_in, ep_out)),
+        Some((_, _, _, false)) | None => None,
+    }
+}
+
 /// Scan libusb + scsi_generic for full-pixel LCDs.
 pub fn scan_devices() -> Result<Vec<DiscoveredDevice>> {
     let mut devices = Vec::new();
@@ -197,11 +217,10 @@ fn scan_usb(
 
         // 0416:5406 — prefer vendor bulk endpoints; else leave for SCSI scan.
         if vid == 0x0416 && pid == 0x5406 {
-            if let Some((iface, ep_in, ep_out)) =
-                find_bulk_endpoints(&device).with_context(|| {
-                    format!("0416:5406 endpoint probe failed at bus={bus} addr={address}")
-                })?
-            {
+            let endpoints = find_bulk_endpoints(&device).with_context(|| {
+                format!("0416:5406 endpoint probe failed at bus={bus} addr={address}")
+            })?;
+            if let Some((iface, ep_in, ep_out)) = vendor_bulk_endpoints(endpoints) {
                 out.push(DiscoveredDevice {
                     vid,
                     pid,
@@ -216,6 +235,8 @@ fn scan_usb(
                     },
                 });
             } else {
+                // Mass-storage bulk endpoints are the SCSI shape, not the
+                // vendor-bulk shape. Defer them to scsi_generic discovery.
                 scsi_candidates.push(ScsiUsbCandidate {
                     vid,
                     pid,
@@ -237,7 +258,7 @@ fn scan_usb(
             continue;
         }
 
-        let Some((iface, ep_in, ep_out)) = find_bulk_endpoints(&device).with_context(|| {
+        let Some((iface, ep_in, ep_out, _)) = find_bulk_endpoints(&device).with_context(|| {
             format!(
                 "failed to read config for {:04x}:{:04x} bus={} addr={}",
                 vid, pid, bus, address
@@ -271,7 +292,7 @@ fn scan_usb(
 
 fn find_bulk_endpoints<T: rusb::UsbContext>(
     device: &rusb::Device<T>,
-) -> Result<Option<(u8, u8, u8)>> {
+) -> Result<Option<(u8, u8, u8, bool)>> {
     let config = device
         .active_config_descriptor()
         .context("active config descriptor")?;
@@ -300,7 +321,7 @@ fn find_bulk_endpoints<T: rusb::UsbContext>(
             }
         }
     }
-    Ok(best.map(|(i, inn, out, _)| (i, inn, out)))
+    Ok(best)
 }
 
 fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
@@ -322,20 +343,13 @@ fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
             continue;
         };
         let (vid, pid) = (ancestor.vid, ancestor.pid);
-        let protocol = match (vid, pid) {
-            (0x87cd, 0x70db) | (0x0402, 0x3922) => WireProtocol::Scsi,
-            (0x0416, 0x5406) => {
-                // Prefer the bulk interface only when it belongs to this same
-                // physical USB device. Identical coolers remain distinct.
-                let same_physical_device = out
-                    .iter()
-                    .any(|device| belongs_to_usb_ancestor(device, ancestor));
-                if same_physical_device {
-                    continue;
-                }
-                WireProtocol::Scsi
-            }
-            _ => continue,
+        // Prefer a vendor-bulk interface only when it belongs to this same
+        // physical dual-path device. Identical coolers remain distinct.
+        let bulk_claimed = out
+            .iter()
+            .any(|device| belongs_to_usb_ancestor(device, ancestor));
+        let Some(protocol) = scsi_protocol_for_id(vid, pid, bulk_claimed) else {
+            continue;
         };
         let devnode = PathBuf::from(format!("/dev/{name}"));
         if !devnode.exists() {
@@ -684,6 +698,123 @@ fn open_discovered(dev: &DiscoveredDevice) -> Result<(Box<dyn Transport>, Device
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn udev_hex_attr(line: &str, attr: &str) -> Option<u16> {
+        let prefix = format!("ATTRS{{{attr}}}==\"");
+        let start = line.find(&prefix)? + prefix.len();
+        let value = line[start..].split('"').next()?;
+        u16::from_str_radix(value, 16).ok()
+    }
+
+    #[test]
+    fn scsi_discovery_matrix_covers_permitted_ids_and_dual_path() {
+        let expected_scsi_only = [(0x87cd, 0x70db), (0x0402, 0x3922)];
+        assert_eq!(SCSI_ONLY_LCD_IDS, expected_scsi_only);
+
+        let mut known_scsi_ids: Vec<_> = KNOWN_LCD_IDS
+            .iter()
+            .filter_map(|(vid, pid, protocol)| {
+                (*protocol == WireProtocol::Scsi).then_some((*vid, *pid))
+            })
+            .collect();
+        known_scsi_ids.sort_unstable();
+        let mut routed_scsi_ids = SCSI_ONLY_LCD_IDS.to_vec();
+        routed_scsi_ids.sort_unstable();
+        assert_eq!(
+            known_scsi_ids, routed_scsi_ids,
+            "USB-declared SCSI IDs and scan_scsi routing matrix drifted"
+        );
+
+        for (vid, pid) in expected_scsi_only {
+            assert_eq!(
+                protocol_for_id(vid, pid),
+                Some(WireProtocol::Scsi),
+                "USB discovery matrix omitted {vid:04x}:{pid:04x}"
+            );
+            assert_eq!(
+                scsi_protocol_for_id(vid, pid, false),
+                Some(WireProtocol::Scsi),
+                "SCSI discovery matrix omitted {vid:04x}:{pid:04x}"
+            );
+            assert_eq!(
+                scsi_protocol_for_id(vid, pid, true),
+                Some(WireProtocol::Scsi),
+                "SCSI-only ID must not be suppressed by unrelated bulk devices"
+            );
+        }
+
+        let (vid, pid) = DUAL_PATH_LCD_ID;
+        assert_eq!(protocol_for_id(vid, pid), Some(WireProtocol::Bulk));
+        assert_eq!(
+            vendor_bulk_endpoints(Some((1, 0x81, 0x02, true))),
+            Some((1, 0x81, 0x02)),
+            "vendor interface must select bulk"
+        );
+        assert_eq!(
+            vendor_bulk_endpoints(Some((1, 0x81, 0x02, false))),
+            None,
+            "mass-storage bulk endpoints must defer to SCSI"
+        );
+        assert_eq!(
+            vendor_bulk_endpoints(None),
+            None,
+            "missing bulk endpoints must defer to SCSI"
+        );
+        assert_eq!(
+            scsi_protocol_for_id(vid, pid, false),
+            Some(WireProtocol::Scsi),
+            "0416:5406 without a same-device bulk claim must fall back to SCSI"
+        );
+        assert_eq!(
+            scsi_protocol_for_id(vid, pid, true),
+            None,
+            "0416:5406 with a same-device bulk claim must prefer bulk"
+        );
+
+        for (vid, pid) in expected_scsi_only.into_iter().chain([DUAL_PATH_LCD_ID]) {
+            let info = crate::transport::build_device_info(
+                WireProtocol::Scsi,
+                vid,
+                pid,
+                100,
+                0,
+                Some(100),
+            )
+            .unwrap_or_else(|error| {
+                panic!("SCSI profile resolution failed for {vid:04x}:{pid:04x}: {error:#}")
+            });
+            assert_eq!((info.vid, info.pid), (vid, pid));
+            assert_eq!(info.protocol, WireProtocol::Scsi);
+            assert_eq!((info.width(), info.height()), (320, 320));
+            assert_eq!(info.encoding(), crate::transport::FrameEncoding::Rgb565Be);
+        }
+
+        let udev_rules = include_str!("../../packaging/udev/99-thermalwriter-rapl.rules");
+        let mut udev_scsi_ids = Vec::new();
+        for line in udev_rules
+            .lines()
+            .filter(|line| line.trim_start().starts_with("SUBSYSTEM==\"scsi_generic\""))
+        {
+            assert!(
+                line.contains("TAG+=\"uaccess\""),
+                "SCSI udev rule does not grant active-session access: {line}"
+            );
+            let vid = udev_hex_attr(line, "idVendor")
+                .unwrap_or_else(|| panic!("SCSI udev rule lacks a valid vendor: {line}"));
+            let pid = udev_hex_attr(line, "idProduct")
+                .unwrap_or_else(|| panic!("SCSI udev rule lacks a valid product: {line}"));
+            udev_scsi_ids.push((vid, pid));
+        }
+        udev_scsi_ids.sort_unstable();
+
+        let mut expected_udev_ids = expected_scsi_only.to_vec();
+        expected_udev_ids.push(DUAL_PATH_LCD_ID);
+        expected_udev_ids.sort_unstable();
+        assert_eq!(
+            udev_scsi_ids, expected_udev_ids,
+            "SCSI discovery and permission matrices drifted"
+        );
+    }
 
     #[test]
     fn parse_auto_and_usb_id() {
