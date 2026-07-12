@@ -2,10 +2,14 @@
 
 //! Hardware-free binary/D-Bus E2E for negotiated multi-cooler fixtures.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
+
+const CTL_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_thermalwriter"))
@@ -120,15 +124,85 @@ fn stderr_text(path: &Path) -> String {
         .unwrap_or_else(|error| format!("<failed to read stderr: {error}>"))
 }
 
+enum CommandOutcome {
+    Completed(Output),
+    TimedOut { pid: libc::pid_t, output: Output },
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<CommandOutcome> {
+    // Files avoid the pipe-buffer deadlock that can occur when a supervised
+    // child fills stdout or stderr before the parent begins reading.
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?));
+    let mut child = command.spawn()?;
+    let pid = child.id() as libc::pid_t;
+
+    let (status, timed_out) = match child.wait_timeout(timeout) {
+        Ok(Some(status)) => (status, false),
+        Ok(None) => {
+            let kill_error = child
+                .kill()
+                .err()
+                .filter(|error| error.kind() != std::io::ErrorKind::InvalidInput);
+            let wait_result = child.wait();
+            if let Some(error) = kill_error {
+                let _ = wait_result;
+                return Err(error);
+            }
+            (wait_result?, true)
+        }
+        Err(error) => {
+            // Once spawned, every return path must terminate and reap the child.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+
+    let mut stdout_bytes = Vec::new();
+    stdout.seek(SeekFrom::Start(0))?;
+    stdout.read_to_end(&mut stdout_bytes)?;
+    let mut stderr_bytes = Vec::new();
+    stderr.seek(SeekFrom::Start(0))?;
+    stderr.read_to_end(&mut stderr_bytes)?;
+    let output = Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    };
+
+    if timed_out {
+        Ok(CommandOutcome::TimedOut { pid, output })
+    } else {
+        Ok(CommandOutcome::Completed(output))
+    }
+}
+
 fn ctl(bus: &SessionBus, xdg: &Path, runtime: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    let mut command = Command::new(bin());
+    command
         .arg("ctl")
         .args(args)
         .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
         .env("XDG_CONFIG_HOME", xdg)
-        .env("XDG_RUNTIME_DIR", runtime)
-        .output()
-        .expect("run thermalwriter ctl")
+        .env("XDG_RUNTIME_DIR", runtime);
+
+    match command_output_with_timeout(&mut command, CTL_TIMEOUT)
+        .unwrap_or_else(|error| panic!("run thermalwriter ctl {args:?}: {error}"))
+    {
+        CommandOutcome::Completed(output) => output,
+        CommandOutcome::TimedOut { output, .. } => panic!(
+            "thermalwriter ctl {args:?} timed out after {CTL_TIMEOUT:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
 }
 
 fn wait_for_connected_status(
@@ -338,6 +412,33 @@ device = "auto"
             assert_rgb565_be_pixel(&data, expect_w, expect_w - 1, y, expected_background);
         }
     }
+}
+
+#[test]
+fn command_timeout_kills_and_reaps_child() {
+    let started = Instant::now();
+    let mut command = Command::new("sleep");
+    command.arg("60");
+
+    let outcome = command_output_with_timeout(&mut command, Duration::from_millis(50))
+        .expect("supervise child");
+    let CommandOutcome::TimedOut { pid, .. } = outcome else {
+        panic!("sleeping child should time out");
+    };
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "timed-out child was not killed promptly"
+    );
+    let mut status = 0;
+    // SAFETY: pid identifies the child returned by command_output_with_timeout.
+    let wait_result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(wait_result, -1, "timed-out child remained waitable");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD),
+        "timed-out child was not reaped"
+    );
 }
 
 #[test]
