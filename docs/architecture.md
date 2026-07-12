@@ -37,8 +37,15 @@ GUI release packaging is separate from crates.io publication of the daemon crate
 Discovery (`src/transport/discovery.rs`) scans libusb and `scsi_generic`, applies
 the configured `auto` or `VID:PID` selector, and rejects zero/ambiguous matches.
 A `TransportConnector` handshakes one selected device and returns
-`(Transport, DeviceInfo)` with a typed `DeviceProfile`: native resolution, shape,
-wire encoding, PM/FBL overrides, and rotation table.
+`Result<(Box<dyn Transport>, DeviceInfo)>`. `DeviceInfo` stores the negotiated
+VID, PID, PM, SUB, FBL, wire protocol, and typed `DeviceProfile`. The profile
+stores native width and height, `FrameEncoding`, and the `rotate_panel`,
+`widescreen`, `encode_baseline`, `encode_base`, and `encode_invert` controls
+used during encoding. Panel shape, oriented dimensions, wire dimensions, and
+rotation angles are derived from those stored values; there are no `shape` or
+rotation-table fields. PM, SUB, and FBL are negotiated identity values on
+`DeviceInfo`; profile resolution folds their applicable overrides into the
+resulting `DeviceProfile`.
 
 The tick loop treats a reconnect as a generation. It publishes `connected=true`
 and the negotiated D-Bus resolution only after the main task has rebuilt a
