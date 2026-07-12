@@ -1,9 +1,8 @@
 use crate::config::Config;
 use crate::dbus_types::DisplayProxy;
 use crate::render::RawFrame;
-use crate::service::tick::encode_jpeg;
-use crate::transport::Transport;
-use crate::transport::bulk_usb::BulkUsb;
+use crate::transport::discovery::TransportConnector;
+use crate::transport::encode::encode_frame;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::time::{Duration, Instant};
@@ -155,31 +154,40 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     let quality = config.display.jpeg_quality;
     let rotation = config.display.rotation;
 
+    let connector = TransportConnector::from_config_device(&config.display.device)?;
+    let (mut transport, info) = connector.connect()?;
+    let (w, h) = crate::transport::oriented_dimensions(info.width(), info.height(), rotation)?;
+
     // Pre-render two solid-color frames (red and blue) for visual confirmation
     let frame_red = RawFrame {
-        data: [255, 0, 0].repeat(480 * 480),
-        width: 480,
-        height: 480,
+        data: [255, 0, 0].repeat((w * h) as usize),
+        width: w,
+        height: h,
     };
-    let jpeg_red = encode_jpeg(&frame_red, quality, rotation)?;
+    let enc_red = encode_frame(&frame_red, &info, rotation, quality)?;
 
     let frame_blue = RawFrame {
-        data: [0, 0, 255].repeat(480 * 480),
-        width: 480,
-        height: 480,
+        data: [0, 0, 255].repeat((w * h) as usize),
+        width: w,
+        height: h,
     };
-    let jpeg_blue = encode_jpeg(&frame_blue, quality, rotation)?;
-
-    // Open USB device and handshake
-    let mut transport = BulkUsb::new()?;
-    let info = transport.handshake()?;
+    let enc_blue = encode_frame(&frame_blue, &info, rotation, quality)?;
 
     println!("Benchmarking display throughput...");
-    println!("  Device: {}x{}", info.width, info.height);
     println!(
-        "  Frame size: {} bytes (JPEG q={})",
-        jpeg_red.len(),
-        quality
+        "  Device: {}x{} PM={} SUB={} FBL={} {} {}",
+        info.width(),
+        info.height(),
+        info.pm,
+        info.sub,
+        info.fbl,
+        info.protocol,
+        info.encoding()
+    );
+    println!(
+        "  Frame size: {} bytes ({})",
+        enc_red.data.len(),
+        enc_red.encoding
     );
     println!("  Duration: {}s", duration_secs);
     println!();
@@ -191,8 +199,8 @@ pub fn run_bench(duration_secs: u64) -> Result<()> {
     let bench_start = Instant::now();
     while bench_start.elapsed() < duration {
         let frame_start = Instant::now();
-        let jpeg = if use_red { &jpeg_red } else { &jpeg_blue };
-        transport.send_frame(jpeg)?;
+        let frame = if use_red { &enc_red } else { &enc_blue };
+        transport.send_frame(frame)?;
         frame_times.push(frame_start.elapsed());
         use_red = !use_red;
     }

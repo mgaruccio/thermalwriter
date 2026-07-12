@@ -1,10 +1,11 @@
-<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #08080f; color: #ffffff; padding: 40px; gap: 24px; justify-content: center; align-items: center;">
-  <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
-    <span style="height: 88px; font-size: 72px; color: #ffffff;">{{ cpu_temp | default(value="--") }}°C</span>
-    <span style="height: 24px; font-size: 20px; color: #888888;">CPU TEMP</span>
+{# canvas: responsive #}
+<div style="display: flex; flex-direction: column; width: {{ width }}px; height: {{ height }}px; background: #08080f; color: #ffffff; padding: {{ token_margin }}px; gap: {{ token_gap }}px; justify-content: center; align-items: center;">
+  <div style="display: flex; flex-direction: column; gap: {{ token_gap }}px; align-items: center;">
+    <span style="height: {{ token_hero + token_medium }}px; font-size: {{ token_hero }}px; color: #ffffff;">{{ cpu_temp | default(value="--") }}°C</span>
+    <span style="height: {{ token_medium }}px; font-size: {{ token_small }}px; color: #888888;">CPU TEMP</span>
   </div>
-  <div style="display: flex; flex-direction: column; gap: 4px; align-items: center;">
-    <span style="height: 40px; font-size: 32px; color: #ffffff;">{{ cpu_util | default(value="--") }}%</span>
-    <span style="height: 18px; font-size: 14px; color: #888888;">LOAD</span>
+  <div style="display: flex; flex-direction: column; gap: {{ token_gap }}px; align-items: center;">
+    <span style="height: {{ token_medium + token_small }}px; font-size: {{ token_medium }}px; color: #ffffff;">{{ cpu_util | default(value="--") }}%</span>
+    <span style="height: {{ token_small + 4 }}px; font-size: {{ token_label }}px; color: #888888;">LOAD</span>
   </div>
 </div>

@@ -1,16 +1,17 @@
+{# canvas: responsive #}
 {# vars:
 cpu_color: color = "#ff6b80" "CPU accent color"
 gpu_color: color = "#7eb8ff" "GPU accent color"
 fps_color: color = "#00f5c8" "FPS accent color"
 text_color: color = "#ffffff" "Primary text color"
-dim_color: color = "#666680" "Dim label color"
+dim_color: color = "#9999aa" "Dim label color"
 cpu_label: text = "CPU" "CPU gauge label"
 gpu_label: text = "GPU" "GPU gauge label"
 fps_label: text = "FPS" "Frame rate label"
 ram_label: text = "RAM" "Memory label"
 vram_label: text = "VRAM" "Video memory label"
 #}
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
   <defs>
     <linearGradient id="cpuArc" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="{{ cpu_color }}"/>
@@ -40,6 +41,13 @@ vram_label: text = "VRAM" "Video memory label"
       </feMerge>
     </filter>
   </defs>
+  {% if is_portrait %}
+  <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
+  {% elif is_square %}
+  <g transform="scale({{ width * 1.0 / 480 }})">
+  {% else %}
+  <g transform="translate({{ (width - height) / 2 }}, 0) scale({{ height * 1.0 / 480 }})">
+  {% endif %}
 
   <!-- === CPU Gauge (left) === -->
   <g transform="translate(140, 160)">
@@ -53,9 +61,9 @@ vram_label: text = "VRAM" "Video memory label"
     <!-- Labels -->
     <text x="0" y="-18" font-family="DejaVu Sans Mono, monospace" font-size="42" fill="{{ text_color }}"
           text-anchor="middle" font-weight="bold">{{ cpu_temp | default(value="--") }}°</text>
-    <text x="0" y="14" font-family="DejaVu Sans Mono, monospace" font-size="18" fill="{{ cpu_color }}"
+    <text x="0" y="14" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}18{% endif %}" fill="{{ cpu_color }}"
           text-anchor="middle">{{ cpu_util | default(value="--") }}%</text>
-    <text x="0" y="40" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="{{ dim_color }}"
+    <text x="0" y="40" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}12{% endif %}" fill="{{ dim_color }}"
           text-anchor="middle">{{ cpu_label }}</text>
   </g>
 
@@ -71,9 +79,9 @@ vram_label: text = "VRAM" "Video memory label"
     <!-- Labels -->
     <text x="0" y="-18" font-family="DejaVu Sans Mono, monospace" font-size="42" fill="{{ text_color }}"
           text-anchor="middle" font-weight="bold">{{ gpu_temp | default(value="--") }}°</text>
-    <text x="0" y="14" font-family="DejaVu Sans Mono, monospace" font-size="18" fill="{{ gpu_color }}"
+    <text x="0" y="14" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}18{% endif %}" fill="{{ gpu_color }}"
           text-anchor="middle">{{ gpu_util | default(value="--") }}%</text>
-    <text x="0" y="40" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="{{ dim_color }}"
+    <text x="0" y="40" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}12{% endif %}" fill="{{ dim_color }}"
           text-anchor="middle">{{ gpu_label }}</text>
   </g>
 
@@ -87,20 +95,27 @@ vram_label: text = "VRAM" "Video memory label"
   <!-- FPS -->
   <text x="240" y="395" font-family="DejaVu Sans Mono, monospace" font-size="56" fill="url(#fpsGrad)"
         text-anchor="middle" font-weight="bold">{{ fps | default(value="--") }}</text>
-  <text x="240" y="420" font-family="DejaVu Sans Mono, monospace" font-size="13" fill="{{ dim_color }}"
+  <text x="240" y="420" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}13{% endif %}" fill="{{ dim_color }}"
         text-anchor="middle">{{ fps_label }}</text>
-  <text x="240" y="442" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#558877"
+  <text x="240" y="442" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="#88aa99"
         text-anchor="middle">{{ frametime | default(value="--") }}ms</text>
 
   <!-- RAM -->
   <text x="72" y="390" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc9eff"
         text-anchor="middle" font-weight="bold">{{ ram_used | default(value="--") }}G</text>
-  <text x="72" y="412" font-family="DejaVu Sans Mono, monospace" font-size="10" fill="{{ dim_color }}"
+  <text x="72" y="412" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}10{% endif %}" fill="{{ dim_color }}"
         text-anchor="middle">{{ ram_label }}</text>
 
   <!-- VRAM -->
   <text x="408" y="390" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc9eff"
         text-anchor="middle" font-weight="bold">{{ vram_used | default(value="--") }}G</text>
-  <text x="408" y="412" font-family="DejaVu Sans Mono, monospace" font-size="10" fill="{{ dim_color }}"
+  <text x="408" y="412" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}10{% endif %}" fill="{{ dim_color }}"
         text-anchor="middle">{{ vram_label }}</text>
+  </g>
+  {% if is_portrait and height - width > 40 %}
+  <text x="{{ width / 2 }}" y="{{ token_margin + token_label }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">ARC GAUGE</text>
+  {% elif width - height > 300 %}
+  <text x="{{ (width - height) / 4 }}" y="{{ height / 2 }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ cpu_color }}">{{ cpu_temp | default(value="--") }}°</text>
+  <text x="{{ width - (width - height) / 4 }}" y="{{ height / 2 }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ gpu_color }}">{{ gpu_temp | default(value="--") }}°</text>
+  {% endif %}
 </svg>

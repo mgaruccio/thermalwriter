@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Linux daemon for Thermalright cooler LCD displays"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/mgaruccio/thermalwriter"
 homepage = "https://github.com/mgaruccio/thermalwriter"
 readme = "README.md"
@@ -39,6 +39,8 @@ include = [
     "/docs/release.md",
     "/docs/configuration.md",
     "/docs/gui.md",
+    "/docs/profiling.md",
+    "/docs/profiling-baselines.md",
     "/docs/assets/**",
     "/skills/designing-layouts/SKILL.md",
 ]
@@ -106,6 +108,10 @@ dhat-heap = ["dep:dhat"]
 inherits = "release"
 debug = true
 strip = false
+
+[[example]]
+name = "preview_layout"
+required-features = ["daemon"]
 
 [[example]]
 name = "preview_blitz"

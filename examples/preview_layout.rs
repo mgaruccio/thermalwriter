@@ -1,15 +1,15 @@
-//! Preview a layout as PNG without touching the USB device.
-//! Usage:
-//!   cargo run --example preview_layout [name_or_path]
+//! Preview a layout as PNG without USB hardware.
 //!
-//! Examples:
-//!   cargo run --example preview_layout system-stats              # built-in HTML
-//!   cargo run --example preview_layout layouts/neon-dash.html    # HTML file path
-//!   cargo run --example preview_layout layouts/svg/arc-gauge.svg # SVG file path
-//!   cargo run --example preview_layout neon-dash                 # layouts/<name>.html
+//! ```sh
+//! cargo run --example preview_layout -- layouts/svg/neon-dash-v2.svg
+//! cargo run --example preview_layout -- --matrix --output-dir target/multi-cooler-visual-qa
+//! cargo run --example preview_layout -- --list
+//! cargo run --example preview_layout -- --profile bulk-87ad-70db-pm4-sub5-fbl72 layouts/svg/neon-dash-v2.svg
+//! cargo run --example preview_layout -- --size 1280x480 layouts/svg/neon-dash-v2.svg
+//! ```
 
-use anyhow::{Context, Result};
-use std::path::Path;
+use anyhow::{Context, Result, bail};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
@@ -17,10 +17,29 @@ use thermalwriter::render::{FrameSource, TemplateRenderer};
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::mock::{fill_synthetic_history, mock_sensors};
 use thermalwriter::theme::ThemePalette;
+use thermalwriter::transport::{
+    device_info_from_fixture, known_fixture_profiles, supported_resolutions,
+};
 
-/// Returns (content, display_name, is_svg).
+const SEEDED: &[&str] = &[
+    "layouts/system-stats.html",
+    "layouts/gpu-focus.html",
+    "layouts/minimal.html",
+    "layouts/svg/neon-dash.svg",
+    "layouts/svg/arc-gauge.svg",
+    "layouts/svg/cyber-grid.svg",
+    "layouts/svg/neon-dash-v2.svg",
+];
+
+const CLASS_SIZES: &[(u32, u32)] = &[
+    (240, 320),  // portrait
+    (320, 320),  // square
+    (854, 480),  // landscape
+    (1280, 480), // wide
+    (1920, 462), // ultrawide
+];
+
 fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
-    // Try as file path first
     let path = Path::new(name_or_path);
     if path.exists() && path.is_file() {
         let content = std::fs::read_to_string(path)
@@ -33,103 +52,182 @@ fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
         let is_svg = path.extension().is_some_and(|e| e == "svg");
         return Ok((content, display_name, is_svg));
     }
-
-    // Try as layouts/svg/<name>.svg
-    let svg_path = format!("layouts/svg/{}.svg", name_or_path);
-    let path = Path::new(&svg_path);
-    if path.exists() && path.is_file() {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+    let svg_path = format!("layouts/svg/{name_or_path}.svg");
+    if Path::new(&svg_path).exists() {
+        let content = std::fs::read_to_string(&svg_path)?;
         return Ok((content, name_or_path.to_string(), true));
     }
-
-    // Try as layouts/<name>.html
-    let layout_path = format!("layouts/{}.html", name_or_path);
-    let path = Path::new(&layout_path);
-    if path.exists() && path.is_file() {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+    let html_path = format!("layouts/{name_or_path}.html");
+    if Path::new(&html_path).exists() {
+        let content = std::fs::read_to_string(&html_path)?;
         return Ok((content, name_or_path.to_string(), false));
     }
+    bail!("Layout not found: {name_or_path}");
+}
 
-    // Fall back to built-in layouts
-    match name_or_path {
-        "system-stats" => Ok((
-            include_str!("../layouts/system-stats.html").to_string(),
-            "system-stats".to_string(),
-            false,
-        )),
-        "gpu-focus" => Ok((
-            include_str!("../layouts/gpu-focus.html").to_string(),
-            "gpu-focus".to_string(),
-            false,
-        )),
-        "minimal" => Ok((
-            include_str!("../layouts/minimal.html").to_string(),
-            "minimal".to_string(),
-            false,
-        )),
-        other => anyhow::bail!(
-            "Layout not found: '{}'\n\nUsage: cargo run --example preview_layout [name_or_path]\n  name_or_path: file path (.html or .svg), layouts/<name>.html, layouts/svg/<name>.svg, or built-in (system-stats, gpu-focus, minimal)",
-            other
-        ),
+fn render_one(
+    template: &str,
+    is_svg: bool,
+    width: u32,
+    height: u32,
+) -> Result<thermalwriter::render::RawFrame> {
+    let sensors = mock_sensors();
+    let fm = LayoutFrontmatter::parse(template);
+    let history = Arc::new(Mutex::new(SensorHistory::new()));
+    {
+        let mut h = history.lock().unwrap();
+        let metrics: Vec<String> = fm.history_configs.keys().cloned().collect();
+        for (metric, cfg) in &fm.history_configs {
+            h.configure_metric(metric, cfg.duration);
+        }
+        fill_synthetic_history(&mut h, &metrics, &sensors);
     }
+    let theme = ThemePalette::default();
+    let mut source: Box<dyn FrameSource> = if is_svg {
+        let mut r = SvgRenderer::new(template, width, height)?;
+        r.set_history(history);
+        r.set_theme(theme);
+        Box::new(r)
+    } else {
+        Box::new(TemplateRenderer::new(template, width, height)?)
+    };
+    source.render(&sensors)
+}
+
+fn parse_size(s: &str) -> Result<(u32, u32)> {
+    let (w, h) = s
+        .split_once('x')
+        .ok_or_else(|| anyhow::anyhow!("size must be WIDTHxHEIGHT"))?;
+    Ok((w.parse()?, h.parse()?))
+}
+
+fn write_contact_sheet(paths: &[(PathBuf, u32, u32)], out: &Path) -> Result<()> {
+    // Simple horizontal strips per row of unique heights is complex; tile in a grid.
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let cols = 5usize;
+    let thumb_w = 240u32;
+    let rows = paths.len().div_ceil(cols);
+    let mut max_h = 120u32;
+    for (_, w, h) in paths {
+        let scale = thumb_w as f32 / *w as f32;
+        max_h = max_h.max((*h as f32 * scale) as u32);
+    }
+    let sheet_w = thumb_w * cols as u32;
+    let sheet_h = max_h * rows as u32;
+    let mut sheet = image::RgbImage::new(sheet_w, sheet_h);
+    for (i, (path, w, h)) in paths.iter().enumerate() {
+        let img = image::open(path)?.to_rgb8();
+        let scale = thumb_w as f32 / *w as f32;
+        let th = (*h as f32 * scale).max(1.0) as u32;
+        let resized =
+            image::imageops::resize(&img, thumb_w, th, image::imageops::FilterType::Triangle);
+        let col = (i % cols) as u32;
+        let row = (i / cols) as u32;
+        let x0 = col * thumb_w;
+        let y0 = row * max_h;
+        image::imageops::replace(&mut sheet, &resized, x0 as i64, y0 as i64);
+    }
+    sheet.save(out)?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
-    let name_or_path = std::env::args()
-        .nth(1)
-        .unwrap_or("system-stats".to_string());
-    let (template, display_name, is_svg) = load_template(&name_or_path)?;
-
-    let sensors = mock_sensors();
-    let mut keys: Vec<_> = sensors.iter().collect();
-    keys.sort_by_key(|(k, _)| (*k).clone());
-    for (k, v) in &keys {
-        println!("  {} = {}", k, v);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--list") {
+        println!("Fixture profiles:");
+        for f in known_fixture_profiles() {
+            let info = device_info_from_fixture(f.id)?;
+            println!(
+                "  {} -> {}x{} {}",
+                f.id,
+                info.width(),
+                info.height(),
+                info.encoding()
+            );
+        }
+        println!("Supported resolutions: {:?}", supported_resolutions());
+        return Ok(());
     }
 
-    let mut renderer: Box<dyn FrameSource> = if is_svg {
-        println!("Using SVG renderer");
-
-        // Parse frontmatter for history/animation config
-        let frontmatter = LayoutFrontmatter::parse(&template);
-
-        // Create sensor history and pre-fill with synthetic data
-        let sensor_history = if !frontmatter.history_configs.is_empty() {
-            let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
-            println!("Frontmatter history metrics: {:?}", metrics);
-
-            let mut history = SensorHistory::new();
-            for (metric, cfg) in &frontmatter.history_configs {
-                history.configure_metric(metric, cfg.duration);
+    let mut output_dir = PathBuf::from("target/preview");
+    let mut matrix = false;
+    let mut size: Option<(u32, u32)> = None;
+    let mut profile: Option<String> = None;
+    let mut layout_arg = String::from("layouts/svg/neon-dash-v2.svg");
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--matrix" => matrix = true,
+            "--output-dir" => {
+                i += 1;
+                output_dir = PathBuf::from(args.get(i).context("--output-dir needs value")?);
             }
-            fill_synthetic_history(&mut history, &metrics, &sensors);
-            println!(
-                "Pre-filled {} metrics with {} synthetic samples each",
-                metrics.len(),
-                60
-            );
-            Some(Arc::new(Mutex::new(history)))
-        } else {
-            None
-        };
-
-        let theme = ThemePalette::default();
-        let mut renderer = SvgRenderer::new(&template, 480, 480)?;
-        if let Some(hist) = sensor_history {
-            renderer.set_history(hist);
+            "--size" => {
+                i += 1;
+                size = Some(parse_size(args.get(i).context("--size needs value")?)?);
+            }
+            "--profile" => {
+                i += 1;
+                profile = Some(args.get(i).context("--profile needs value")?.clone());
+            }
+            "--list" => {}
+            other if !other.starts_with('-') => layout_arg = other.to_string(),
+            other => bail!("unknown arg {other}"),
         }
-        renderer.set_theme(theme);
-        Box::new(renderer)
+        i += 1;
+    }
+
+    std::fs::create_dir_all(&output_dir)?;
+
+    if matrix {
+        let mut written = Vec::new();
+        // 7 seeded × 5 class sizes = 35
+        for layout in SEEDED {
+            let (template, name, is_svg) = load_template(layout)?;
+            for &(w, h) in CLASS_SIZES {
+                let frame = render_one(&template, is_svg, w, h)?;
+                let path = output_dir.join(format!("{name}-{w}x{h}.png"));
+                frame.save_png(path.to_str().unwrap())?;
+                written.push((path, w, h));
+                println!("wrote {} ({w}x{h})", written.last().unwrap().0.display());
+            }
+        }
+        // default neon-dash-v2 + calibration at all supported sizes
+        let all = supported_resolutions();
+        for label in [
+            "layouts/svg/neon-dash-v2.svg",
+            "examples/fixtures/calibration.svg",
+        ] {
+            let (template, name, is_svg) = load_template(label)?;
+            for &(w, h) in &all {
+                let frame = render_one(&template, is_svg, w, h)?;
+                let path = output_dir.join(format!("{name}-full-{w}x{h}.png"));
+                frame.save_png(path.to_str().unwrap())?;
+                written.push((path, w, h));
+            }
+        }
+        let sheet = output_dir.join("contact-sheet.png");
+        write_contact_sheet(&written, &sheet)?;
+        println!("contact sheet: {}", sheet.display());
+        println!("matrix complete: {} images", written.len());
+        return Ok(());
+    }
+
+    let (w, h) = if let Some(s) = size {
+        s
+    } else if let Some(id) = profile {
+        let info = device_info_from_fixture(&id)?;
+        (info.width(), info.height())
     } else {
-        Box::new(TemplateRenderer::new(&template, 480, 480)?)
+        (480, 480)
     };
 
-    let frame = renderer.render(&sensors)?;
-
-    let path = format!("/tmp/thermalwriter_{}.png", display_name);
-    frame.save_png(&path)?;
-    println!("Saved: {}", path);
+    let (template, display_name, is_svg) = load_template(&layout_arg)?;
+    let frame = render_one(&template, is_svg, w, h)?;
+    let out = output_dir.join(format!("{display_name}-{w}x{h}.png"));
+    frame.save_png(out.to_str().unwrap())?;
+    println!("Preview saved: {} ({}x{})", out.display(), w, h);
     Ok(())
 }

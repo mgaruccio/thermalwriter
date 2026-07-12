@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use tempfile::{NamedTempFile, tempdir};
 use thermalwriter::config::Config;
-use thermalwriter::render::parser::parse_html;
+use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
 
 // ---------------------------------------------------------------------------
 // BackgroundConfig — [background] section parsing and backwards compat
@@ -137,22 +137,30 @@ fn config_returns_error_on_invalid_toml() {
     assert!(result.is_err(), "Invalid TOML should return an error");
 }
 
+fn assert_builtin_html_renders(template: &str, name: &str) {
+    let mut renderer =
+        TemplateRenderer::new(template, 854, 480).expect("renderer construction should succeed");
+    renderer
+        .render(&SensorData::new())
+        .unwrap_or_else(|error| panic!("{name} should render without error: {error:#}"));
+}
+
 #[test]
 fn builtin_system_stats_layout_parses() {
-    let html = include_str!("../layouts/system-stats.html");
-    parse_html(html).expect("system-stats.html should parse without error");
+    assert_builtin_html_renders(
+        include_str!("../layouts/system-stats.html"),
+        "system-stats.html",
+    );
 }
 
 #[test]
 fn builtin_gpu_focus_layout_parses() {
-    let html = include_str!("../layouts/gpu-focus.html");
-    parse_html(html).expect("gpu-focus.html should parse without error");
+    assert_builtin_html_renders(include_str!("../layouts/gpu-focus.html"), "gpu-focus.html");
 }
 
 #[test]
 fn builtin_minimal_layout_parses() {
-    let html = include_str!("../layouts/minimal.html");
-    parse_html(html).expect("minimal.html should parse without error");
+    assert_builtin_html_renders(include_str!("../layouts/minimal.html"), "minimal.html");
 }
 
 // ---------------------------------------------------------------------------

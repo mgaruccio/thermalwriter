@@ -7,7 +7,7 @@ description: Use when creating, modifying, or reviewing thermalwriter LCD layout
 
 ## Overview
 
-Create attractive layouts for thermalwriter's LCD display. The display is a small square screen (currently 480x480) mounted on a CPU cooler inside a PC case. The target aesthetic is **gaming/enthusiast PC** — bold, dark, accented. Think NZXT CAM, Corsair iCUE, not a terminal dashboard.
+Create attractive layouts for Thermalright LCDs across portrait, square, landscape, wide, and ultrawide native geometries. The panels are small and often washed out inside a PC case, so use bold hierarchy, dark backgrounds, and high-contrast accents. Think NZXT CAM or Corsair iCUE, not a terminal dashboard.
 
 **Attractive is more important than informational.** This is a consumer product, not a monitoring tool.
 
@@ -53,29 +53,30 @@ This is the single most common layout bug. If text overlaps, check for missing h
 SVG is the primary layout format. Use the `SvgRenderer` pipeline: SVG template → Tera substitution → resvg → Pixmap.
 
 ```xml
+{# canvas: responsive #}
 {# history: cpu_util=60s, gpu_temp=120s #}
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480">
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
   <!-- Background pattern -->
   {{ background(pattern="grid", color="#ffffff08", spacing=24) }}
 
   <!-- Area graph: CPU utilization history -->
-  {{ graph(data=cpu_util_history, x=0, y=380, w=480, h=100,
+  {{ graph(data=cpu_util_history, x=0, y=height-100, w=width, h=100,
            style="area", fill="#e9456033", stroke="#e94560") }}
 
   <!-- Current CPU temp (hero value) -->
-  <text x="240" y="200" text-anchor="middle" font-size="96"
+  <text x="{{ width / 2 }}" y="{{ height / 2 }}" text-anchor="middle" font-size="{{ token_hero }}"
         fill="{{ theme_primary }}" font-family="monospace">
     {{ cpu_temp | default(value="--") }}°C
   </text>
 </svg>
 ```
 
-Key SVG layout rules:
-1. `viewBox="0 0 480 480"` — always 480x480 canvas
-2. `{# history: ... #}` frontmatter declares metrics to buffer (see [components.md](./references/components.md))
-3. Text uses absolute `x,y` coordinates — no flexbox in SVG
-4. Components are Tera function calls that emit SVG fragments
-5. Document order = z-order: background first, text last
+1. Declare `{# canvas: responsive #}` and bind the root `viewBox`, `width`, and `height` to `{{ width }}` / `{{ height }}`.
+2. Branch on `is_portrait`, `is_square`, `is_landscape`, `is_wide`, and `is_ultrawide` when the composition must reflow; use `token_margin`, `token_gap`, and typography tokens derived from the short axis.
+3. `{# history: ... #}` frontmatter declares metrics to buffer (see [components.md](./references/components.md)).
+4. Text uses explicit coordinates; standard SVG transforms are available for undistorted contain-style subcompositions.
+5. Components are Tera function calls that emit SVG fragments.
 
 ### Component Composability Rules
 
@@ -98,6 +99,19 @@ These are binding contracts for how components interact:
 8. **Sensor polling independence.** Render tick rate and sensor poll rate are independent. Animation-driven tick rate increases do not increase sensor reads.
 
 ---
+
+## Canvas geometry
+
+- `{# canvas: responsive #}` opts into the negotiated device geometry and exposes
+  `width`, `height`, `aspect`, `shape`, `is_*`, and `token_*` values.
+- `{# canvas: WIDTHxHEIGHT #}` declares a fixed logical canvas that is uniformly
+  contained and centered into the device output.
+- No canvas declaration preserves legacy behavior: fixed 480×480, centered with
+  letterbox bars on non-square displays.
+- Background images are independently resized with centered cover to the native
+  device resolution.
+- Render every changed responsive layout at least once in each supported shape
+  class. Use `preview_layout --matrix` for the seeded evidence set.
 
 ## Quick Start: Creating a Layout (HTML)
 

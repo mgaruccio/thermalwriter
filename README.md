@@ -6,18 +6,22 @@ Current status: Public Beta (`v0.1.0`).
 
 ### Supported Devices
 
-| Status | Device / Host Details |
-| --- | --- |
-| **Known working** | Thermalright Peerless Vision / GrandVision 360 AIO, USB `87ad:70db` |
-| **Experimental** | Other Thermalright LCD coolers using the same protocol when connected before daemon startup; absent-at-start hotplug currently targets the known 480x480 device path |
-| **Not supported** | Non-Linux hosts and devices with different USB protocols |
+| Status | USB ID | Transport / notes |
+| --- | --- | --- |
+| **Hardware-smoked** | `87ad:70db` | Raw bulk Grand Vision family; negotiated PM/FBL selects native geometry and JPEG/RGB565 |
+| **Fixture-verified** | `87cd:70db`, `0402:3922` | SCSI LCD over `scsi_generic` |
+| **Fixture-verified** | `0416:5302` | HID LCD Type 2 |
+| **Fixture-verified** | `0418:5303`, `0418:5304` | HID LCD Type 3 |
+| **Fixture-verified** | `0416:5408`, `0416:5409` | LY bulk / Trofeo Vision family |
+| **Fixture-verified** | `0416:5406` | Dual-shape Winbond device: vendor bulk preferred, SCSI fallback |
+| **Not supported** | Other IDs / non-Linux hosts | Unknown devices are rejected rather than guessed |
 
 ## Features
 
 ![Layout Preview](docs/assets/neon-dash-v2-preview.png)
 
 - User-session systemd daemon with D-Bus control commands.
-- SVG layout renderer with Tera variables and built-in 480x480 layouts.
+- Responsive SVG and legacy HTML layout renderers targeting negotiated native resolutions from portrait through ultrawide.
 - Sensor providers for hwmon, sysinfo, AMDGPU, NVIDIA, MangoHud, and Intel RAPL.
 - Global background image support for PNG/JPEG assets.
 - Xvfb capture mode for streaming any X11 application onto the LCD, with built-in presets for conky, cava, and btop (session-only; never persisted as a boot default).
@@ -175,6 +179,34 @@ For more information, consult the following documentation files:
 - [Performance Tuning and Profiling](docs/profiling.md) - Whole-daemon profiling harness, Criterion benches, baseline workflow, and the autoresearch loop for performance work.
 - [Designing Layouts](skills/designing-layouts/SKILL.md) - Guidelines for creating custom LCD layouts.
 
+## Multi-cooler operation
+
+`display.device = "auto"` requires exactly one supported physical display. When
+multiple connected displays have distinct USB IDs, select one with an explicit
+hexadecimal `VID:PID`. Displays sharing the same `VID:PID` cannot currently be
+disambiguated; unplug extras. For hardware-free development, set
+`THERMALWRITER_TRANSPORT=null` and optionally select a negotiated fixture with
+`THERMALWRITER_PROFILE=<fixture-id>`.
+
+List native resolutions and render the visual evidence matrix:
+
+```sh
+cargo run --example preview_layout -- --list
+cargo run --example preview_layout -- --matrix \
+  --output-dir target/multi-cooler-visual-qa
+```
+
+Layouts opt into native reflow with `{# canvas: responsive #}`. A declared fixed
+canvas (`{# canvas: WIDTHxHEIGHT #}`), and unannotated legacy 480×480 layouts,
+are uniformly contained and centered without distortion. Background images use
+centered cover at the negotiated device resolution.
+
 ## License
 
-MIT. See `LICENSE`.
+GPL-3.0-or-later. See `LICENSE`.
+
+Protocol tables and multi-cooler wire behavior are derived from
+[thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux)
+at commit `390b880abd4cf0ed2d6eae7151493432263eff39` (project version 9.8.6,
+four commits after the `v9.8.6` tag), which is also licensed under
+GPL-3.0-or-later.

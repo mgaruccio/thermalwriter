@@ -1,3 +1,4 @@
+{# canvas: responsive #}
 {# vars:
 theme_primary: color = "#e94560" "CPU accent color"
 theme_secondary: color = "#53d8fb" "GPU accent color"
@@ -9,7 +10,7 @@ ram_label: text = "RAM" "Memory label"
 vram_label: text = "VRAM" "Video memory label"
 fps_label: text = "FPS" "Frame rate label"
 #}
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
   <defs>
     <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="{{ theme_primary }}"/>
@@ -24,11 +25,18 @@ fps_label: text = "FPS" "Frame rate label"
       <stop offset="100%" stop-color="#0e0e18"/>
     </linearGradient>
   </defs>
+  {% if is_portrait %}
+  <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
+  {% elif is_square %}
+  <g transform="scale({{ width * 1.0 / 480 }})">
+  {% else %}
+  <g transform="translate({{ (width - height) / 2 }}, 0) scale({{ height * 1.0 / 480 }})">
+  {% endif %}
 
   <!-- CPU Panel -->
   <rect x="16" y="16" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
   <rect x="16" y="16" width="4" height="172" rx="2" fill="{{ theme_primary }}"/>
-  <text x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#888888">{{ cpu_label }}</text>
+  <text x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="#888888">{{ cpu_label }}</text>
   <text x="36" y="120" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="url(#cpuGrad)" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
   <text x="36" y="168" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="#c4546e">{{ cpu_util | default(value="--") }}% LOAD</text>
   <!-- CPU power - right side -->
@@ -37,7 +45,7 @@ fps_label: text = "FPS" "Frame rate label"
   <!-- GPU Panel -->
   <rect x="16" y="200" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
   <rect x="16" y="200" width="4" height="172" rx="2" fill="{{ theme_secondary }}"/>
-  <text x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="14" fill="#888888">{{ gpu_label }}</text>
+  <text x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="#888888">{{ gpu_label }}</text>
   <text x="36" y="304" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="url(#gpuGrad)" font-weight="bold">{{ gpu_temp | default(value="--") }}°C</text>
   <text x="36" y="352" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="#5aabb8">{{ gpu_util | default(value="--") }}% LOAD</text>
   <!-- GPU power - right side -->
@@ -46,13 +54,22 @@ fps_label: text = "FPS" "Frame rate label"
   <!-- Bottom Stats Row -->
   <rect x="16" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   <text x="86" y="420" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="#cc9eff" text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
-  <text x="86" y="452" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="#999999" text-anchor="middle">{{ ram_label }}</text>
+  <text x="86" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}16{% endif %}" fill="#999999" text-anchor="middle">{{ ram_label }}</text>
 
   <rect x="170" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   <text x="240" y="420" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="#cc9eff" text-anchor="middle">{{ vram_used | default(value="--") }}G</text>
-  <text x="240" y="452" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="#999999" text-anchor="middle">{{ vram_label }}</text>
+  <text x="240" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}16{% endif %}" fill="#999999" text-anchor="middle">{{ vram_label }}</text>
 
   <rect x="324" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   <text x="394" y="420" font-family="DejaVu Sans Mono, monospace" font-size="26" fill="{{ theme_accent }}" text-anchor="middle">{{ fps | default(value="--") }}</text>
-  <text x="394" y="452" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="#999999" text-anchor="middle">{{ fps_label }}</text>
+  <text x="394" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}16{% endif %}" fill="#999999" text-anchor="middle">{{ fps_label }}</text>
+  </g>
+  {% if is_portrait and height - width > 40 %}
+  <text x="{{ width / 2 }}" y="{{ token_margin + token_label }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">THERMALWRITER</text>
+  {% elif width - height > 300 %}
+  <text x="{{ (width - height) / 4 }}" y="{{ height / 2 - token_gap }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_accent }}">{{ fps | default(value="--") }}</text>
+  <text x="{{ (width - height) / 4 }}" y="{{ height / 2 + token_medium }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">{{ fps_label }}</text>
+  <text x="{{ width - (width - height) / 4 }}" y="{{ height / 2 - token_gap }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="#cc9eff">{{ ram_used | default(value="--") }}G</text>
+  <text x="{{ width - (width - height) / 4 }}" y="{{ height / 2 + token_medium }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">{{ ram_label }}</text>
+  {% endif %}
 </svg>

@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::ipc::Response;
 use thermalwriter::config::Config;
 use thermalwriter::dbus_types::DisplayProxy;
-use thermalwriter::render::background::decode_from_file;
+use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, SensorData};
@@ -34,7 +34,7 @@ struct RendererCache {
     current_layout: Option<String>,
     renderer: Option<SvgRenderer<'static>>,
     current_background: Option<String>,
-    background_pixmap: Option<tiny_skia::Pixmap>,
+    background_pixmap: Option<Arc<BackgroundImage>>,
 }
 
 impl RendererState {
@@ -184,7 +184,7 @@ pub fn render_preview(
     let theme = config.theme.manual.unwrap_or_default();
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
-    let background_pixmap = cached_preview_background(&state, &mut cache, background.as_deref())?;
+    let background_image = cached_preview_background(&state, &mut cache, background.as_deref())?;
     if cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none() {
         let mut renderer =
             SvgRenderer::new(&content, 480, 480).map_err(|e| AppError::Render(e.to_string()))?;
@@ -210,7 +210,9 @@ pub fn render_preview(
         .ok_or_else(|| AppError::Render("renderer not initialized".into()))?;
     renderer.set_theme(theme);
     renderer.set_layout_vars(vars);
-    renderer.set_background(background_pixmap);
+    renderer
+        .set_background(background_image)
+        .map_err(|error| AppError::Render(error.to_string()))?;
 
     let frame = renderer
         .render(&mock_sensors())
@@ -848,7 +850,7 @@ fn cached_preview_background(
     state: &RendererState,
     cache: &mut RendererCache,
     background: Option<&str>,
-) -> Result<Option<tiny_skia::Pixmap>, AppError> {
+) -> Result<Option<Arc<BackgroundImage>>, AppError> {
     let Some(name) = background else {
         cache.current_background = None;
         cache.background_pixmap = None;
@@ -857,9 +859,11 @@ fn cached_preview_background(
 
     let path = validate_background_path(&state.background_dir, name)?;
     if cache.current_background.as_deref() != Some(name) || cache.background_pixmap.is_none() {
-        let pixmap = decode_from_file(&path).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+        let image = BackgroundImage::from_file(&path)
+            .map(Arc::new)
+            .map_err(|error| AppError::BackgroundIo(error.to_string()))?;
         cache.current_background = Some(name.to_string());
-        cache.background_pixmap = Some(pixmap);
+        cache.background_pixmap = Some(image);
     }
 
     Ok(cache.background_pixmap.clone())
@@ -1634,7 +1638,7 @@ mod tests {
         let pixmap = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap.data()[0], 255);
+        assert_eq!(pixmap.to_pixmap(480, 480).unwrap().data()[0], 255);
         assert_eq!(pixmap.data()[1], 0);
         assert_eq!(pixmap.data()[2], 0);
 
@@ -1650,7 +1654,7 @@ mod tests {
         let pixmap_cached = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_cached.data()[0], 255);
+        assert_eq!(pixmap_cached.to_pixmap(480, 480).unwrap().data()[0], 255);
         assert_eq!(pixmap_cached.data()[1], 0);
         assert_eq!(pixmap_cached.data()[2], 0);
 
@@ -1664,7 +1668,7 @@ mod tests {
         let pixmap_after_clear = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_after_clear.data()[0], 0);
+        assert_eq!(pixmap_after_clear.to_pixmap(480, 480).unwrap().data()[0], 0);
         assert_eq!(pixmap_after_clear.data()[1], 0);
         assert_eq!(pixmap_after_clear.data()[2], 255);
         assert_eq!(cache.current_background.as_deref(), Some("bg1.png"));
@@ -1677,7 +1681,7 @@ mod tests {
         let pixmap_new = cached_preview_background(&state, &mut cache, Some("bg2.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_new.data()[0], 0);
+        assert_eq!(pixmap_new.to_pixmap(480, 480).unwrap().data()[0], 0);
         assert_eq!(pixmap_new.data()[1], 255);
         assert_eq!(pixmap_new.data()[2], 0);
         assert_eq!(cache.current_background.as_deref(), Some("bg2.png"));

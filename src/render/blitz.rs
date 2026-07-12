@@ -13,7 +13,7 @@ use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::Fill;
 use peniko::kurbo::Rect;
 
-use super::{FrameSource, RawFrame, SensorData};
+use super::{FrameSource, RawFrame, SensorData, contain_pixmap, svg, template_canvas_dimensions};
 
 /// Renders HTML/CSS layouts using Blitz (Stylo + Taffy + Vello CPU).
 /// Supports the full CSS spec including border-radius, gradients, box-shadow, etc.
@@ -21,22 +21,27 @@ pub struct BlitzRenderer {
     template: String,
     width: u32,
     height: u32,
+    render_width: u32,
+    render_height: u32,
 }
 
 impl BlitzRenderer {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
+        let (render_width, render_height) = template_canvas_dimensions(template, width, height);
         Ok(Self {
             template: template.to_string(),
             width,
             height,
+            render_width,
+            render_height,
         })
     }
 
     /// Render HTML string (already template-substituted) to a tiny-skia Pixmap.
     fn render_html(&self, html: &str) -> Result<Pixmap> {
         let scale = 1.0_f32;
-        let w = self.width;
-        let h = self.height;
+        let w = self.render_width;
+        let h = self.render_height;
 
         // Parse HTML into a Blitz document
         let mut document = HtmlDocument::from_html(
@@ -99,11 +104,52 @@ impl FrameSource for BlitzRenderer {
         for (key, value) in sensors {
             context.insert(key, value);
         }
+        context.insert("width", &self.render_width);
+        context.insert("height", &self.render_height);
+        let aspect = if self.render_height > 0 {
+            f64::from(self.render_width) / f64::from(self.render_height)
+        } else {
+            1.0
+        };
+        context.insert("aspect", &aspect);
+        if let Ok(shape) =
+            crate::display_geometry::display_shape(self.render_width, self.render_height)
+        {
+            context.insert("shape", shape.as_str());
+            context.insert(
+                "is_portrait",
+                &(shape == crate::display_geometry::DisplayShape::Portrait),
+            );
+            context.insert(
+                "is_square",
+                &(shape == crate::display_geometry::DisplayShape::Square),
+            );
+            context.insert(
+                "is_landscape",
+                &(shape == crate::display_geometry::DisplayShape::Landscape),
+            );
+            context.insert(
+                "is_wide",
+                &(shape == crate::display_geometry::DisplayShape::Wide),
+            );
+            context.insert(
+                "is_ultrawide",
+                &(shape == crate::display_geometry::DisplayShape::Ultrawide),
+            );
+        }
+        for (key, value) in svg::responsive_tokens(self.render_width, self.render_height) {
+            context.insert(key, &value);
+        }
         let html = tera::Tera::one_off(&self.template, &context, false)?;
 
         // Step 2: Render via Blitz
         let pixmap = self.render_html(&html)?;
-        Ok(RawFrame::from_pixmap(&pixmap))
+        let output = if self.render_width == self.width && self.render_height == self.height {
+            pixmap
+        } else {
+            contain_pixmap(&pixmap, self.width, self.height)?
+        };
+        Ok(RawFrame::from_pixmap(&output))
     }
 
     fn name(&self) -> &str {
@@ -112,5 +158,41 @@ impl FrameSource for BlitzRenderer {
 
     fn set_template(&mut self, template: &str) {
         self.template = template.to_string();
+        (self.render_width, self.render_height) =
+            template_canvas_dimensions(template, self.width, self.height);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgb_at(frame: &RawFrame, x: u32, y: u32) -> [u8; 3] {
+        let offset = ((y * frame.width + x) * 3) as usize;
+        frame.data[offset..offset + 3].try_into().unwrap()
+    }
+
+    #[test]
+    fn legacy_blitz_defaults_to_centered_fixed_480_canvas() {
+        let template = r#"<div style="width:480px;height:480px;background:#ff0000"></div>"#;
+        let mut renderer = BlitzRenderer::new(template, 854, 480).unwrap();
+        let frame = renderer.render(&SensorData::new()).unwrap();
+
+        assert_eq!((frame.width, frame.height), (854, 480));
+        assert_eq!(rgb_at(&frame, 100, 240), [8, 8, 15]);
+        assert_eq!(rgb_at(&frame, 240, 240), [255, 0, 0]);
+        assert_eq!(rgb_at(&frame, 754, 240), [8, 8, 15]);
+    }
+
+    #[test]
+    fn responsive_blitz_receives_native_geometry() {
+        let template = r#"{# canvas: responsive #}
+<div style="width:{{ width }}px;height:{{ height }}px;background:#0000ff"></div>"#;
+        let mut renderer = BlitzRenderer::new(template, 854, 480).unwrap();
+        let frame = renderer.render(&SensorData::new()).unwrap();
+
+        assert_eq!((frame.width, frame.height), (854, 480));
+        assert_eq!(rgb_at(&frame, 10, 240), [0, 0, 255]);
+        assert_eq!(rgb_at(&frame, 843, 240), [0, 0, 255]);
     }
 }

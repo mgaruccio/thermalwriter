@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use thermalwriter::config::builtin_layouts;
 use thermalwriter::render::FrameSource;
-use thermalwriter::render::background::decode_to_pixmap;
+use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::sensor::history::SensorHistory;
@@ -167,9 +167,9 @@ fn build_renderer(
     }
 
     // Decode the built-in background pixmap (same one the daemon loads at startup).
-    let bg = decode_to_pixmap(builtin_layouts::BG_DARK_GRADIENT)
+    let bg = BackgroundImage::decode(builtin_layouts::BG_DARK_GRADIENT)
         .expect("built-in background must decode");
-    renderer.set_background(Some(Arc::new(bg)));
+    renderer.set_background(Some(Arc::new(bg))).unwrap();
 
     renderer
 }

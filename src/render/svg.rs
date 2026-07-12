@@ -9,7 +9,8 @@ use resvg::usvg;
 use tera::Tera;
 use tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
 
-use super::frontmatter::LayoutFrontmatter;
+use super::background::BackgroundImage;
+use super::frontmatter::{CanvasMode, LayoutFrontmatter};
 use super::{FrameSource, RawFrame, SensorData};
 use crate::sensor::history::SensorHistory;
 use crate::theme::ThemePalette;
@@ -92,23 +93,21 @@ fn template_needs_system_fonts(template: &str) -> bool {
         let after = &template[abs_pos + 11..]; // Skip "font-family"
         let after_trimmed = after.trim_start();
 
-        if after_trimmed.starts_with('=') {
+        if let Some(rest) = after_trimmed.strip_prefix('=') {
             // Attribute form: font-family="..." or font-family='...'
-            let rest = after_trimmed[1..].trim_start();
-            if rest.starts_with('"') {
-                if let Some(end) = rest[1..].find('"') {
-                    let value = &rest[1..1 + end];
-                    if check_font_list(value) {
+            let rest = rest.trim_start();
+            if let Some(quoted) = rest.strip_prefix('"') {
+                if let Some(end) = quoted.find('"') {
+                    if check_font_list(&quoted[..end]) {
                         return true;
                     }
                 } else {
                     // Unclosed quote
                     return true;
                 }
-            } else if rest.starts_with('\'') {
-                if let Some(end) = rest[1..].find('\'') {
-                    let value = &rest[1..1 + end];
-                    if check_font_list(value) {
+            } else if let Some(quoted) = rest.strip_prefix('\'') {
+                if let Some(end) = quoted.find('\'') {
+                    if check_font_list(&quoted[..end]) {
                         return true;
                     }
                 } else {
@@ -118,9 +117,9 @@ fn template_needs_system_fonts(template: &str) -> bool {
                 // Unquoted or unknown syntax
                 return true;
             }
-        } else if after_trimmed.starts_with(':') {
+        } else if let Some(raw_value) = after_trimmed.strip_prefix(':') {
             // CSS property form: font-family: ... (in <style> blocks or inline style attributes).
-            let raw_value = after_trimmed[1..].trim_start();
+            let raw_value = raw_value.trim_start();
             // Extract until the CSS declaration ends. For inline style attributes
             // without a trailing semicolon, quote/< boundaries stop before the
             // surrounding SVG markup. Quotes at the start of a family item are CSS
@@ -212,12 +211,27 @@ pub struct SvgRenderer<'a> {
     template_name: String,
     width: u32,
     height: u32,
+    logical_width: u32,
+    logical_height: u32,
     options: usvg::Options<'a>,
     history: Option<Arc<Mutex<SensorHistory>>>,
     theme: Option<ThemePalette>,
     variable_defaults: HashMap<String, String>,
     variable_overrides: HashMap<String, String>,
+    background_source: Option<Arc<BackgroundImage>>,
     background: Option<Arc<Pixmap>>,
+}
+
+fn logical_canvas_dimensions(
+    frontmatter: &LayoutFrontmatter,
+    width: u32,
+    height: u32,
+) -> (u32, u32) {
+    match frontmatter.canvas {
+        Some(CanvasMode::Responsive) => (width, height),
+        Some(CanvasMode::Fixed { width, height }) => (width, height),
+        None => (480, 480),
+    }
 }
 
 impl<'a> SvgRenderer<'a> {
@@ -231,6 +245,8 @@ impl<'a> SvgRenderer<'a> {
             .context("Failed to add template to Tera")?;
 
         let frontmatter = LayoutFrontmatter::parse(template);
+        let (logical_width, logical_height) =
+            logical_canvas_dimensions(&frontmatter, width, height);
         let variable_defaults = frontmatter
             .variables
             .iter()
@@ -242,11 +258,14 @@ impl<'a> SvgRenderer<'a> {
             template_name: "layout".to_string(),
             width,
             height,
+            logical_width,
+            logical_height,
             options,
             history: None,
             theme: None,
             variable_defaults,
             variable_overrides: HashMap::new(),
+            background_source: None,
             background: None,
         })
     }
@@ -267,11 +286,23 @@ impl<'a> SvgRenderer<'a> {
         self.variable_overrides = vars;
     }
 
-    /// Set or clear the background image. Must be 480×480 premultiplied-RGBA —
-    /// typically produced via `crate::render::background::decode_to_pixmap`.
-    /// bg.clone() per tick is ~900 KB memcpy; at 2 FPS that's ~2 MB/s — negligible.
-    pub fn set_background(&mut self, bg: Option<Arc<Pixmap>>) {
-        self.background = bg;
+    /// Set or clear the global background image.
+    /// Rasterizes once to this renderer's dimensions (centered cover) and caches
+    /// the premultiplied pixmap. Failures leave prior background state unchanged.
+    pub fn set_background(&mut self, bg: Option<Arc<BackgroundImage>>) -> anyhow::Result<()> {
+        match bg {
+            None => {
+                self.background_source = None;
+                self.background = None;
+                Ok(())
+            }
+            Some(src) => {
+                let pixmap = src.to_pixmap(self.width, self.height)?;
+                self.background_source = Some(src);
+                self.background = Some(Arc::new(pixmap));
+                Ok(())
+            }
+        }
     }
     fn resolved_theme_background_value(&self) -> &str {
         self.variable_overrides
@@ -311,6 +342,23 @@ fn parse_hex_color(value: &str) -> Option<Color> {
 // surface, not a supported API. `SvgRenderer::render` below is a composition
 // of these; behavior must stay byte-identical to the pre-extraction version.
 // ---------------------------------------------------------------------------
+
+/// Nearest-round checked responsive design tokens from the short axis.
+pub fn responsive_tokens(width: u32, height: u32) -> HashMap<&'static str, u32> {
+    let short = u64::from(width.min(height));
+    let nearest = |num: u64, den: u64, floor: u32| -> u32 {
+        let v = (short * num + den / 2) / den;
+        (v as u32).max(floor)
+    };
+    let mut m = HashMap::new();
+    m.insert("token_margin", ((short + 15) / 30).max(8) as u32);
+    m.insert("token_gap", ((short + 20) / 40).max(6) as u32);
+    m.insert("token_label", nearest(14, 480, 10));
+    m.insert("token_small", nearest(16, 480, 12));
+    m.insert("token_medium", nearest(24, 480, 18));
+    m.insert("token_hero", nearest(64, 480, 40));
+    m
+}
 
 impl<'a> SvgRenderer<'a> {
     /// Build the Tera context from sensor data, frontmatter defaults, theme,
@@ -357,6 +405,46 @@ impl<'a> SvgRenderer<'a> {
             hist.inject_into_context(&mut context, DEFAULT_HISTORY_SAMPLE_COUNT);
         }
 
+        // Canvas geometry is reserved runtime state. Insert it last so sensor
+        // names, frontmatter variables, saved overrides, and history keys
+        // cannot corrupt responsive layout dimensions.
+        context.insert("width", &self.logical_width);
+        context.insert("height", &self.logical_height);
+        let aspect = if self.logical_height > 0 {
+            f64::from(self.logical_width) / f64::from(self.logical_height)
+        } else {
+            1.0
+        };
+        context.insert("aspect", &aspect);
+        if let Ok(shape) =
+            crate::display_geometry::display_shape(self.logical_width, self.logical_height)
+        {
+            context.insert("shape", shape.as_str());
+            context.insert(
+                "is_portrait",
+                &(shape == crate::display_geometry::DisplayShape::Portrait),
+            );
+            context.insert(
+                "is_square",
+                &(shape == crate::display_geometry::DisplayShape::Square),
+            );
+            context.insert(
+                "is_landscape",
+                &(shape == crate::display_geometry::DisplayShape::Landscape),
+            );
+            context.insert(
+                "is_wide",
+                &(shape == crate::display_geometry::DisplayShape::Wide),
+            );
+            context.insert(
+                "is_ultrawide",
+                &(shape == crate::display_geometry::DisplayShape::Ultrawide),
+            );
+        }
+        for (key, value) in responsive_tokens(self.logical_width, self.logical_height) {
+            context.insert(key, &value);
+        }
+
         context
     }
 
@@ -389,9 +477,13 @@ pub fn rasterize(tree: &usvg::Tree, width: u32, height: u32) -> Result<Pixmap> {
     let mut layout_pixmap = Pixmap::new(width, height).context("Failed to create pixmap")?;
 
     let svg_size = tree.size();
+    // Uniform contain: scale by min axis, center (never distort/crop).
     let sx = width as f32 / svg_size.width();
     let sy = height as f32 / svg_size.height();
-    let transform = Transform::from_scale(sx, sy);
+    let scale = sx.min(sy);
+    let dx = (width as f32 - svg_size.width() * scale) * 0.5;
+    let dy = (height as f32 - svg_size.height() * scale) * 0.5;
+    let transform = Transform::from_row(scale, 0.0, 0.0, scale, dx, dy);
 
     resvg::render(tree, transform, &mut layout_pixmap.as_mut());
     Ok(layout_pixmap)
@@ -408,6 +500,15 @@ pub fn composite(
     fallback_color: Color,
 ) -> Result<Pixmap> {
     let mut composed = if let Some(bg) = background {
+        if bg.width() != width || bg.height() != height {
+            anyhow::bail!(
+                "background dimensions {}x{} do not match canvas {}x{}",
+                bg.width(),
+                bg.height(),
+                width,
+                height
+            );
+        }
         bg.clone()
     } else {
         let mut fill = Pixmap::new(width, height).context("Failed to create pixmap")?;
@@ -456,6 +557,8 @@ impl FrameSource for SvgRenderer<'static> {
 
         self.options = options_for_template(template);
         let frontmatter = LayoutFrontmatter::parse(template);
+        (self.logical_width, self.logical_height) =
+            logical_canvas_dimensions(&frontmatter, self.width, self.height);
         self.variable_defaults = frontmatter
             .variables
             .iter()
@@ -463,8 +566,8 @@ impl FrameSource for SvgRenderer<'static> {
             .collect();
     }
 
-    fn set_background(&mut self, bg: Option<Arc<Pixmap>>) {
-        self.background = bg;
+    fn set_background(&mut self, bg: Option<Arc<BackgroundImage>>) -> anyhow::Result<()> {
+        SvgRenderer::set_background(self, bg)
     }
 }
 
@@ -589,6 +692,59 @@ mod tests {
             !template_needs_system_fonts(template),
             "whitespace around = should be tolerated"
         );
+    }
+
+    #[test]
+    fn responsive_tokens_match_canonical_480_axis() {
+        let tokens = responsive_tokens(854, 480);
+        assert_eq!(tokens["token_margin"], 16);
+        assert_eq!(tokens["token_gap"], 12);
+        assert_eq!(tokens["token_label"], 14);
+        assert_eq!(tokens["token_small"], 16);
+        assert_eq!(tokens["token_medium"], 24);
+        assert_eq!(tokens["token_hero"], 64);
+    }
+
+    #[test]
+    fn runtime_geometry_cannot_be_overridden_by_layout_variables() {
+        let template = r#"{# canvas: responsive #}
+{# vars:
+width: number = "1" "reserved collision"
+token_hero: number = "1" "reserved collision"
+#}
+<svg xmlns="http://www.w3.org/2000/svg" width="{{ width }}" height="{{ height }}">
+  <text>{{ token_hero }}</text>
+</svg>"#;
+        let mut renderer = SvgRenderer::new(template, 854, 480).expect("valid SVG template");
+        renderer.set_layout_vars(HashMap::from([
+            ("width".to_string(), "2".to_string()),
+            ("token_hero".to_string(), "2".to_string()),
+        ]));
+
+        let rendered = renderer
+            .render_template(&renderer.build_context(&SensorData::new()))
+            .unwrap();
+        assert!(rendered.contains(r#"width="854""#), "{rendered}");
+        assert!(rendered.contains(r#"height="480""#), "{rendered}");
+        assert!(rendered.contains(">64</text>"), "{rendered}");
+    }
+
+    #[test]
+    fn fixed_svg_uses_declared_logical_geometry_before_containing() {
+        let template = r##"{# canvas: 320x240 #}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}"
+     width="{{ width }}" height="{{ height }}">
+  <rect width="{{ width }}" height="{{ height }}" fill="#0000ff"/>
+</svg>"##;
+        let mut renderer = SvgRenderer::new(template, 854, 480).expect("valid SVG template");
+        let context = renderer.build_context(&SensorData::new());
+        let rendered = renderer.render_template(&context).unwrap();
+        assert!(rendered.contains(r#"viewBox="0 0 320 240""#), "{rendered}");
+        assert!(rendered.contains(r#"width="320""#), "{rendered}");
+        assert!(rendered.contains(r#"height="240""#), "{rendered}");
+
+        let frame = renderer.render(&SensorData::new()).unwrap();
+        assert_eq!((frame.width, frame.height), (854, 480));
     }
 
     #[test]

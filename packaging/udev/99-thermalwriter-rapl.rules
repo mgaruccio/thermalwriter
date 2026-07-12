@@ -1,9 +1,13 @@
 # thermalwriter — grant daemon access to supported Thermalright LCD USB devices and
 # allow only the thermalreader group to read Intel-RAPL energy counters.
 #
-# The LCD daemon runs as a normal user service and opens the display through libusb.
-# TAG+="uaccess" lets the active local logind session access the known Thermalright
-# USB display without running the daemon as root.
+# The LCD daemon runs as a normal user service and opens the display through libusb
+# (raw bulk / HID / LY) and/or scsi_generic (SCSI LCD). TAG+="uaccess" lets the
+# active local logind session access known Thermalright USB displays without
+# running the daemon as root.
+#
+# 0416:5406 is dual-shape (vendor bulk preferred, else scsi_generic). Both access
+# paths are listed.
 #
 # Since CVE-2020-8694 ("Platypus") kernels default /sys/class/powercap/intel-rapl:*/energy_uj
 # to mode 0400 (root-only). thermalwriter needs this file readable to compute CPU
@@ -11,6 +15,34 @@
 # these sysfs attributes on driver reload / PM events, resetting the mode to 0400.
 # A udev RUN+= hook re-applies root:thermalreader 0440 on every add|change event for
 # powercap devices; `thermalwriter setup-udev` creates the group and adds the invoking user.
-SUBSYSTEM=="usb", ATTR{idVendor}=="87ad", ATTR{idProduct}=="70db", TAG+="uaccess"
 
+# --- Raw bulk LCD (ChiZhu / Grand Vision family) ---
+# 87ad:70db — power/control on (keep USB awake)
+SUBSYSTEM=="usb", ATTR{idVendor}=="87ad", ATTR{idProduct}=="70db", TAG+="uaccess", ATTR{power/control}="on"
+
+# --- SCSI LCD (USB mass-storage → scsi_generic) ---
+# 87cd:70db — power/control on
+SUBSYSTEM=="usb", ATTR{idVendor}=="87cd", ATTR{idProduct}=="70db", TAG+="uaccess", ATTR{power/control}="on"
+SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="87cd", ATTRS{idProduct}=="70db", TAG+="uaccess"
+
+# 0402:3922 — Frozen Warframe SCSI
+SUBSYSTEM=="usb", ATTR{idVendor}=="0402", ATTR{idProduct}=="3922", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="0402", ATTRS{idProduct}=="3922", TAG+="uaccess"
+
+# --- Winbond dual-shape 0416:5406 (bulk preferred, else SCSI) ---
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5406", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5406", TAG+="uaccess"
+
+# --- HID Type 2 ---
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5302", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+
+# --- HID Type 3 ---
+SUBSYSTEM=="usb", ATTR{idVendor}=="0418", ATTR{idProduct}=="5303", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0418", ATTR{idProduct}=="5304", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+
+# --- LY bulk (Trofeo Vision 9.16) ---
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5408", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5409", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+
+# Restricted RAPL energy counters (unchanged)
 SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add|change", RUN+="/bin/sh -c '/bin/chgrp thermalreader /sys%p/energy_uj && /bin/chmod 0440 /sys%p/energy_uj'"

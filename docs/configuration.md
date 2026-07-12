@@ -108,3 +108,13 @@ Per-layout variable overrides keyed by layout filename. This table contains cust
   show_gpu = "true"
   temp_unit = "C"
   ```
+
+### `display.device`
+
+Selector for the LCD. The default, `"auto"` (case-insensitive), succeeds only
+when discovery finds exactly one supported physical device. When connected
+devices have distinct IDs, use a hexadecimal `"VID:PID"` selector with optional
+`0x` prefixes, for example `"87ad:70db"` or `"0x0416:0x5408"`. Two devices
+sharing the same `VID:PID` remain ambiguous and cannot currently be selected
+individually. Unknown, absent, and ambiguous selections fail explicitly rather
+than choosing an arbitrary device.
