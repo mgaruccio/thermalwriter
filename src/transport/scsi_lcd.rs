@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::profile::{WireProtocol, build_device_info};
-use super::{DeviceInfo, EncodedFrame, FrameEncoding, Transport};
+use super::{DeviceInfo, EncodedFrame, Transport};
 
 const BOOT_SIGNATURE: [u8; 4] = [0xA1, 0xA2, 0xA3, 0xA4];
 const BOOT_WAIT: Duration = Duration::from_secs(3);
@@ -151,10 +151,14 @@ pub fn send_frame_scsi_with_io(
     info: &DeviceInfo,
     frame: &EncodedFrame,
 ) -> Result<()> {
-    if !matches!(
-        frame.encoding,
-        FrameEncoding::Rgb565Le | FrameEncoding::Rgb565Be
-    ) {
+    if frame.encoding != info.encoding() {
+        bail!(
+            "frame encoding {} does not match device {}",
+            frame.encoding,
+            info.encoding()
+        );
+    }
+    if !frame.encoding.is_rgb565() {
         bail!("SCSI requires RGB565 encoding, got {}", frame.encoding);
     }
     let (wire_width, wire_height) = info.wire_dimensions()?;

@@ -784,6 +784,60 @@ fn scsi_handshake_boot_then_ready_inits_once() {
 }
 
 #[test]
+fn scsi_send_enforces_negotiated_rgb565_encoding_without_wrong_io() {
+    for (fbl, expected, opposite) in [
+        (50, FrameEncoding::Rgb565Le, FrameEncoding::Rgb565Be),
+        (100, FrameEncoding::Rgb565Be, FrameEncoding::Rgb565Le),
+    ] {
+        let info =
+            build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, fbl, 0, Some(fbl)).unwrap();
+        let (width, height) = info.wire_dimensions().unwrap();
+        let data = vec![0; width as usize * height as usize * 2];
+        let frame = |encoding| EncodedFrame {
+            data: data.clone(),
+            width,
+            height,
+            encoding,
+        };
+
+        let mut io = MemScsiIo::new(Vec::new());
+        let error = scsi_lcd::send_frame_scsi_with_io(&mut io, &info, &frame(opposite))
+            .expect_err("opposite byte order must be rejected");
+        assert!(
+            error.to_string().contains(&format!(
+                "frame encoding {opposite} does not match device {expected}"
+            )),
+            "{error:#}"
+        );
+        assert!(io.log.is_empty(), "wrong byte order performed SCSI I/O");
+
+        scsi_lcd::send_frame_scsi_with_io(&mut io, &info, &frame(expected))
+            .expect("negotiated byte order should be sent");
+        assert!(
+            !io.log.is_empty(),
+            "matching byte order performed no SCSI I/O"
+        );
+    }
+
+    let info = build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, None).unwrap();
+    let (width, height) = info.wire_dimensions().unwrap();
+    let jpeg = EncodedFrame {
+        data: vec![0; width as usize * height as usize * 2],
+        width,
+        height,
+        encoding: FrameEncoding::Jpeg,
+    };
+    let mut io = MemScsiIo::new(Vec::new());
+    let error = scsi_lcd::send_frame_scsi_with_io(&mut io, &info, &jpeg)
+        .expect_err("SCSI helper must remain RGB565-only");
+    assert!(
+        error.to_string().contains("SCSI requires RGB565"),
+        "{error:#}"
+    );
+    assert!(io.log.is_empty(), "JPEG frame performed SCSI I/O");
+}
+
+#[test]
 fn scsi_rotate_panel_encode_and_send_use_swapped_wire_dimensions() {
     let info = build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, 50, 0, Some(50)).unwrap();
     assert_eq!((info.width(), info.height()), (320, 240));
