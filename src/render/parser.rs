@@ -107,7 +107,7 @@ pub fn strip_tera_comments(input: &str) -> String {
                 rest = stripped;
             }
         } else {
-            out.push_str(rest);
+            out.push_str(&rest[start..]);
             return out;
         }
     }
