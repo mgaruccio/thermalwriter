@@ -7,6 +7,7 @@
 {% set half_w = (content_w - g) / 2 %}
 {% set half_h = (content_h - g) / 2 %}
 {% set quarter_w = (content_w - g - g - g) / 4 %}
+{% set use_four_columns = (is_landscape or is_wide or is_ultrawide) and (quarter_w - p - p >= token_hero * 5 / 2) %}
 {% set label_h = token_label + 5 %}
 {% set value_h = token_hero + 10 %}
 <div style="display: flex; flex-direction: column; width: {{ width }}px; height: {{ height }}px; background: #0a0a12; color: #ffffff; padding: {{ p }}px; gap: {{ g }}px;">
@@ -15,7 +16,7 @@
     <span style="width: {{ content_w / 2 }}px; height: {{ token_small + 4 }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: right;">THERMALWRITER</span>
   </div>
 
-  {% if is_landscape or is_wide or is_ultrawide %}
+  {% if use_four_columns %}
   <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
     {% set card_w = quarter_w %}{% set card_h = content_h %}
   {% else %}
@@ -33,7 +34,7 @@
         <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ cpu_util | default(value="--") }}%</span>
       </div>
 
-  {% if not is_landscape and not is_wide and not is_ultrawide %}
+  {% if not use_four_columns %}
     </div>
     <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ half_h }}px; gap: {{ g }}px;">
   {% endif %}
@@ -47,7 +48,7 @@
         <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
       </div>
 
-  {% if not is_landscape and not is_wide and not is_ultrawide %}
+  {% if not use_four_columns %}
     </div>
   {% endif %}
   </div>
