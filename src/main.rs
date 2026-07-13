@@ -23,7 +23,9 @@ use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::service::dbus::{self, ModeChange, ServiceState};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
-use thermalwriter::service::tick::{self, BackgroundApply, SourceBuildRequest, SourceBuildResult};
+use thermalwriter::service::tick::{
+    self, BackgroundApply, SourceBuildRequest, SourceBuildResult, SourceRevisionApply,
+};
 use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::DeviceInfo;
 use thermalwriter::transport::Transport;
@@ -41,12 +43,14 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 async fn commit_frame_source(
     sender: &mpsc::Sender<SourceBuildResult>,
     generation: u64,
+    source_revision: u64,
     source: Box<dyn FrameSource>,
 ) -> Result<()> {
     let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
     sender
         .send(SourceBuildResult {
             generation,
+            source_revision,
             source: Ok(source),
             commit: Some(commit_tx),
         })
@@ -57,6 +61,29 @@ async fn commit_frame_source(
         Ok(Err(error)) => Err(anyhow::anyhow!(error)),
         Err(_) => Err(anyhow::anyhow!(
             "tick loop dropped source commit acknowledgement"
+        )),
+    }
+}
+
+async fn apply_source_revision(
+    sender: &mpsc::Sender<SourceRevisionApply>,
+    revision: u64,
+    reset_connection: bool,
+) -> Result<()> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SourceRevisionApply {
+            revision,
+            reset_connection,
+            ack: ack_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("tick loop dropped source revision channel"))?;
+    match ack_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+        Err(_) => Err(anyhow::anyhow!(
+            "tick loop dropped source revision acknowledgement"
         )),
     }
 }
@@ -200,6 +227,7 @@ async fn main() -> Result<()> {
     // Generation-tagged source rebuild channel (tick → listener request, listener → tick result)
     let (source_build_tx, mut source_build_rx) = mpsc::channel::<SourceBuildRequest>(4);
     let (source_result_tx, mut source_result_rx) = mpsc::channel::<SourceBuildResult>(4);
+    let (source_revision_tx, mut source_revision_rx) = mpsc::channel::<SourceRevisionApply>(4);
     let (background_apply_tx, mut background_apply_rx) = mpsc::channel::<BackgroundApply>(4);
     // Active connection generation (0 = disconnected). Layout/mode swaps tag results with this.
     let (generation_tx, generation_rx) = watch::channel::<u64>(0);
@@ -346,6 +374,7 @@ async fn main() -> Result<()> {
     let reload_history = initial_sensor_history.clone();
     let mut display_rx = display_tx.subscribe();
     let mut generation_rx_listener = generation_rx.clone();
+    let source_revision_tx_listener = source_revision_tx.clone();
     let initial_mode = config.display.mode.clone();
     let initial_active_layout = config.display.default_layout.clone();
     let initial_layout_vars = config
@@ -363,6 +392,7 @@ async fn main() -> Result<()> {
         let mut active_mode = initial_mode;
         let mut active_layout = initial_active_layout;
         let mut active_layout_vars = initial_layout_vars;
+        let mut source_revision: u64 = 0;
         let mut active_xvfb_shell = initial_xvfb_command;
         let mut active_xvfb_argv: Option<Vec<String>> = None;
         let _ = generation_rx_listener.borrow_and_update();
@@ -437,6 +467,7 @@ async fn main() -> Result<()> {
                     if source_result_tx
                         .send(SourceBuildResult {
                             generation: req.generation,
+                            source_revision,
                             source: result,
                             commit: None,
                         })
@@ -490,6 +521,18 @@ async fn main() -> Result<()> {
                                 reload_theme.clone(),
                             ) {
                                 Ok(new_source) => {
+                                    let next_source_revision = source_revision.saturating_add(1);
+                                    if let Err(error) = apply_source_revision(
+                                        &source_revision_tx_listener,
+                                        next_source_revision,
+                                        generation == 0,
+                                    )
+                                    .await
+                                    {
+                                        let _ = ack.send(Err(error));
+                                        continue;
+                                    }
+                                    source_revision = next_source_revision;
                                     if generation == 0 {
                                         // Disconnected: record layout for next reconnect rebuild.
                                         drop(new_source);
@@ -515,6 +558,7 @@ async fn main() -> Result<()> {
                                     if let Err(error) = commit_frame_source(
                                         &source_result_tx,
                                         generation,
+                                        source_revision,
                                         new_source,
                                     )
                                     .await
@@ -604,9 +648,22 @@ async fn main() -> Result<()> {
                             }
                             match mode_display.start_xvfb_shell(&command) {
                                 Ok((new_handle, source)) => {
+                                    let next_source_revision = source_revision.saturating_add(1);
+                                    if let Err(error) = apply_source_revision(
+                                        &source_revision_tx_listener,
+                                        next_source_revision,
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        let _ = ack.send(Err(error));
+                                        continue;
+                                    }
+                                    source_revision = next_source_revision;
                                     if let Err(error) = commit_frame_source(
                                         &source_result_tx,
                                         generation,
+                                        source_revision,
                                         Box::new(source),
                                     )
                                     .await
@@ -652,9 +709,22 @@ async fn main() -> Result<()> {
                             }
                             match mode_display.start_xvfb_argv(&argv) {
                                 Ok((new_handle, source)) => {
+                                    let next_source_revision = source_revision.saturating_add(1);
+                                    if let Err(error) = apply_source_revision(
+                                        &source_revision_tx_listener,
+                                        next_source_revision,
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        let _ = ack.send(Err(error));
+                                        continue;
+                                    }
+                                    source_revision = next_source_revision;
                                     if let Err(error) = commit_frame_source(
                                         &source_result_tx,
                                         generation,
+                                        source_revision,
                                         Box::new(source),
                                     )
                                     .await
@@ -719,6 +789,7 @@ async fn main() -> Result<()> {
             connected_tx,
             display_tx,
             generation_tx,
+            &mut source_revision_rx,
             tick_rate_rx,
         ) => { res?; }
         _ = tokio::signal::ctrl_c() => {

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Tick loop: polls sensors, renders a frame, encodes, sends via transport.
-// Connection generations commit only after a matching SourceBuildResult lands.
+// Connection generations and source revisions commit only after matching
+// SourceBuildResults land.
 
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -29,13 +30,23 @@ pub struct SourceBuildRequest {
     pub height: u32,
 }
 
-/// Result of a generation-tagged source rebuild (layout swap or reconnect).
+/// Result of a generation- and source-revision-tagged source rebuild (layout
+/// swap or reconnect).
 pub struct SourceBuildResult {
     pub generation: u64,
+    pub source_revision: u64,
     pub source: Result<Box<dyn FrameSource>, String>,
     /// Optional acknowledgement for D-Bus mode changes. Sent only after this
-    /// generation is accepted and the source is committed (or rejected).
+    /// generation and source revision are accepted and the source is committed
+    /// (or rejected).
     pub commit: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
+/// Advance the source revision and invalidate queued builds before a mode
+/// change is acknowledged.
+pub struct SourceRevisionApply {
+    pub revision: u64,
+    pub reset_connection: bool,
+    pub ack: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
 /// End-to-end background apply request; acked only after set_background succeeds.
@@ -99,6 +110,7 @@ pub async fn run_tick_loop(
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     generation_tx: tokio::sync::watch::Sender<u64>,
+    source_revision_rx: &mut tokio::sync::mpsc::Receiver<SourceRevisionApply>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<()> {
     info!(
@@ -107,6 +119,7 @@ pub async fn run_tick_loop(
     );
 
     let mut generation: u64 = 0;
+    let mut source_revision: u64 = 0;
     let mut pending: Option<PendingConnection> = None;
     let mut active: Option<ActiveConnection> = None;
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
@@ -144,7 +157,32 @@ pub async fn run_tick_loop(
         let current_fps = (*tick_rate_rx.borrow_and_update()).max(1);
         let tick_duration = Duration::from_secs_f64(1.0 / f64::from(current_fps));
 
-        // Drain generation-tagged source builds (reconnect commits + layout swaps).
+        while let Ok(apply) = source_revision_rx.try_recv() {
+            if apply.revision >= source_revision {
+                source_revision = apply.revision;
+                if apply.reset_connection {
+                    if let Some(mut connection) = pending.take() {
+                        connection.transport.close();
+                    }
+                    if let Some(mut connection) = active.take() {
+                        connection.transport.close();
+                    }
+                    let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                    let _ = connected_tx.send(false);
+                    let _ = generation_tx.send(0);
+                    next_reconnect_at = Some(Instant::now());
+                } else if let Some(mut connection) = pending.take() {
+                    debug!(
+                        "Invalidating pending source build at source revision {source_revision}"
+                    );
+                    connection.transport.close();
+                    next_reconnect_at = Some(Instant::now());
+                }
+            }
+            let _ = apply.ack.send(Ok(()));
+        }
+
+        // Drain generation- and source-revision-tagged source builds.
         while let Ok(result) = source_result_rx.try_recv() {
             handle_source_result(
                 result,
@@ -155,6 +193,7 @@ pub async fn run_tick_loop(
                 &display_tx,
                 &connected_tx,
                 &generation_tx,
+                &mut source_revision,
                 &mut next_reconnect_at,
             );
         }
@@ -341,7 +380,6 @@ pub async fn run_tick_loop(
             break;
         }
     }
-
     if let Some(mut conn) = active.take() {
         conn.transport.close();
     }
@@ -362,9 +400,11 @@ fn handle_source_result(
     display_tx: &tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     connected_tx: &tokio::sync::watch::Sender<bool>,
     generation_tx: &tokio::sync::watch::Sender<u64>,
+    current_source_revision: &mut u64,
     next_reconnect_at: &mut Option<Instant>,
 ) {
     let generation = result.generation;
+    let source_revision = result.source_revision;
     let mut commit = result.commit;
     let pending_match = pending
         .as_ref()
@@ -373,11 +413,13 @@ fn handle_source_result(
         .as_ref()
         .is_some_and(|candidate| candidate.generation == generation);
 
-    if !pending_match && !active_match {
-        debug!("Ignoring stale SourceBuildResult for generation {generation}");
+    if source_revision < *current_source_revision || (!pending_match && !active_match) {
+        debug!(
+            "Ignoring stale SourceBuildResult for generation {generation}, revision {source_revision}"
+        );
         if let Some(commit) = commit.take() {
             let _ = commit.send(Err(format!(
-                "source generation {generation} became stale before commit"
+                "source generation {generation}, revision {source_revision} became stale before commit"
             )));
         }
         return;
@@ -404,6 +446,7 @@ fn handle_source_result(
                 return;
             }
 
+            *current_source_revision = (*current_source_revision).max(source_revision);
             let was_streaming = frame_source.is_streaming();
             let is_streaming = source.is_streaming();
             if was_streaming && !is_streaming {
@@ -441,7 +484,9 @@ fn handle_source_result(
                 });
                 *next_reconnect_at = None;
             } else {
-                info!("Frame source swapped for active generation {generation}");
+                info!(
+                    "Frame source swapped for active generation {generation}, revision {source_revision}"
+                );
             }
             if let Some(commit) = commit.take() {
                 let _ = commit.send(Ok(()));

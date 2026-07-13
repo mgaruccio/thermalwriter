@@ -194,6 +194,7 @@ async fn source_build_helper(
             .send(SourceBuildResult {
                 generation: req.generation,
                 source,
+                source_revision: 0,
                 commit: None,
             })
             .await
@@ -228,6 +229,7 @@ async fn run_mock_tick(
         frames_sent,
         connected: true,
     }));
+    let (_source_revision_tx, mut source_revision_rx) = tokio::sync::mpsc::channel(4);
     run_tick_loop(
         transport,
         Some(bulk_info()),
@@ -248,6 +250,7 @@ async fn run_mock_tick(
         connected_tx,
         display_tx,
         generation_tx,
+        &mut source_revision_rx,
         tick_rate_rx,
     )
     .await
@@ -449,6 +452,7 @@ async fn tick_loop_applies_template_updates() {
             source: Ok(Box::new(TemplateTrackingSource {
                 applied_tx: Some(template_applied_tx),
             })),
+            source_revision: 0,
             commit: Some(source_commit_tx),
         })
         .await
@@ -529,6 +533,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
         .send(SourceBuildResult {
             generation,
             source: Ok(Box::new(MockFrameSource)),
+            source_revision: 0,
             commit: Some(matching_commit_tx),
         })
         .await;
@@ -543,6 +548,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
         .send(SourceBuildResult {
             generation: generation.saturating_add(99),
             source: Ok(Box::new(MockFrameSource)),
+            source_revision: 0,
             commit: Some(stale_commit_tx),
         })
         .await;
@@ -551,6 +557,104 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
         .expect("stale commit acknowledgement timed out")
         .expect("stale commit acknowledgement channel closed");
     assert!(stale_commit.is_err());
+    let _ = shutdown_tx.send(true);
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
+    helper.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tick_loop_rejects_stale_same_generation_source_revision() {
+    let frames_sent = Arc::new(AtomicU32::new(0));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _guard = ShutdownOnDrop(shutdown_tx.clone());
+    let (template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+    let (_bg_tx, bg_rx) = tokio::sync::watch::channel(None);
+    let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
+    let (connected_tx, _) = tokio::sync::watch::channel(true);
+    let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
+    let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
+    let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
+    let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
+    let helper = tokio::spawn(source_build_helper(
+        source_build_rx,
+        source_result_tx.clone(),
+    ));
+
+    let handle = spawn_tick(
+        frames_sent,
+        source_build_tx,
+        source_result_rx,
+        template_rx,
+        bg_rx,
+        bg_apply_rx,
+        shutdown_rx,
+        connected_tx,
+        display_tx,
+        generation_tx,
+        tick_rate_rx,
+        20,
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if *generation_rx.borrow() >= 1 {
+                break;
+            }
+            generation_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("generation commit timed out");
+    let generation = *generation_rx.borrow();
+
+    let (new_template_tx, new_template_rx) = tokio::sync::oneshot::channel();
+    let (new_commit_tx, new_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(TemplateTrackingSource {
+                applied_tx: Some(new_template_tx),
+            })),
+            source_revision: 2,
+            commit: Some(new_commit_tx),
+        })
+        .await
+        .expect("send newer source");
+    let new_commit = tokio::time::timeout(std::time::Duration::from_secs(2), new_commit_rx)
+        .await
+        .expect("newer source commit timed out")
+        .expect("newer source commit channel closed");
+    assert_eq!(new_commit, Ok(()));
+
+    let (old_commit_tx, old_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(MockFrameSource)),
+            source_revision: 1,
+            commit: Some(old_commit_tx),
+        })
+        .await
+        .expect("send stale source");
+    let old_commit = tokio::time::timeout(std::time::Duration::from_secs(2), old_commit_rx)
+        .await
+        .expect("stale source commit timed out")
+        .expect("stale source commit channel closed");
+    assert!(old_commit.is_err());
+
+    template_tx
+        .send("newer-template".to_owned())
+        .expect("send template update");
+    let applied_template = tokio::time::timeout(std::time::Duration::from_secs(2), new_template_rx)
+        .await
+        .expect("newer source template update timed out")
+        .expect("newer source template update channel closed");
+    assert_eq!(applied_template, "newer-template");
+
     let _ = shutdown_tx.send(true);
     tokio::time::timeout(std::time::Duration::from_secs(2), handle)
         .await
@@ -614,6 +718,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
         .send(SourceBuildResult {
             generation,
             source: Ok(Box::new(StreamingMockSource)),
+            source_revision: 0,
             commit: Some(streaming_commit_tx),
         })
         .await
@@ -638,6 +743,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
         .send(SourceBuildResult {
             generation,
             source: Ok(Box::new(MockFrameSource)),
+            source_revision: 0,
             commit: Some(replacement_commit_tx),
         })
         .await
@@ -713,6 +819,7 @@ async fn tick_loop_accepts_background_updates() {
                 applied_tx: Some(seed_background_tx),
                 release_rx: None,
             })),
+            source_revision: 0,
             commit: Some(seed_commit_tx),
         })
         .await
@@ -751,6 +858,7 @@ async fn tick_loop_accepts_background_updates() {
                 applied_tx: Some(replacement_background_tx),
                 release_rx: Some(replacement_release_rx),
             })),
+            source_revision: 0,
             commit: Some(replacement_commit_tx),
         })
         .await
