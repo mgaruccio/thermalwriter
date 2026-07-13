@@ -95,10 +95,13 @@ fn family_encoding_overrides() {
 }
 
 #[test]
-fn bulk_pm4_and_unknown_pm_errors() {
-    let pm4 = build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, None).unwrap();
-    assert_eq!((pm4.width(), pm4.height()), (480, 480));
-    assert!(build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 200, 0, None).is_err());
+fn bulk_unknown_nonzero_pm_falls_back_to_fbl72() {
+    let fallback = build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 200, 0, None).unwrap();
+    assert_eq!(fallback.fbl, 72);
+    assert_eq!((fallback.width(), fallback.height()), (480, 480));
+    assert_eq!(fallback.encoding(), FrameEncoding::Jpeg);
+
+    assert!(build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 0, 0, None).is_err());
 }
 
 #[test]

@@ -540,6 +540,20 @@ fn bulk_handshake_with_io_pm4_and_send_jpeg_zlp() {
 }
 
 #[test]
+fn bulk_handshake_with_io_unknown_nonzero_pm_falls_back_to_fbl72() {
+    let mut response = vec![0u8; 64];
+    response[24] = 200;
+    let mut io = MemBulkIo::new(vec![response]);
+
+    let info = bulk_usb::handshake_with_io(&mut io, 0x87ad, 0x70db).unwrap();
+
+    assert_eq!(info.pm, 200);
+    assert_eq!(info.fbl, 72);
+    assert_eq!((info.width(), info.height()), (480, 480));
+    assert_eq!(info.encoding(), FrameEncoding::Jpeg);
+}
+
+#[test]
 fn bulk_handshake_with_io_pm32_rgb565_cmd3() {
     let mut resp = vec![0u8; 64];
     resp[24] = 32;

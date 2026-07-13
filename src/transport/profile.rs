@@ -382,12 +382,6 @@ fn resolve_encode_base_from_sub(base: FblBase, sub: u8) -> u16 {
 /// Bulk PMs that leave the default FBL72 base (plus PM1 SUB48/49).
 const BULK_KNOWN_PMS: &[u8] = &[5, 7, 9, 10, 11, 12, 32, 64, 65];
 
-/// Bulk family accepts these PM keys from pinned `_BULK_VARIANTS`.
-const BULK_VARIANT_PMS: &[u8] = &[
-    1, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 32, 50, 51, 53, 63, 64, 65, 66,
-    68, 69, 100, 101, 128, 129,
-];
-
 fn bulk_fbl(pm: u8, sub: u8) -> u8 {
     if BULK_KNOWN_PMS.contains(&pm) || (pm == 1 && matches!(sub, 48 | 49)) {
         pm_to_fbl(pm, sub)
@@ -457,10 +451,9 @@ pub fn resolve_profile(
 ) -> Result<DeviceProfile> {
     let (resolved_fbl, base) = match protocol {
         WireProtocol::Bulk => {
-            // Bulk accepts pinned `_BULK_VARIANTS` PMs plus explicit PM4
-            // (common Grand Vision handshake default → FBL72 480×480).
-            let allowed = BULK_VARIANT_PMS.contains(&pm) || pm == 4;
-            if !allowed {
+            // The handshake rejects PM0. Unmapped valid PMs retain the
+            // established FBL72-compatible fallback from `bulk_fbl`.
+            if pm == 0 {
                 bail!("unsupported bulk PM={pm} SUB={sub} for {vid:04x}:{pid:04x}");
             }
             let f = bulk_fbl(pm, sub);
