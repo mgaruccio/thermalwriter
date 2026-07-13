@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+const MAX_CANVAS_DIMENSION: u32 = 8192;
+const MAX_CANVAS_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const CANVAS_BYTES_PER_PIXEL: u64 = 8; // logical RGBA buffer plus conversion buffer
+
 pub struct HistoryConfig {
     pub duration: Duration,
     pub sample_hz: Option<f64>,
@@ -101,14 +105,28 @@ impl LayoutFrontmatter {
         // WIDTHxHEIGHT
         if let Some((w, h)) = spec.split_once('x')
             && let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>())
-            && w > 0
-            && h > 0
+            && Self::valid_canvas_dimensions(w, h)
         {
             self.canvas = Some(CanvasMode::Fixed {
                 width: w,
                 height: h,
             });
         }
+    }
+
+    fn valid_canvas_dimensions(width: u32, height: u32) -> bool {
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(CANVAS_BYTES_PER_PIXEL));
+        let Some(bytes) = bytes else {
+            return false;
+        };
+
+        width > 0
+            && height > 0
+            && width <= MAX_CANVAS_DIMENSION
+            && height <= MAX_CANVAS_DIMENSION
+            && bytes <= MAX_CANVAS_ALLOC_BYTES
     }
 
     fn parse_history(&mut self, spec: &str) {
@@ -336,4 +354,50 @@ fn find_closing_quote(s: &str) -> Option<usize> {
         }
     }
     None
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_canvas_accepts_bounded_dimensions() {
+        let frontmatter = LayoutFrontmatter::parse("{# canvas: 4096x4096 #}");
+        assert_eq!(
+            frontmatter.canvas,
+            Some(CanvasMode::Fixed {
+                width: 4096,
+                height: 4096,
+            })
+        );
+    }
+
+    #[test]
+    fn fixed_canvas_rejects_dimension_and_area_limits() {
+        for spec in [
+            "{# canvas: 8193x1 #}",
+            "{# canvas: 1x8193 #}",
+            "{# canvas: 8192x4097 #}",
+            "{# canvas: 4294967295x4294967295 #}",
+        ] {
+            assert_eq!(
+                LayoutFrontmatter::parse(spec).canvas,
+                None,
+                "oversized canvas must not construct CanvasMode::Fixed: {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_canvas_rejects_zero_dimensions() {
+        assert_eq!(LayoutFrontmatter::parse("{# canvas: 0x480 #}").canvas, None);
+        assert_eq!(LayoutFrontmatter::parse("{# canvas: 480x0 #}").canvas, None);
+    }
+
+    #[test]
+    fn fixed_canvas_area_check_handles_u32_overflow() {
+        assert!(!LayoutFrontmatter::valid_canvas_dimensions(
+            u32::MAX,
+            u32::MAX
+        ));
+    }
 }
