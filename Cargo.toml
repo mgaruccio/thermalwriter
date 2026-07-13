@@ -112,6 +112,7 @@ strip = false
 [[example]]
 name = "preview_layout"
 required-features = ["daemon"]
+test = true
 
 [[example]]
 name = "preview_blitz"

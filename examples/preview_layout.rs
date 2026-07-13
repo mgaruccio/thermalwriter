@@ -101,6 +101,58 @@ fn parse_size(s: &str) -> Result<(u32, u32)> {
     Ok((w.parse()?, h.parse()?))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PreviewOptions {
+    output_dir: PathBuf,
+    matrix: bool,
+    size: Option<(u32, u32)>,
+    profile: Option<String>,
+    layout: String,
+    list: bool,
+}
+
+fn required_value<'a>(args: &'a [String], index: &mut usize, option: &str) -> Result<&'a str> {
+    *index += 1;
+    let value = args
+        .get(*index)
+        .with_context(|| format!("{option} needs value"))?;
+    if value.starts_with('-') {
+        bail!("{option} needs value, found option {value}");
+    }
+    Ok(value)
+}
+
+fn parse_args(args: &[String]) -> Result<PreviewOptions> {
+    let mut options = PreviewOptions {
+        output_dir: PathBuf::from("target/preview"),
+        matrix: false,
+        size: None,
+        profile: None,
+        layout: String::from("layouts/svg/neon-dash-v2.svg"),
+        list: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--matrix" => options.matrix = true,
+            "--output-dir" => {
+                options.output_dir = PathBuf::from(required_value(args, &mut i, "--output-dir")?);
+            }
+            "--size" => {
+                options.size = Some(parse_size(required_value(args, &mut i, "--size")?)?);
+            }
+            "--profile" => {
+                options.profile = Some(required_value(args, &mut i, "--profile")?.to_owned());
+            }
+            "--list" => options.list = true,
+            other if !other.starts_with('-') => options.layout = other.to_owned(),
+            other => bail!("unknown arg {other}"),
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+
 fn write_contact_sheet(paths: &[(PathBuf, u32, u32)], out: &Path) -> Result<()> {
     // Simple horizontal strips per row of unique heights is complex; tile in a grid.
     if paths.is_empty() {
@@ -135,7 +187,15 @@ fn write_contact_sheet(paths: &[(PathBuf, u32, u32)], out: &Path) -> Result<()> 
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--list") {
+    let PreviewOptions {
+        output_dir,
+        matrix,
+        size,
+        profile,
+        layout,
+        list,
+    } = parse_args(&args)?;
+    if list {
         println!("Fixture profiles:");
         for f in known_fixture_profiles() {
             let info = device_info_from_fixture(f.id)?;
@@ -149,34 +209,6 @@ fn main() -> Result<()> {
         }
         println!("Supported resolutions: {:?}", supported_resolutions());
         return Ok(());
-    }
-
-    let mut output_dir = PathBuf::from("target/preview");
-    let mut matrix = false;
-    let mut size: Option<(u32, u32)> = None;
-    let mut profile: Option<String> = None;
-    let mut layout_arg = String::from("layouts/svg/neon-dash-v2.svg");
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--matrix" => matrix = true,
-            "--output-dir" => {
-                i += 1;
-                output_dir = PathBuf::from(args.get(i).context("--output-dir needs value")?);
-            }
-            "--size" => {
-                i += 1;
-                size = Some(parse_size(args.get(i).context("--size needs value")?)?);
-            }
-            "--profile" => {
-                i += 1;
-                profile = Some(args.get(i).context("--profile needs value")?.clone());
-            }
-            "--list" => {}
-            other if !other.starts_with('-') => layout_arg = other.to_string(),
-            other => bail!("unknown arg {other}"),
-        }
-        i += 1;
     }
 
     std::fs::create_dir_all(&output_dir)?;
@@ -224,10 +256,64 @@ fn main() -> Result<()> {
         (480, 480)
     };
 
-    let (template, display_name, is_svg) = load_template(&layout_arg)?;
+    let (template, display_name, is_svg) = load_template(&layout)?;
     let frame = render_one(&template, is_svg, w, h)?;
     let out = output_dir.join(format!("{display_name}-{w}x{h}.png"));
     frame.save_png(out.to_str().unwrap())?;
     println!("Preview saved: {} ({}x{})", out.display(), w, h);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn value_options_reject_missing_and_option_like_values() {
+        for values in [
+            &["--output-dir"][..],
+            &["--size"][..],
+            &["--profile"][..],
+            &["--output-dir", "--matrix"][..],
+            &["--size", "--list"][..],
+            &["--profile", "--matrix"][..],
+        ] {
+            let error = parse_args(&args(values)).unwrap_err();
+            assert!(
+                error.to_string().contains("needs value"),
+                "{values:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_value_options_preserve_following_flags_and_layout() {
+        let parsed = parse_args(&args(&[
+            "--output-dir",
+            "target/custom-preview",
+            "--size",
+            "1280x480",
+            "--profile",
+            "bulk-87ad-70db-pm4-sub5-fbl72",
+            "--matrix",
+            "layouts/svg/neon-dash-v2.svg",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            parsed,
+            PreviewOptions {
+                output_dir: PathBuf::from("target/custom-preview"),
+                matrix: true,
+                size: Some((1280, 480)),
+                profile: Some("bulk-87ad-70db-pm4-sub5-fbl72".to_owned()),
+                layout: "layouts/svg/neon-dash-v2.svg".to_owned(),
+                list: false,
+            }
+        );
+    }
 }
