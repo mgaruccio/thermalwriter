@@ -1588,6 +1588,11 @@ mod tests {
         buf.into_inner()
     }
 
+    fn background_rgb(background: &BackgroundImage) -> [u8; 3] {
+        let pixmap = background.to_pixmap(480, 480).unwrap();
+        [pixmap.data()[0], pixmap.data()[1], pixmap.data()[2]]
+    }
+
     #[test]
     fn test_cached_renderer_background_clearing() {
         // Transparent layout: background pixels show through when a background
@@ -1601,8 +1606,8 @@ mod tests {
 
         // 1. Set background to red
         let bg_bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
-        let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
-        renderer.set_background(Some(bg));
+        let bg = Arc::new(BackgroundImage::decode(&bg_bytes).unwrap());
+        renderer.set_background(Some(bg)).unwrap();
 
         // Render and verify background shows through (red)
         let frame_with_bg = renderer.render(&mock_sensors()).unwrap();
@@ -1614,7 +1619,7 @@ mod tests {
         assert_eq!(frame_with_bg.data[2], 0, "B should be 0");
 
         // 2. Clear background (set to None), mimicking render_preview background = None.
-        renderer.set_background(None);
+        renderer.set_background(None).unwrap();
 
         // Render and verify background is cleared back to fallback #08080f (R:8, G:8, B:15)
         let frame_cleared = renderer.render(&mock_sensors()).unwrap();
@@ -1638,9 +1643,7 @@ mod tests {
         let pixmap = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap.to_pixmap(480, 480).unwrap().data()[0], 255);
-        assert_eq!(pixmap.data()[1], 0);
-        assert_eq!(pixmap.data()[2], 0);
+        assert_eq!(background_rgb(&pixmap), [255, 0, 0]);
 
         // Check that it's cached in the state
         assert_eq!(cache.current_background.as_deref(), Some("bg1.png"));
@@ -1654,9 +1657,8 @@ mod tests {
         let pixmap_cached = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_cached.to_pixmap(480, 480).unwrap().data()[0], 255);
-        assert_eq!(pixmap_cached.data()[1], 0);
-        assert_eq!(pixmap_cached.data()[2], 0);
+        assert_eq!(background_rgb(&pixmap_cached), [255, 0, 0]);
+        assert!(Arc::ptr_eq(&pixmap_cached, &pixmap));
 
         // 3. Clearing the background invalidates the cached background state
         let cleared = cached_preview_background(&state, &mut cache, None).unwrap();
@@ -1668,9 +1670,7 @@ mod tests {
         let pixmap_after_clear = cached_preview_background(&state, &mut cache, Some("bg1.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_after_clear.to_pixmap(480, 480).unwrap().data()[0], 0);
-        assert_eq!(pixmap_after_clear.data()[1], 0);
-        assert_eq!(pixmap_after_clear.data()[2], 255);
+        assert_eq!(background_rgb(&pixmap_after_clear), [0, 0, 255]);
         assert_eq!(cache.current_background.as_deref(), Some("bg1.png"));
 
         // 5. Changing selected background name decodes the new file
@@ -1681,9 +1681,7 @@ mod tests {
         let pixmap_new = cached_preview_background(&state, &mut cache, Some("bg2.png"))
             .unwrap()
             .expect("should return a pixmap");
-        assert_eq!(pixmap_new.to_pixmap(480, 480).unwrap().data()[0], 0);
-        assert_eq!(pixmap_new.data()[1], 255);
-        assert_eq!(pixmap_new.data()[2], 0);
+        assert_eq!(background_rgb(&pixmap_new), [0, 255, 0]);
         assert_eq!(cache.current_background.as_deref(), Some("bg2.png"));
     }
 }
