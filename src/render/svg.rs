@@ -761,6 +761,47 @@ mod tests {
     }
 
     #[test]
+    fn neon_dash_uses_short_axis_for_compact_typography() {
+        let render = |width, height| {
+            let template = include_str!("../../layouts/svg/neon-dash.svg");
+            let mut renderer =
+                SvgRenderer::new(template, width, height).expect("valid neon dash SVG template");
+            renderer.set_theme(ThemePalette::default());
+            let context = renderer.build_context(&SensorData::new());
+            renderer
+                .render_template(&context)
+                .expect("neon dash template renders")
+        };
+
+        for (width, height) in [(640, 240), (960, 320), (320, 240)] {
+            let compact = render(width, height);
+            assert_eq!(compact.matches(r#"font-size="20""#).count(), 5, "{compact}");
+        }
+
+        let canonical = render(854, 480);
+        assert_eq!(
+            canonical.matches(r#"font-size="20""#).count(),
+            0,
+            "{canonical}"
+        );
+        let panel_14 = [
+            r#"x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
+            r#"x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
+        ]
+        .iter()
+        .map(|needle| canonical.matches(needle).count())
+        .sum::<usize>();
+        assert_eq!(panel_14, 2, "{canonical}");
+        assert_eq!(
+            canonical
+                .matches(r#"y="452" font-family="DejaVu Sans Mono, monospace" font-size="16""#)
+                .count(),
+            3,
+            "{canonical}"
+        );
+    }
+
+    #[test]
     fn runtime_geometry_cannot_be_overridden_by_layout_variables() {
         let template = r#"{# canvas: responsive #}
 {# vars:
