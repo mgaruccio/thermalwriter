@@ -18,11 +18,18 @@ pub struct VariableDecl {
     pub step: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanvasMode {
+    Responsive,
+    Fixed { width: u32, height: u32 },
+}
+
 pub struct LayoutFrontmatter {
     pub history_configs: HashMap<String, HistoryConfig>,
     pub animation_fps: Option<u32>,
     pub animation_decode: Option<String>,
     pub variables: HashMap<String, VariableDecl>,
+    pub canvas: Option<CanvasMode>,
 }
 
 impl LayoutFrontmatter {
@@ -32,6 +39,7 @@ impl LayoutFrontmatter {
             animation_fps: None,
             animation_decode: None,
             variables: HashMap::new(),
+            canvas: None,
         };
 
         let mut accumulating: Option<Vec<String>> = None;
@@ -79,6 +87,27 @@ impl LayoutFrontmatter {
             self.parse_animation(rest.trim());
         } else if let Some(rest) = inner.strip_prefix("vars:") {
             self.parse_vars(rest.trim());
+        } else if let Some(rest) = inner.strip_prefix("canvas:") {
+            self.parse_canvas(rest.trim());
+        }
+    }
+
+    fn parse_canvas(&mut self, spec: &str) {
+        let spec = spec.trim();
+        if spec.eq_ignore_ascii_case("responsive") {
+            self.canvas = Some(CanvasMode::Responsive);
+            return;
+        }
+        // WIDTHxHEIGHT
+        if let Some((w, h)) = spec.split_once('x')
+            && let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>())
+            && w > 0
+            && h > 0
+        {
+            self.canvas = Some(CanvasMode::Fixed {
+                width: w,
+                height: h,
+            });
         }
     }
 

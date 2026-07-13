@@ -1,10 +1,54 @@
-<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #1a1a2e; padding: 20px; gap: 8px;">
-  <div style="height: 40px; font-size: 32px; color: #888888;">thermalwriter</div>
-  <div style="height: 70px; font-size: 56px; color: #e94560;">{{ cpu_temp | default(value="--") }}°C</div>
-  <div style="height: 40px; font-size: 28px; color: #aaaaaa;">CPU {{ cpu_util | default(value="--") }}%</div>
-  <div style="height: 70px; font-size: 56px; color: #53d8fb;">{{ gpu_temp | default(value="--") }}°C</div>
-  <div style="height: 40px; font-size: 28px; color: #aaaaaa;">GPU {{ gpu_util | default(value="--") }}%  {{ gpu_power | default(value="--") }}W</div>
-  <div style="height: 40px; font-size: 28px; color: #bb86fc;">RAM {{ ram_used | default(value="--") }} / {{ ram_total | default(value="--") }} GB</div>
-  <div style="height: 40px; font-size: 28px; color: #bb86fc;">VRAM {{ vram_used | default(value="--") }} / {{ vram_total | default(value="--") }} GB</div>
-  <div style="height: 40px; font-size: 28px; color: #03dac6;">{{ fps | default(value="--") }} FPS  {{ frametime | default(value="--") }}ms</div>
+{# canvas: responsive #}
+{% set p = token_margin %}
+{% set g = token_gap %}
+{% set header_h = token_medium + token_small %}
+{% set content_w = width - p - p %}
+{% set content_h = height - p - p - header_h - g %}
+{% set half_w = (content_w - g) / 2 %}
+{% set half_h = (content_h - g) / 2 %}
+{% set quarter_w = (content_w - g - g - g) / 4 %}
+{% set label_h = token_label + 5 %}
+{% set value_h = token_hero + 10 %}
+<div style="display: flex; flex-direction: column; width: {{ width }}px; height: {{ height }}px; background: #0a0a12; color: #ffffff; padding: {{ p }}px; gap: {{ g }}px;">
+  <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ header_h }}px; align-items: center; justify-content: space-between;">
+    <span style="width: {{ content_w / 2 }}px; height: {{ header_h }}px; font-size: {{ token_medium }}px; color: #00e5ff;">SYSTEM</span>
+    <span style="width: {{ content_w / 2 }}px; height: {{ token_small + 4 }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: right;">THERMALWRITER</span>
+  </div>
+
+  {% if is_landscape or is_wide or is_ultrawide %}
+  <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
+    {% set card_w = quarter_w %}{% set card_h = content_h %}
+  {% else %}
+  <div style="display: flex; flex-direction: column; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
+    <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ half_h }}px; gap: {{ g }}px;">
+      {% set card_w = half_w %}{% set card_h = half_h %}
+  {% endif %}
+
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">CPU TEMP</span>
+        <span style="width: {{ card_w - p - p }}px; height: {{ value_h }}px; font-size: {{ token_hero }}px; color: #00e5ff; text-align: center;">{{ cpu_temp | default(value="--") }}°</span>
+      </div>
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">CPU LOAD</span>
+        <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ cpu_util | default(value="--") }}%</span>
+      </div>
+
+  {% if not is_landscape and not is_wide and not is_ultrawide %}
+    </div>
+    <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ half_h }}px; gap: {{ g }}px;">
+  {% endif %}
+
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">GPU TEMP</span>
+        <span style="width: {{ card_w - p - p }}px; height: {{ value_h }}px; font-size: {{ token_hero }}px; color: #ff2e9f; text-align: center;">{{ gpu_temp | default(value="--") }}°</span>
+      </div>
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">GPU LOAD</span>
+        <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
+      </div>
+
+  {% if not is_landscape and not is_wide and not is_ultrawide %}
+    </div>
+  {% endif %}
+  </div>
 </div>

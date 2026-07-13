@@ -1,12 +1,18 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Raw bulk USBLCDNew transport for Thermalright LCD coolers.
+// Protocol framing derived from thermalright-trcc-linux at tree
+// 390b880abd4cf0ed2d6eae7151493432263eff39 (project version 9.8.6, four commits after the v9.8.6 tag),
+// path: src/trcc/adapters/device/bulk_lcd.py
+
 use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
-use super::{DeviceInfo, Transport};
+use super::profile::{WireProtocol, build_device_info};
+use super::{DeviceInfo, EncodedFrame, FrameEncoding, Transport};
 
-const VID: u16 = 0x87AD;
-const PID: u16 = 0x70DB;
 const HANDSHAKE_READ_SIZE: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(1);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,18 +50,19 @@ pub fn build_frame_header(cmd: u32, width: u32, height: u32, payload_len: u32) -
     header
 }
 
-/// Resolve PM byte to (width, height). Defaults to 480x480 for unknown PMs.
-fn pm_to_resolution(pm: u8) -> (u32, u32) {
-    match pm {
-        5 => (240, 240),
-        7 | 9 => (320, 320),
-        10..=17 => (320, 240),
-        32 => (480, 480),
-        50 => (240, 320),
-        64..=66 => (320, 320),
-        68 | 69 => (480, 480),
-        _ => (480, 480), // Default for unknown PMs (including PM=4)
-    }
+#[derive(Debug, thiserror::Error)]
+#[error("device returned zero-length USB write after {bytes_written} bytes")]
+pub(crate) struct ZeroLengthTransfer {
+    bytes_written: usize,
+}
+
+pub(crate) fn is_fatal_usb_transfer(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.is::<ZeroLengthTransfer>()
+            || cause
+                .downcast_ref::<rusb::Error>()
+                .is_some_and(|error| !matches!(error, rusb::Error::Timeout))
+    })
 }
 
 /// Write all bytes in `data` by calling `write` repeatedly until the buffer is
@@ -70,79 +77,180 @@ where
     while sent < data.len() {
         let n = write(&data[sent..]).context("Bulk write failed")?;
         if n == 0 {
-            bail!(
-                "device returned zero-length write — likely disconnected (after {} bytes)",
-                sent
-            );
+            return Err(ZeroLengthTransfer {
+                bytes_written: sent,
+            }
+            .into());
         }
         sent += n;
     }
     Ok(())
 }
 
+/// Injectable count-aware bulk endpoint I/O for tests and the rusb backend.
+pub trait BulkIo: Send {
+    fn write(&mut self, data: &[u8]) -> Result<usize>;
+    fn read(&mut self, max_len: usize) -> Result<Vec<u8>>;
+}
+
+fn write_all_with_io(io: &mut dyn BulkIo, data: &[u8]) -> Result<()> {
+    let mut sent = 0;
+    while sent < data.len() {
+        let remaining = &data[sent..];
+        let written = io.write(remaining).context("Bulk write failed")?;
+        if written == 0 {
+            return Err(ZeroLengthTransfer {
+                bytes_written: sent,
+            }
+            .into());
+        }
+        if written > remaining.len() {
+            bail!(
+                "bulk writer reported {written} bytes for a {}-byte buffer",
+                remaining.len()
+            );
+        }
+        sent += written;
+    }
+    Ok(())
+}
+
+struct UsbBulkIo<'a> {
+    handle: &'a DeviceHandle<GlobalContext>,
+    ep_out: u8,
+    ep_in: u8,
+    write_timeout: Duration,
+}
+
+impl BulkIo for UsbBulkIo<'_> {
+    fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.handle
+            .write_bulk(self.ep_out, data, self.write_timeout)
+            .context("USB bulk write failed")
+    }
+
+    fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
+        let mut data = vec![0; max_len];
+        let read = self
+            .handle
+            .read_bulk(self.ep_in, &mut data, TIMEOUT)
+            .context("USB bulk read failed")?;
+        data.truncate(read);
+        Ok(data)
+    }
+}
+
+/// Pure handshake over injectable I/O — production and tests share this control flow.
+pub fn handshake_with_io(io: &mut dyn BulkIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
+    let payload = handshake_payload();
+    write_all_with_io(io, &payload).context("Handshake write failed")?;
+    let resp = io
+        .read(HANDSHAKE_READ_SIZE)
+        .context("Handshake read failed")?;
+    if resp.len() < 41 || resp[24] == 0 {
+        bail!(
+            "Handshake failed: resp[24]={} (expected non-zero)",
+            resp.get(24).copied().unwrap_or(0)
+        );
+    }
+    let pm = resp[24];
+    let sub = resp[36];
+    build_device_info(WireProtocol::Bulk, vid, pid, pm, sub, None)
+}
+
+/// Pure frame send over injectable I/O.
+pub fn send_frame_with_io(
+    io: &mut dyn BulkIo,
+    info: &DeviceInfo,
+    frame: &EncodedFrame,
+) -> Result<()> {
+    let (wire_width, wire_height) = info.wire_dimensions()?;
+    if frame.width != wire_width || frame.height != wire_height {
+        bail!(
+            "frame {}x{} does not match wire dimensions {}x{}",
+            frame.width,
+            frame.height,
+            wire_width,
+            wire_height
+        );
+    }
+    if frame.encoding != info.encoding() {
+        bail!(
+            "frame encoding {} does not match device {}",
+            frame.encoding,
+            info.encoding()
+        );
+    }
+    let cmd: u32 = match frame.encoding {
+        FrameEncoding::Jpeg => 2,
+        FrameEncoding::Rgb565Le | FrameEncoding::Rgb565Be => 3,
+    };
+    let payload_len = u32::try_from(frame.data.len()).context("frame too large")?;
+    let header = build_frame_header(cmd, frame.width, frame.height, payload_len);
+    let mut wire = Vec::with_capacity(64 + frame.data.len());
+    wire.extend_from_slice(&header);
+    wire.extend_from_slice(&frame.data);
+    for chunk in wire.chunks(CHUNK_SIZE) {
+        write_all_with_io(io, chunk)?;
+    }
+    if wire.len() % 512 == 0 {
+        io.write(&[])?; // ZLP
+    }
+    Ok(())
+}
+
 pub struct BulkUsb {
     handle: Option<DeviceHandle<GlobalContext>>,
+    vid: u16,
+    pid: u16,
+    interface: u8,
     ep_out: u8,
     ep_in: u8,
     info: Option<DeviceInfo>,
-    /// Total frames successfully sent over this transport's lifetime —
-    /// mirrors NullTransport's counter so profiling can compute
-    /// cpu-per-frame on real hardware too. Persists across reconnects
-    /// (try_reconnect transplants handle/ep_out/ep_in/info but not this).
+    /// Total frames successfully sent over this transport's lifetime.
     frames_sent: u64,
 }
 
 impl BulkUsb {
-    pub fn new() -> Result<Self> {
-        let handle =
-            rusb::open_device_with_vid_pid(VID, PID).context("USB device 87AD:70DB not found")?;
+    /// Open a bulk USB device at the given bus/address with discovered endpoints.
+    pub fn open_at(bus: u8, address: u8, interface: u8, ep_in: u8, ep_out: u8) -> Result<Self> {
+        let device = find_device(bus, address)
+            .with_context(|| format!("USB device bus={bus} address={address} not found"))?;
+        let desc = device
+            .device_descriptor()
+            .context("Failed to read USB device descriptor")?;
+        let vid = desc.vendor_id();
+        let pid = desc.product_id();
+
+        let handle = device.open().with_context(|| {
+            format!(
+                "Failed to open USB {:04x}:{:04x} (check udev rules and replug)",
+                vid, pid
+            )
+        })?;
 
         handle
             .set_auto_detach_kernel_driver(true)
             .context("Failed to set auto-detach kernel driver")?;
-
         handle
-            .claim_interface(0)
-            .context("Failed to claim USB interface 0")?;
-
-        // Discover bulk endpoints
-        let device = handle.device();
-        let config = device
-            .active_config_descriptor()
-            .context("Failed to get active config descriptor")?;
-
-        let mut ep_out = 0u8;
-        let mut ep_in = 0u8;
-
-        for iface in config.interfaces() {
-            for desc in iface.descriptors() {
-                // Prefer vendor-specific interface (class 255)
-                if desc.class_code() == 255 || desc.class_code() == 0 {
-                    for ep in desc.endpoint_descriptors() {
-                        if ep.transfer_type() == rusb::TransferType::Bulk {
-                            if ep.direction() == rusb::Direction::Out {
-                                ep_out = ep.address();
-                            } else {
-                                ep_in = ep.address();
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            .claim_interface(interface)
+            .with_context(|| format!("Failed to claim USB interface {interface}"))?;
 
         if ep_out == 0 || ep_in == 0 {
-            let _ = handle.release_interface(0);
+            let _ = handle.release_interface(interface);
             bail!("Could not find bulk IN/OUT endpoints");
         }
 
         info!(
-            "Opened BulkUSB device {:04x}:{:04x} (EP OUT=0x{:02x}, EP IN=0x{:02x})",
-            VID, PID, ep_out, ep_in
+            "Opened BulkUSB device {:04x}:{:04x} bus={} addr={} (EP OUT=0x{:02x}, EP IN=0x{:02x})",
+            vid, pid, bus, address, ep_out, ep_in
         );
 
         Ok(Self {
             handle: Some(handle),
+            vid,
+            pid,
+            interface,
             ep_out,
             ep_in,
             info: None,
@@ -150,134 +258,96 @@ impl BulkUsb {
         })
     }
 
-    pub fn disconnected() -> Self {
-        Self {
-            handle: None,
-            ep_out: 0,
-            ep_in: 0,
-            info: None,
-            frames_sent: 0,
+    /// If `err` is a fatal USB error, drop the handle so is_connected() is false.
+    fn mark_disconnected_if_fatal(&mut self, err: &anyhow::Error) {
+        let is_fatal = is_fatal_usb_transfer(err);
+        if is_fatal {
+            warn!("Fatal USB error — marking device disconnected: {err}");
+            self.handle = None;
+            self.info = None;
         }
     }
 }
 
-impl BulkUsb {
-    /// If `err` represents a fatal USB error (device gone, pipe stall, etc.),
-    /// drop the handle so is_connected() returns false and the tick loop retries.
-    /// Uses root_cause() because write_all wraps rusb::Error with anyhow::context.
-    fn mark_disconnected_if_fatal(&mut self, err: &anyhow::Error) {
-        // Any rusb error from a bulk write means the device is in a bad state.
-        // NoDevice/Io/Access/Pipe all indicate the handle is no longer usable.
-        // Timeout is excluded — a slow write is not a disconnect.
-        // Use chain() not root_cause(): write_all wraps rusb::Error with context,
-        // so the rusb::Error appears at chain[1], not as the root cause.
-        let is_fatal = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<rusb::Error>())
-            .map(|e| !matches!(e, rusb::Error::Timeout))
-            .unwrap_or(false);
-        if is_fatal {
-            warn!("Fatal USB error — marking device disconnected: {}", err);
-            self.handle = None;
+fn find_device(bus: u8, address: u8) -> Result<rusb::Device<GlobalContext>> {
+    let list = rusb::devices().context("libusb device list failed")?;
+    for device in list.iter() {
+        if device.bus_number() == bus && device.address() == address {
+            return Ok(device);
         }
     }
+    bail!("no USB device at bus={bus} address={address}")
 }
 
 impl Transport for BulkUsb {
     fn handshake(&mut self) -> Result<DeviceInfo> {
-        let handle = self.handle.as_ref().context("Device not open")?;
-
-        // Write handshake
-        let payload = handshake_payload();
-        handle
-            .write_bulk(self.ep_out, &payload, TIMEOUT)
-            .context("Handshake write failed")?;
-        debug!("Handshake sent ({} bytes)", payload.len());
-
-        // Read response
-        let mut resp = [0u8; HANDSHAKE_READ_SIZE];
-        let n = handle
-            .read_bulk(self.ep_in, &mut resp, TIMEOUT)
-            .context("Handshake read failed")?;
-        info!("Handshake response: {} bytes", n);
-
-        if n < 41 || resp[24] == 0 {
-            bail!(
-                "Handshake failed: resp[24]={} (expected non-zero)",
-                resp[24]
-            );
-        }
-
-        let pm = resp[24];
-        let sub = resp[36];
-        let (width, height) = pm_to_resolution(pm);
-        let use_jpeg = pm != 32;
-
-        info!(
-            "Handshake OK: PM={}, SUB={}, resolution={}x{}, jpeg={}",
-            pm, sub, width, height, use_jpeg
-        );
-
-        let info = DeviceInfo {
-            vid: VID,
-            pid: PID,
-            width,
-            height,
-            pm,
-            sub,
-            use_jpeg,
+        let result = {
+            let handle = self.handle.as_ref().context("Device not open")?;
+            let mut io = UsbBulkIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: TIMEOUT,
+            };
+            handshake_with_io(&mut io, self.vid, self.pid)
         };
-        self.info = Some(info.clone());
-        Ok(info)
+
+        match result {
+            Ok(info) => {
+                info!(
+                    "Handshake OK: PM={}, SUB={}, FBL={}, resolution={}x{}, encoding={}",
+                    info.pm,
+                    info.sub,
+                    info.fbl,
+                    info.width(),
+                    info.height(),
+                    info.encoding()
+                );
+                self.info = Some(info.clone());
+                Ok(info)
+            }
+            Err(error) => {
+                self.mark_disconnected_if_fatal(&error);
+                Err(error)
+            }
+        }
     }
 
-    fn send_frame(&mut self, data: &[u8]) -> Result<()> {
-        // Build the frame (header + payload) before borrowing the handle for writes.
-        let (frame, log_info) = {
+    fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
+        let send_result = {
             let info = self.info.as_ref().context("Handshake not performed")?;
-            let cmd: u32 = if info.use_jpeg { 2 } else { 3 };
-            let payload_len = u32::try_from(data.len()).context("frame too large")?;
-            let header = build_frame_header(cmd, info.width, info.height, payload_len);
-            let mut frame = Vec::with_capacity(64 + data.len());
-            frame.extend_from_slice(&header);
-            frame.extend_from_slice(data);
-            let log = (info.width, info.height, cmd, data.len());
-            (frame, log)
-        };
-
-        // All writes in a scoped block so the handle borrow ends before any
-        // mark_disconnected_if_fatal call (which needs &mut self).
-        let send_result: Result<()> = {
             let handle = self.handle.as_ref().context("Device not open")?;
-            let ep_out = self.ep_out;
-
-            let chunk_result: Result<()> = frame.chunks(CHUNK_SIZE).try_for_each(|chunk| {
-                write_all(chunk, |buf| handle.write_bulk(ep_out, buf, WRITE_TIMEOUT))
-            });
-
-            if chunk_result.is_ok() && frame.len() % 512 == 0 {
-                handle
-                    .write_bulk(ep_out, &[], WRITE_TIMEOUT)
-                    .context("ZLP write failed")?;
-            }
-            chunk_result
+            let mut io = UsbBulkIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: WRITE_TIMEOUT,
+            };
+            send_frame_with_io(&mut io, info, frame)
         };
 
-        if let Err(ref e) = send_result {
-            self.mark_disconnected_if_fatal(e);
-        } else {
-            self.frames_sent += 1;
-            debug!(
-                "Frame sent: {}x{}, cmd={}, {} bytes",
-                log_info.0, log_info.1, log_info.2, log_info.3
-            );
+        match send_result {
+            Ok(()) => {
+                self.frames_sent += 1;
+                debug!(
+                    "Frame sent: {}x{}, encoding={}, {} bytes",
+                    frame.width,
+                    frame.height,
+                    frame.encoding,
+                    frame.data.len()
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.mark_disconnected_if_fatal(&error);
+                Err(error)
+            }
         }
-        send_result
     }
 
     fn close(&mut self) {
         if let Some(handle) = self.handle.take() {
-            let _ = handle.release_interface(0);
+            let _ = handle.release_interface(self.interface);
             info!("BulkUsb closed: {} frames sent", self.frames_sent);
         }
         self.info = None;
@@ -286,21 +356,28 @@ impl Transport for BulkUsb {
     fn is_connected(&self) -> bool {
         self.handle.is_some() && self.info.is_some()
     }
-
-    fn try_reconnect(&mut self) -> Result<DeviceInfo> {
-        self.close();
-        let mut new = BulkUsb::new()?;
-        let info = new.handshake()?;
-        self.handle = new.handle.take(); // take() avoids moving out of Drop type
-        self.ep_out = new.ep_out;
-        self.ep_in = new.ep_in;
-        self.info = Some(info.clone());
-        Ok(info)
-    }
 }
 
 impl Drop for BulkUsb {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_length_write_is_typed_and_fatal() {
+        let error = write_all(&[1], |_| Ok(0)).unwrap_err();
+        assert!(error.downcast_ref::<ZeroLengthTransfer>().is_some());
+        assert!(is_fatal_usb_transfer(&error));
+    }
+
+    #[test]
+    fn timeout_is_not_a_fatal_transfer_error() {
+        assert!(!is_fatal_usb_transfer(&rusb::Error::Timeout.into()));
+        assert!(is_fatal_usb_transfer(&rusb::Error::NoDevice.into()));
     }
 }

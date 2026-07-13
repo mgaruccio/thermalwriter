@@ -11,6 +11,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+fn parse_device_selector(s: &str) -> Result<(), String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    let (vid_s, pid_s) = s
+        .split_once(':')
+        .ok_or_else(|| format!("must be 'auto' or 'VID:PID', got {s:?}"))?;
+    let parse = |part: &str| -> Result<u16, String> {
+        let part = part
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        u16::from_str_radix(part, 16).map_err(|_| format!("not a hex u16: {part:?}"))
+    };
+    parse(vid_s)?;
+    parse(pid_s)?;
+    Ok(())
+}
+
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_tmp_suffix() -> u64 {
@@ -37,6 +57,8 @@ pub struct DisplayConfig {
     pub rotation: u16,
     /// Display mode: "svg", "html", or "xvfb".
     pub mode: String,
+    /// Device selector: `"auto"` or `"VID:PID"` (hex). Default auto.
+    pub device: String,
 }
 
 impl Default for DisplayConfig {
@@ -47,6 +69,7 @@ impl Default for DisplayConfig {
             jpeg_quality: 85,
             rotation: 180,
             mode: "svg".to_string(),
+            device: "auto".to_string(),
         }
     }
 }
@@ -152,6 +175,10 @@ impl Config {
                 "display.rotation={} must be one of 0, 90, 180, 270",
                 self.display.rotation
             );
+        }
+        // Validate device selector shape without requiring USB.
+        if let Err(e) = parse_device_selector(&self.display.device) {
+            anyhow::bail!("display.device invalid: {e}");
         }
         if self.sensors.poll_interval_ms < 100 || self.sensors.poll_interval_ms > 60_000 {
             anyhow::bail!(

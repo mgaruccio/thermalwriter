@@ -1,36 +1,46 @@
-<div style="display: flex; flex-direction: column; width: 480px; height: 480px; background: #0d0d1a; color: #e0e0e0; padding: 20px; gap: 10px;">
-  <div style="height: 20px; font-size: 16px; color: #888888;">GPU FOCUS</div>
-  <div style="display: flex; flex-direction: column; gap: 16px;">
-    <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 12px; gap: 4px;">
-      <span style="height: 18px; font-size: 14px; color: #888888;">GPU TEMPERATURE</span>
-      <span style="height: 64px; font-size: 52px; color: #e94560;">{{ gpu_temp | default(value="--") }}°C</span>
+{# canvas: responsive #}
+{% set p = token_margin %}
+{% set g = token_gap %}
+{% set header_h = token_medium + token_small %}
+{% set content_w = width - p - p %}
+{% set content_h = height - p - p - header_h - g %}
+{% set label_h = token_label + 5 %}
+{% set hero_h = token_hero + token_medium %}
+{% if is_portrait %}
+  {% set hero_w = content_w %}
+  {% set hero_card_h = (content_h - g - g) / 2 %}
+  {% set detail_w = content_w %}
+  {% set detail_h = (content_h - hero_card_h - g - g) / 2 %}
+{% else %}
+  {% set hero_w = (content_w - g) * 3 / 5 %}
+  {% set hero_card_h = content_h %}
+  {% set detail_w = content_w - hero_w - g %}
+  {% set detail_h = (content_h - g) / 2 %}
+{% endif %}
+<div style="display: flex; flex-direction: column; width: {{ width }}px; height: {{ height }}px; background: #080812; color: #ffffff; padding: {{ p }}px; gap: {{ g }}px;">
+  <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ header_h }}px; justify-content: space-between; align-items: center;">
+    <span style="width: {{ content_w / 2 }}px; height: {{ header_h }}px; font-size: {{ token_medium }}px; color: #ff2e9f;">GPU</span>
+    <span style="width: {{ content_w / 2 }}px; height: {{ token_small + 4 }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: right;">PERFORMANCE</span>
+  </div>
+
+  {% if is_portrait %}
+  <div style="display: flex; flex-direction: column; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
+  {% else %}
+  <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
+  {% endif %}
+    <div style="display: flex; flex-direction: column; width: {{ hero_w }}px; height: {{ hero_card_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <span style="width: {{ hero_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">TEMPERATURE</span>
+      <span style="width: {{ hero_w - p - p }}px; height: {{ hero_h }}px; font-size: {{ token_hero }}px; color: #ff2e9f; text-align: center;">{{ gpu_temp | default(value="--") }}°C</span>
     </div>
-    <div style="display: flex; flex-direction: column; background: #1a1a2e; padding: 12px; gap: 4px;">
-      <span style="height: 18px; font-size: 14px; color: #888888;">GPU UTILIZATION</span>
-      <span style="height: 64px; font-size: 52px; color: #53d8fb;">{{ gpu_util | default(value="--") }}%</span>
-    </div>
-    <div style="display: flex; flex-direction: row; gap: 8px;">
-      <div style="display: flex; flex-direction: column; width: 136px; background: #1a1a2e; padding: 10px; gap: 2px;">
-        <span style="height: 16px; font-size: 12px; color: #888888;">POWER</span>
-        <span style="height: 30px; font-size: 24px; color: #cc9eff;">{{ gpu_power | default(value="--") }}W</span>
+
+    <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {% if is_portrait %}{{ detail_h + detail_h + g }}{% else %}{{ content_h }}{% endif %}px; gap: {{ g }}px;">
+      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ detail_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">UTILIZATION</span>
+        <span style="width: {{ detail_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
       </div>
-      <div style="display: flex; flex-direction: column; width: 136px; background: #1a1a2e; padding: 10px; gap: 2px;">
-        <span style="height: 16px; font-size: 12px; color: #888888;">VRAM</span>
-        <span style="height: 30px; font-size: 24px; color: #cc9eff;">{{ vram_used | default(value="--") }}/{{ vram_total | default(value="--") }}G</span>
-      </div>
-      <div style="display: flex; flex-direction: column; width: 136px; background: #1a1a2e; padding: 10px; gap: 2px;">
-        <span style="height: 16px; font-size: 12px; color: #888888;">FPS</span>
-        <span style="height: 30px; font-size: 24px; color: #e94560;">{{ fps | default(value="--") }}</span>
-      </div>
-    </div>
-    <div style="display: flex; flex-direction: row; gap: 8px;">
-      <div style="display: flex; flex-direction: column; width: 216px; background: #111122; padding: 10px; gap: 2px;">
-        <span style="height: 16px; font-size: 12px; color: #888888;">CPU</span>
-        <span style="height: 22px; font-size: 18px; color: #aaaaaa;">{{ cpu_temp | default(value="--") }}°C {{ cpu_util | default(value="--") }}%</span>
-      </div>
-      <div style="display: flex; flex-direction: column; width: 216px; background: #111122; padding: 10px; gap: 2px;">
-        <span style="height: 16px; font-size: 12px; color: #888888;">RAM</span>
-        <span style="height: 22px; font-size: 18px; color: #aaaaaa;">{{ ram_used | default(value="--") }}/{{ ram_total | default(value="--") }}G</span>
+      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+        <span style="width: {{ detail_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">VRAM</span>
+        <span style="width: {{ detail_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #00e5ff; text-align: center;">{{ vram_used | default(value="--") }}G</span>
       </div>
     </div>
   </div>

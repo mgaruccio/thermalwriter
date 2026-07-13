@@ -1,99 +1,104 @@
-// Tick loop: polls sensors, renders a frame, encodes to JPEG, sends via transport.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Tick loop: polls sensors, renders a frame, encodes, sends via transport.
+// Connection generations commit only after a matching SourceBuildResult lands.
 
 use anyhow::Result;
-use image::{ImageBuffer, Rgb};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::render::background::BackgroundImage;
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
-use crate::transport::Transport;
+use crate::transport::discovery::TransportConnector;
+use crate::transport::encode::encode_frame;
+use crate::transport::{DeviceInfo, EncodedFrame, Transport};
 
-/// Rotate raw RGB pixel data by the given degrees (0, 90, 180, 270).
-/// Returns (new_data, new_width, new_height).
-pub fn rotate_pixels(data: &[u8], width: u32, height: u32, degrees: u16) -> (Vec<u8>, u32, u32) {
-    let w = width as usize;
-    let h = height as usize;
-    let pixel_count = w * h;
+pub use crate::transport::encode::rotate_pixels;
 
-    match degrees {
-        0 => (data.to_vec(), width, height),
-        180 => {
-            let mut out = vec![0u8; data.len()];
-            for i in 0..pixel_count {
-                let src = i * 3;
-                let dst = (pixel_count - 1 - i) * 3;
-                out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
-            }
-            (out, width, height)
-        }
-        90 => {
-            let mut out = vec![0u8; data.len()];
-            for y in 0..h {
-                for x in 0..w {
-                    let src = (y * w + x) * 3;
-                    let dst = (x * h + (h - 1 - y)) * 3;
-                    out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
-                }
-            }
-            (out, height, width)
-        }
-        270 => {
-            let mut out = vec![0u8; data.len()];
-            for y in 0..h {
-                for x in 0..w {
-                    let src = (y * w + x) * 3;
-                    let dst = ((w - 1 - x) * h + y) * 3;
-                    out[dst..dst + 3].copy_from_slice(&data[src..src + 3]);
-                }
-            }
-            (out, height, width)
-        }
-        _ => {
-            log::warn!("Unsupported rotation {}, using 0", degrees);
-            (data.to_vec(), width, height)
-        }
-    }
+/// Request that the mode listener rebuild the frame source for a generation.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceBuildRequest {
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Result of a generation-tagged source rebuild (layout swap or reconnect).
+pub struct SourceBuildResult {
+    pub generation: u64,
+    pub source: Result<Box<dyn FrameSource>, String>,
+    /// Optional acknowledgement for D-Bus mode changes. Sent only after this
+    /// generation is accepted and the source is committed (or rejected).
+    pub commit: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
+
+/// End-to-end background apply request; acked only after set_background succeeds.
+pub struct BackgroundApply {
+    pub image: Option<Arc<BackgroundImage>>,
+    pub ack: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
 /// Encode a RawFrame to JPEG bytes, with optional rotation.
+/// Kept for xvfb frame-dump preview path and tests.
 pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u8>> {
-    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation);
-    let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(out_w, out_h, rotated)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+    let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation)?;
+    let img: image::ImageBuffer<image::Rgb<u8>, _> =
+        image::ImageBuffer::from_raw(out_w, out_h, rotated)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
     let mut buf = std::io::Cursor::new(Vec::new());
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
     image::DynamicImage::ImageRgb8(img).write_with_encoder(encoder)?;
     Ok(buf.into_inner())
 }
 
+struct PendingConnection {
+    generation: u64,
+    transport: Box<dyn Transport>,
+    info: DeviceInfo,
+    requested_at: Instant,
+}
+
+struct ActiveConnection {
+    generation: u64,
+    transport: Box<dyn Transport>,
+    info: DeviceInfo,
+}
+
 /// Run the tick loop. Blocks until `shutdown` is signaled.
 ///
-/// `frame_source`: owned initial frame source (swappable via `source_rx`).
-/// `source_rx`: channel for hot-swapping the frame source at runtime.
-/// `template_rx`: watch channel carrying updated HTML template strings.
-/// `sensor_history`: optional shared history buffer — updated each time sensors are polled.
+/// Connection lifecycle:
+/// 1. `connector.connect()` success → `PendingConnection` + `SourceBuildRequest`
+/// 2. Matching `SourceBuildResult::Ok` → apply background → `ActiveConnection`
+///    then publish negotiated resolution + `connected=true` together
+/// 3. Stale generation results are ignored; failed pending drops and retries after 2s
+/// 4. Fatal send publishes `(0,0),false`, drops the generation, reconnects
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_loop(
-    transport: &mut dyn Transport,
+    mut transport: Option<Box<dyn Transport>>,
+    mut device_info: Option<DeviceInfo>,
+    connector: TransportConnector,
     mut frame_source: Box<dyn FrameSource>,
-    source_rx: &mut tokio::sync::mpsc::Receiver<Box<dyn FrameSource>>,
+    source_build_tx: tokio::sync::mpsc::Sender<SourceBuildRequest>,
+    source_result_rx: &mut tokio::sync::mpsc::Receiver<SourceBuildResult>,
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
     jpeg_quality: u8,
     rotation: u16,
     mut template_rx: tokio::sync::watch::Receiver<String>,
-    mut background_rx: tokio::sync::watch::Receiver<Option<Arc<tiny_skia::Pixmap>>>,
-    shutdown: tokio::sync::watch::Receiver<bool>,
+    mut background_rx: tokio::sync::watch::Receiver<Option<Arc<BackgroundImage>>>,
+    background_apply_rx: &mut tokio::sync::mpsc::Receiver<BackgroundApply>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    generation_tx: tokio::sync::watch::Sender<u64>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<()> {
     info!(
@@ -101,72 +106,166 @@ pub async fn run_tick_loop(
         tick_rate_fps, jpeg_quality, rotation
     );
 
-    let mut last_poll = Instant::now() - sensor_poll_interval; // poll on first tick
+    let mut generation: u64 = 0;
+    let mut pending: Option<PendingConnection> = None;
+    let mut active: Option<ActiveConnection> = None;
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
-    let mut cached_background: Option<Arc<tiny_skia::Pixmap>> = background_rx.borrow().clone();
+    let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
+    let mut last_poll = Instant::now() - sensor_poll_interval;
+    let mut next_reconnect_at: Option<Instant> = None;
+
+    // Startup: if we already have a transport+info, the caller built the source
+    // at negotiated dimensions — commit ActiveConnection immediately.
+    match (transport.take(), device_info.take()) {
+        (Some(t), Some(info)) => {
+            generation = 1;
+            let _ = display_tx.send(RuntimeDisplayDimensions::new(info.width(), info.height()));
+            let _ = connected_tx.send(true);
+            let _ = generation_tx.send(generation);
+            if let Some(bg) = &cached_background {
+                let _ = frame_source.set_background(Some(bg.clone()));
+            }
+            active = Some(ActiveConnection {
+                generation,
+                transport: t,
+                info,
+            });
+        }
+        _ => {
+            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+            let _ = connected_tx.send(false);
+            let _ = generation_tx.send(0);
+            next_reconnect_at = Some(Instant::now());
+        }
+    }
 
     loop {
         let tick_start = Instant::now();
-
-        // Recompute tick duration from latest watch value each iteration so
-        // D-Bus set_tick_rate takes effect without a restart.
         let current_fps = (*tick_rate_rx.borrow_and_update()).max(1);
-        let tick_duration = Duration::from_secs_f64(1.0 / current_fps as f64);
+        let tick_duration = Duration::from_secs_f64(1.0 / f64::from(current_fps));
 
-        // Check shutdown
-        if *shutdown.borrow() {
-            info!("Tick loop shutdown requested");
-            break;
-        }
-
-        // Apply background update before source swap so the cache is current
-        // when a new source arrives in the same tick.
-        if background_rx.has_changed().unwrap_or(false) {
-            cached_background = background_rx.borrow_and_update().clone();
-            frame_source.set_background(cached_background.clone());
-        }
-
-        // Drain all pending source swaps — keep only the latest. Re-apply cached
-        // background and clear sensor cache so the new layout doesn't render with
-        // stale sensor data from the previous layout.
-        let mut latest_source: Option<Box<dyn FrameSource>> = None;
-        while let Ok(new_source) = source_rx.try_recv() {
-            latest_source = Some(new_source);
-        }
-        if let Some(new_source) = latest_source {
-            info!(
-                "Frame source swapped to: {} (queue drained)",
-                new_source.name()
+        // Drain generation-tagged source builds (reconnect commits + layout swaps).
+        while let Ok(result) = source_result_rx.try_recv() {
+            handle_source_result(
+                result,
+                &mut pending,
+                &mut active,
+                &mut frame_source,
+                &cached_background,
+                &display_tx,
+                &connected_tx,
+                &generation_tx,
+                &mut next_reconnect_at,
             );
-            let leaving_streaming = frame_source.is_streaming();
-            frame_source = new_source;
-            frame_source.set_background(cached_background.clone());
-            cached_sensors.clear();
+        }
 
-            // If we just left xvfb mode, remove the stale last.jpg so the GUI
-            // doesn't display a frozen frame from a previous streaming session.
-            if leaving_streaming && !frame_source.is_streaming() {
-                match frame_dump::frame_dir() {
-                    Ok(dir) => frame_dump::clear_frame(&dir),
-                    Err(e) => warn!("frame_dump clear skipped: {}", e),
+        // Template updates apply to the current source (active or placeholder).
+        if template_rx.has_changed().unwrap_or(false) {
+            let template = template_rx.borrow_and_update().clone();
+            if !template.is_empty() {
+                frame_source.set_template(&template);
+            }
+        }
+
+        // Transactional background applies (D-Bus set/clear). Ack only after
+        // set_background succeeds; on failure keep prior cache/source state.
+        while let Ok(apply) = background_apply_rx.try_recv() {
+            let prior_cache = cached_background.clone();
+            match frame_source.set_background(apply.image.clone()) {
+                Ok(()) => {
+                    cached_background = apply.image;
+                    let _ = apply.ack.send(Ok(()));
+                }
+                Err(e) => {
+                    // Restore prior source background if possible.
+                    let _ = frame_source.set_background(prior_cache.clone());
+                    cached_background = prior_cache;
+                    // Pending connection must abort on background raster failure.
+                    if pending.is_some() {
+                        warn!(
+                            "Background apply failed during pending connection: {e:#} — aborting generation"
+                        );
+                        pending = None;
+                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                    }
+                    let _ = apply.ack.send(Err(format!("{e:#}")));
+                }
+            }
+        }
+        // Watch channel mirrors for rebuilds (non-transactional hot path still ok
+        // when no oneshot is involved, e.g. startup).
+        if background_rx.has_changed().unwrap_or(false) {
+            let bg = background_rx.borrow_and_update().clone();
+            if let Err(e) = frame_source.set_background(bg.clone()) {
+                warn!("Background watch apply failed: {e:#}");
+            } else {
+                cached_background = bg;
+            }
+        }
+
+        // Pending timeout: if source rebuild never arrives, drop and retry.
+        if let Some(p) = &pending
+            && p.requested_at.elapsed() > Duration::from_secs(5)
+        {
+            warn!(
+                "Source rebuild for generation {} timed out — dropping pending connection",
+                p.generation
+            );
+            pending = None;
+            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+        }
+
+        // Discover when neither active nor pending.
+        if active.is_none() && pending.is_none() {
+            let due = next_reconnect_at
+                .map(|t| Instant::now() >= t)
+                .unwrap_or(true);
+            if due {
+                match tokio::task::block_in_place(|| connector.connect()) {
+                    Ok((t, info)) => {
+                        generation = generation.saturating_add(1);
+                        info!(
+                            "Device negotiated (pending gen {generation}): {}x{} PM={} SUB={} FBL={} {} {}",
+                            info.width(),
+                            info.height(),
+                            info.pm,
+                            info.sub,
+                            info.fbl,
+                            info.protocol,
+                            info.encoding()
+                        );
+                        let (display_width, display_height) = info.oriented_dimensions(rotation)?;
+                        let req = SourceBuildRequest {
+                            generation,
+                            width: display_width,
+                            height: display_height,
+                        };
+                        if source_build_tx.try_send(req).is_err() {
+                            warn!(
+                                "Failed to request source rebuild for generation {generation}; retrying"
+                            );
+                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        } else {
+                            pending = Some(PendingConnection {
+                                generation,
+                                transport: t,
+                                info,
+                                requested_at: Instant::now(),
+                            });
+                            next_reconnect_at = None;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Reconnect attempt failed: {e:#}");
+                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                    }
                 }
             }
         }
 
-        // Apply template update if one arrived since last tick
-        if template_rx.has_changed().unwrap_or(false) {
-            let new_template = template_rx.borrow_and_update().clone();
-            if !new_template.is_empty() {
-                info!("Applying template update ({} bytes)", new_template.len());
-                frame_source.set_template(&new_template);
-            }
-        }
-
-        // Poll sensors if interval has elapsed (decoupled from render rate)
         let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
             let data = sensor_hub.poll();
-            // Record into history buffer if configured
-            if let Some(ref hist) = sensor_history
+            if let Some(hist) = &sensor_history
                 && let Ok(mut h) = hist.lock()
             {
                 h.record(&data);
@@ -178,79 +277,204 @@ pub async fn run_tick_loop(
             &cached_sensors
         };
 
-        // Render frame
-        match frame_source.render(sensors) {
-            Ok(frame) => {
-                // Encode to JPEG
-                match encode_jpeg(&frame, jpeg_quality, rotation) {
-                    Ok(jpeg) => {
-                        debug!("Frame rendered: {} bytes JPEG", jpeg.len());
+        // Render + encode + send only when ActiveConnection is committed.
+        if let Some(conn) = active.as_mut() {
+            match frame_source.render(sensors) {
+                Ok(frame) => match encode_frame(&frame, &conn.info, rotation, jpeg_quality) {
+                    Ok(encoded) => {
+                        debug!(
+                            "Frame encoded: {} bytes ({})",
+                            encoded.data.len(),
+                            encoded.encoding
+                        );
 
-                        // Dump last xvfb frame to tmpfs so the GUI Stream tab can
-                        // display a live preview.  block_in_place keeps the async
-                        // runtime responsive during the file write (same pattern as
-                        // the USB send below).
                         if frame_source.is_streaming() {
                             match frame_dump::frame_dir() {
                                 Ok(dir) => {
-                                    if let Err(e) = tokio::task::block_in_place(|| {
-                                        frame_dump::write_frame_atomic(&dir, &jpeg)
-                                    }) {
-                                        warn!("frame_dump write failed: {}", e);
+                                    let dump_bytes = if encoded.encoding.is_jpeg() {
+                                        encoded.data.clone()
+                                    } else {
+                                        encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
+                                    };
+                                    if !dump_bytes.is_empty()
+                                        && let Err(e) = tokio::task::block_in_place(|| {
+                                            frame_dump::write_frame_atomic(&dir, &dump_bytes)
+                                        })
+                                    {
+                                        warn!("frame_dump write failed: {e}");
                                     }
                                 }
-                                Err(e) => warn!("frame_dump disabled: {}", e),
+                                Err(e) => warn!("frame_dump disabled: {e}"),
                             }
                         }
 
-                        // block_in_place yields the runtime thread pool during the USB
-                        // syscall so D-Bus and other async tasks remain responsive even
-                        // when a write stalls for the full WRITE_TIMEOUT (5s).
-                        if let Err(e) = tokio::task::block_in_place(|| transport.send_frame(&jpeg))
-                        {
-                            warn!("Failed to send frame: {}", e);
-                            if !transport.is_connected() {
+                        let send_result =
+                            tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
+                        if let Err(e) = send_result {
+                            warn!("Failed to send frame: {e}");
+                            if !conn.transport.is_connected() {
+                                warn!(
+                                    "Fatal send — dropping generation {} and reconnecting",
+                                    conn.generation
+                                );
+                                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
                                 let _ = connected_tx.send(false);
-                                let reconnect_result =
-                                    tokio::task::block_in_place(|| transport.try_reconnect());
-                                match reconnect_result {
-                                    Ok(device_info) => {
-                                        info!(
-                                            "USB device reconnected: {}x{}",
-                                            device_info.width, device_info.height
-                                        );
-                                        let _ = display_tx.send(RuntimeDisplayDimensions::new(
-                                            device_info.width,
-                                            device_info.height,
-                                        ));
-                                        let _ = connected_tx.send(true);
-                                    }
-                                    Err(e) => {
-                                        warn!("USB reconnect failed: {} — will retry next tick", e);
-                                        tokio::time::sleep(Duration::from_secs(2)).await;
-                                    }
-                                }
+                                let _ = generation_tx.send(0);
+                                active = None;
+                                pending = None;
+                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                             }
                         }
                     }
-                    Err(e) => warn!("JPEG encode failed: {}", e),
-                }
+                    Err(e) => warn!("Frame encode failed: {e:#}"),
+                },
+                Err(e) => warn!("Render failed: {e:#}"),
             }
-            Err(e) => warn!("Render failed: {:#}", e),
         }
 
-        // Sleep until next tick
         let elapsed = tick_start.elapsed();
         if elapsed < tick_duration {
             tokio::time::sleep(tick_duration - elapsed).await;
         }
 
-        // Check shutdown again after sleep.
-        // unwrap_or(true): if sender is dropped the daemon should exit.
-        if shutdown.has_changed().unwrap_or(true) && *shutdown.borrow() {
+        if *shutdown.borrow_and_update() {
             break;
         }
     }
 
+    if let Some(mut conn) = active.take() {
+        conn.transport.close();
+    }
+    if let Some(mut p) = pending.take() {
+        p.transport.close();
+    }
+
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_source_result(
+    result: SourceBuildResult,
+    pending: &mut Option<PendingConnection>,
+    active: &mut Option<ActiveConnection>,
+    frame_source: &mut Box<dyn FrameSource>,
+    cached_background: &Option<Arc<BackgroundImage>>,
+    display_tx: &tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    connected_tx: &tokio::sync::watch::Sender<bool>,
+    generation_tx: &tokio::sync::watch::Sender<u64>,
+    next_reconnect_at: &mut Option<Instant>,
+) {
+    let generation = result.generation;
+    let mut commit = result.commit;
+    let pending_match = pending
+        .as_ref()
+        .is_some_and(|candidate| candidate.generation == generation);
+    let active_match = active
+        .as_ref()
+        .is_some_and(|candidate| candidate.generation == generation);
+
+    if !pending_match && !active_match {
+        debug!("Ignoring stale SourceBuildResult for generation {generation}");
+        if let Some(commit) = commit.take() {
+            let _ = commit.send(Err(format!(
+                "source generation {generation} became stale before commit"
+            )));
+        }
+        return;
+    }
+
+    match result.source {
+        Ok(mut source) => {
+            if let Some(background) = cached_background
+                && let Err(error) = source.set_background(Some(background.clone()))
+            {
+                warn!("Failed to apply background to rebuilt source: {error:#}");
+                if pending_match {
+                    let _ = pending.take();
+                    let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                    let _ = connected_tx.send(false);
+                    let _ = generation_tx.send(0);
+                    *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                }
+                if let Some(commit) = commit.take() {
+                    let _ = commit.send(Err(format!(
+                        "failed to apply background to source: {error:#}"
+                    )));
+                }
+                return;
+            }
+
+            let was_streaming = frame_source.is_streaming();
+            let is_streaming = source.is_streaming();
+            if was_streaming && !is_streaming {
+                match frame_dump::frame_dir() {
+                    Ok(dir) => {
+                        frame_dump::clear_frame_on_stream_exit(&dir, was_streaming, is_streaming)
+                    }
+                    Err(error) => {
+                        warn!("Failed to locate stale stream frame for cleanup: {error:#}");
+                    }
+                }
+            }
+
+            *frame_source = source;
+            if pending_match {
+                let connection = pending.take().expect("pending_match");
+                info!(
+                    "ActiveConnection generation {}: {}x{} {} {}",
+                    connection.generation,
+                    connection.info.width(),
+                    connection.info.height(),
+                    connection.info.protocol,
+                    connection.info.encoding()
+                );
+                let _ = display_tx.send(RuntimeDisplayDimensions::new(
+                    connection.info.width(),
+                    connection.info.height(),
+                ));
+                let _ = connected_tx.send(true);
+                let _ = generation_tx.send(connection.generation);
+                *active = Some(ActiveConnection {
+                    generation: connection.generation,
+                    transport: connection.transport,
+                    info: connection.info,
+                });
+                *next_reconnect_at = None;
+            } else {
+                info!("Frame source swapped for active generation {generation}");
+            }
+            if let Some(commit) = commit.take() {
+                let _ = commit.send(Ok(()));
+            }
+        }
+        Err(error) => {
+            if pending_match {
+                warn!(
+                    "Source rebuild failed for pending generation {generation}: {error} — dropping and retrying"
+                );
+                *pending = None;
+                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                let _ = connected_tx.send(false);
+                let _ = generation_tx.send(0);
+                *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+            } else {
+                warn!(
+                    "Source rebuild failed for active generation {generation}: {error} — keeping prior source"
+                );
+            }
+            if let Some(commit) = commit.take() {
+                let _ = commit.send(Err(error));
+            }
+        }
+    }
+}
+
+/// Helper for tests / examples constructing an EncodedFrame from JPEG bytes.
+pub fn encoded_jpeg(data: Vec<u8>, width: u32, height: u32) -> EncodedFrame {
+    EncodedFrame {
+        data,
+        width,
+        height,
+        encoding: crate::transport::FrameEncoding::Jpeg,
+    }
 }

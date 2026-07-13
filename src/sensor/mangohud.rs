@@ -90,10 +90,8 @@ impl MangoHudProvider {
             tail_view = &tail_view[first_nl + 1..];
         }
         // Drop trailing partial fragment (file being actively written, no closing '\n').
-        let usable: &str = match tail_view.rfind('\n') {
-            Some(idx) => &tail_view[..=idx],
-            None => return None, // no complete line in the window
-        };
+        let last_newline = tail_view.rfind('\n')?;
+        let usable = &tail_view[..=last_newline];
 
         let last_line = usable
             .lines()

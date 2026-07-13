@@ -9,6 +9,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 use thermalwriter::cli::{Cli, Command};
 use thermalwriter::config::{Config, builtin_layouts};
 use thermalwriter::render::TemplateRenderer;
+use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, background as bg_decode};
@@ -22,14 +23,11 @@ use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::service::dbus::{self, ModeChange, ServiceState};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
-use thermalwriter::service::tick;
+use thermalwriter::service::tick::{self, BackgroundApply, SourceBuildRequest, SourceBuildResult};
 use thermalwriter::theme::ThemePalette;
+use thermalwriter::transport::DeviceInfo;
 use thermalwriter::transport::Transport;
-use thermalwriter::transport::bulk_usb::BulkUsb;
-use thermalwriter::transport::null::{NullTransport, TransportKind, transport_from_env};
-
-const FALLBACK_DISPLAY_WIDTH: u32 = 480;
-const FALLBACK_DISPLAY_HEIGHT: u32 = 480;
+use thermalwriter::transport::discovery::{DeviceSelector, TransportConnector};
 
 // Heap allocation profiling, behind the `dhat-heap` feature (never enabled in
 // the shipped default build). The global allocator swap applies to the whole
@@ -39,6 +37,29 @@ const FALLBACK_DISPLAY_HEIGHT: u32 = 480;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+async fn commit_frame_source(
+    sender: &mpsc::Sender<SourceBuildResult>,
+    generation: u64,
+    source: Box<dyn FrameSource>,
+) -> Result<()> {
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(source),
+            commit: Some(commit_tx),
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("tick loop dropped source result channel"))?;
+    match commit_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+        Err(_) => Err(anyhow::anyhow!(
+            "tick loop dropped source commit acknowledgement"
+        )),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,11 +112,11 @@ async fn main() -> Result<()> {
     builtin_layouts::seed_wrapper_dir(&wrapper_dir)?;
 
     // Decode the configured background image at startup (if set)
-    let initial_background: Option<Arc<tiny_skia::Pixmap>> =
+    let initial_background: Option<Arc<BackgroundImage>> =
         if let Some(image_name) = &config.background.image {
             let bg_path = background_dir.join(image_name);
-            match bg_decode::decode_from_file(&bg_path) {
-                Ok(pixmap) => Some(Arc::new(pixmap)),
+            match bg_decode::load_background(&bg_path) {
+                Ok(img) => Some(Arc::new(img)),
                 Err(e) => {
                     log::warn!("Failed to decode background '{}': {}", image_name, e);
                     None
@@ -105,55 +126,57 @@ async fn main() -> Result<()> {
             None
         };
 
-    // Setup transport. Absence of the USB display at daemon startup must not
-    // prevent D-Bus from coming up; the tick loop retries reconnects until the
-    // display appears. THERMALWRITER_TRANSPORT=null swaps in NullTransport for
-    // headless profiling runs — no hardware, no USB claim.
-    let (mut transport, connected, display): (Box<dyn Transport>, bool, RuntimeDisplayDimensions) =
-        match transport_from_env(std::env::var("THERMALWRITER_TRANSPORT").ok().as_deref()) {
-            TransportKind::Null => {
-                let mut transport = NullTransport::new();
-                let device_info = transport.handshake()?; // NullTransport handshake never fails
-                info!(
-                    "NullTransport active (headless profiling): {}x{}",
-                    device_info.width, device_info.height
-                );
-                (
-                    Box::new(transport),
-                    true,
-                    RuntimeDisplayDimensions::new(device_info.width, device_info.height),
-                )
-            }
-            TransportKind::Usb => match BulkUsb::new().and_then(|mut transport| {
-                let device_info = transport.handshake()?;
-                Ok((transport, device_info))
-            }) {
-                Ok((transport, device_info)) => {
-                    info!(
-                        "Device: {}x{}, PM={}, JPEG={}",
-                        device_info.width, device_info.height, device_info.pm, device_info.use_jpeg
-                    );
-                    (
-                        Box::new(transport),
-                        true,
-                        RuntimeDisplayDimensions::new(device_info.width, device_info.height),
-                    )
-                }
-                Err(e) => {
-                    warn!(
-                        "USB display unavailable at startup: {e:#}; daemon will keep running and retry"
-                    );
-                    (
-                        Box::new(BulkUsb::disconnected()),
-                        false,
-                        RuntimeDisplayDimensions::new(
-                            FALLBACK_DISPLAY_WIDTH,
-                            FALLBACK_DISPLAY_HEIGHT,
-                        ),
-                    )
-                }
-            },
-        };
+    // Setup transport via connector. Absence of the display at daemon startup must
+    // not prevent D-Bus from coming up; the tick loop rediscovers until it appears.
+    // THERMALWRITER_TRANSPORT=null / THERMALWRITER_PROFILE select headless fixtures.
+    let connector =
+        TransportConnector::from_config_device(&config.display.device).unwrap_or_else(|e| {
+            warn!(
+                "Invalid display.device={:?}: {e:#}; falling back to auto",
+                config.display.device
+            );
+            TransportConnector::new(DeviceSelector::Auto)
+        });
+    let (transport, device_info, connected, display): (
+        Option<Box<dyn Transport>>,
+        Option<DeviceInfo>,
+        bool,
+        RuntimeDisplayDimensions,
+    ) = match connector.connect() {
+        Ok((t, info)) => {
+            info!(
+                "Device: {}x{}, PM={}, SUB={}, FBL={}, protocol={}, encoding={}",
+                info.width(),
+                info.height(),
+                info.pm,
+                info.sub,
+                info.fbl,
+                info.protocol,
+                info.encoding()
+            );
+            (
+                Some(t),
+                Some(info.clone()),
+                true,
+                RuntimeDisplayDimensions::new(info.width(), info.height()),
+            )
+        }
+        Err(e) => {
+            warn!("Display unavailable at startup: {e:#}; daemon will keep running and retry");
+            // Disconnected publishes (0,0); 480×480 is internal-only for layout authoring.
+            (None, None, false, RuntimeDisplayDimensions::new(0, 0))
+        }
+    };
+
+    const INTERNAL_CANVAS_W: u32 = 480;
+    const INTERNAL_CANVAS_H: u32 = 480;
+    // Internal authoring canvas when disconnected; never published on D-Bus as connected dims.
+    let source_display = if let Some(info) = device_info.as_ref() {
+        let (width, height) = info.oriented_dimensions(config.display.rotation)?;
+        RuntimeDisplayDimensions::new(width, height)
+    } else {
+        RuntimeDisplayDimensions::new(INTERNAL_CANVAS_W, INTERNAL_CANVAS_H)
+    };
 
     // Setup sensor hub with all providers
     let mut sensor_hub = SensorHub::new();
@@ -174,8 +197,12 @@ async fn main() -> Result<()> {
         .map(|d| (d.key, d.name, d.unit))
         .collect();
 
-    // Channel for hot-swapping the frame source from the mode change listener
-    let (source_tx, mut source_rx) = mpsc::channel::<Box<dyn FrameSource>>(1);
+    // Generation-tagged source rebuild channel (tick → listener request, listener → tick result)
+    let (source_build_tx, mut source_build_rx) = mpsc::channel::<SourceBuildRequest>(4);
+    let (source_result_tx, mut source_result_rx) = mpsc::channel::<SourceBuildResult>(4);
+    let (background_apply_tx, mut background_apply_rx) = mpsc::channel::<BackgroundApply>(4);
+    // Active connection generation (0 = disconnected). Layout/mode swaps tag results with this.
+    let (generation_tx, generation_rx) = watch::channel::<u64>(0);
     // Shared shutdown + template channels
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (connected_tx, _) = watch::channel(connected);
@@ -183,7 +210,7 @@ async fn main() -> Result<()> {
     let (template_tx, template_rx) = watch::channel(String::new());
     // Background watch channel: mode-change listener → tick loop (immediate apply)
     let (background_tx, background_rx) =
-        watch::channel::<Option<Arc<tiny_skia::Pixmap>>>(initial_background.clone());
+        watch::channel::<Option<Arc<BackgroundImage>>>(initial_background.clone());
     // Tick rate watch channel: D-Bus set_tick_rate → tick loop (no restart needed)
     let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(config.display.tick_rate);
     // Mode change channel (D-Bus → listener task)
@@ -200,7 +227,7 @@ async fn main() -> Result<()> {
             if config.xvfb.command.is_empty() {
                 anyhow::bail!("xvfb mode requires [xvfb] command in config");
             }
-            let (handle, source) = display.start_xvfb_shell(&config.xvfb.command)?;
+            let (handle, source) = source_display.start_xvfb_shell(&config.xvfb.command)?;
             let boxed: Box<dyn FrameSource> = Box::new(source);
             // History is allocated but not seeded with layout frontmatter — metrics get configured
             // when the user switches to a layout via D-Bus set_layout.
@@ -229,7 +256,8 @@ async fn main() -> Result<()> {
 
             let is_svg = config.display.default_layout.ends_with(".svg");
             let boxed: Box<dyn FrameSource> = if is_svg {
-                let mut renderer = SvgRenderer::new(&template, display.width(), display.height())?;
+                let mut renderer =
+                    SvgRenderer::new(&template, source_display.width(), source_display.height())?;
                 if let Some(ref hist) = initial_sensor_history {
                     renderer.set_history(hist.clone());
                 }
@@ -241,13 +269,13 @@ async fn main() -> Result<()> {
                         .cloned()
                         .unwrap_or_default(),
                 );
-                renderer.set_background(initial_background.clone());
+                let _ = renderer.set_background(initial_background.clone());
                 Box::new(renderer)
             } else {
                 Box::new(TemplateRenderer::new(
                     &template,
-                    display.width(),
-                    display.height(),
+                    source_display.width(),
+                    source_display.height(),
                 )?)
             };
 
@@ -317,6 +345,7 @@ async fn main() -> Result<()> {
     let xvfb_tick_rate_cfg = xvfb_tick_rate;
     let reload_history = initial_sensor_history.clone();
     let mut display_rx = display_tx.subscribe();
+    let mut generation_rx_listener = generation_rx.clone();
     let initial_mode = config.display.mode.clone();
     let initial_active_layout = config.display.default_layout.clone();
     let initial_layout_vars = config
@@ -329,106 +358,109 @@ async fn main() -> Result<()> {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
         // Tracks the active background so layout switches preserve it.
-        let mut current_background: Option<Arc<tiny_skia::Pixmap>> = initial_background;
-        let mut current_display = *display_rx.borrow_and_update();
+        let mut current_background: Option<Arc<BackgroundImage>> = initial_background;
+        let mut current_display = source_display;
         let mut active_mode = initial_mode;
         let mut active_layout = initial_active_layout;
         let mut active_layout_vars = initial_layout_vars;
         let mut active_xvfb_shell = initial_xvfb_command;
         let mut active_xvfb_argv: Option<Vec<String>> = None;
+        let _ = generation_rx_listener.borrow_and_update();
 
         loop {
             tokio::select! {
-                changed = display_rx.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let next_display = *display_rx.borrow_and_update();
-                    if next_display == current_display {
-                        continue;
-                    }
-
-                    if active_mode == "xvfb" {
+                // Generation-tagged rebuild requests from the tick loop (reconnect path).
+                req = source_build_rx.recv() => {
+                    let Some(req) = req else { break; };
+                    let dims = RuntimeDisplayDimensions::new(req.width, req.height);
+                    let result = if active_mode == "xvfb" {
                         if let Some(argv) = active_xvfb_argv.clone() {
-                            match next_display.start_xvfb_argv(&argv) {
+                            match dims.start_xvfb_argv(&argv) {
                                 Ok((new_handle, source)) => {
-                                    if source_tx.send(Box::new(source)).await.is_err() {
-                                        log::warn!("Failed to send resized argv xvfb source to tick loop — receiver dropped");
-                                        break;
-                                    }
                                     if let Some(h) = xvfb_handle.take() {
                                         drop(h);
                                     }
                                     xvfb_handle = Some(new_handle);
-                                    current_display = next_display;
-                                    info!(
-                                        "Rebuilt argv xvfb source for reconnected display: {}x{}",
-                                        next_display.width(),
-                                        next_display.height()
-                                    );
+                                    current_display = dims;
+                                    Ok(Box::new(source) as Box<dyn FrameSource>)
                                 }
-                                Err(e) => {
-                                    log::warn!("Failed to rebuild argv xvfb source after display reconnect: {}", e);
-                                }
+                                Err(e) => Err(format!("xvfb argv rebuild failed: {e:#}")),
                             }
                         } else if let Some(command) = active_xvfb_shell.clone() {
-                            match next_display.start_xvfb_shell(&command) {
+                            match dims.start_xvfb_shell(&command) {
                                 Ok((new_handle, source)) => {
-                                    if source_tx.send(Box::new(source)).await.is_err() {
-                                        log::warn!("Failed to send resized xvfb source to tick loop — receiver dropped");
-                                        break;
-                                    }
                                     if let Some(h) = xvfb_handle.take() {
                                         drop(h);
                                     }
                                     xvfb_handle = Some(new_handle);
-                                    current_display = next_display;
-                                    info!(
-                                        "Rebuilt xvfb source for reconnected display: {}x{}",
-                                        next_display.width(),
-                                        next_display.height()
-                                    );
+                                    current_display = dims;
+                                    Ok(Box::new(source) as Box<dyn FrameSource>)
                                 }
-                                Err(e) => {
-                                    log::warn!("Failed to rebuild xvfb source after display reconnect: {}", e);
-                                }
+                                Err(e) => Err(format!("xvfb shell rebuild failed: {e:#}")),
                             }
                         } else {
-                            log::warn!("Display dimensions changed while in xvfb mode, but no active stream command is tracked");
+                            Err("xvfb mode has no tracked stream command".into())
                         }
                     } else {
                         let layout_path = layout_dir_clone.join(&active_layout);
-                        match next_display.build_layout_source(
+                        match dims.build_layout_source(
                             &layout_path,
                             active_layout_vars.clone(),
                             current_background.clone(),
                             reload_history.clone(),
                             reload_theme.clone(),
                         ) {
-                            Ok(new_source) => {
-                                if source_tx.send(new_source).await.is_err() {
-                                    log::warn!("Failed to send resized layout source to tick loop — receiver dropped");
-                                    break;
-                                }
+                            Ok(source) => {
                                 if let Some(h) = xvfb_handle.take() {
                                     drop(h);
                                 }
-                                current_display = next_display;
-                                info!(
-                                    "Rebuilt layout source for reconnected display: {}x{}",
-                                    next_display.width(),
-                                    next_display.height()
-                                );
+                                current_display = dims;
+                                Ok(source)
                             }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to rebuild layout '{}' after display reconnect: {}",
-                                    active_layout,
-                                    e
-                                );
-                            }
+                            Err(e) => Err(format!(
+                                "layout rebuild for '{}' failed: {e:#}",
+                                active_layout
+                            )),
                         }
+                    };
+                    if result.is_ok() {
+                        info!(
+                            "Built source for generation {} at {}x{}",
+                            req.generation, req.width, req.height
+                        );
+                    } else if let Err(ref e) = result {
+                        log::warn!(
+                            "Source build for generation {} failed: {e}",
+                            req.generation
+                        );
                     }
+                    if source_result_tx
+                        .send(SourceBuildResult {
+                            generation: req.generation,
+                            source: result,
+                            commit: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("Tick loop dropped source result channel");
+                        break;
+                    }
+                }
+                // Track active generation for layout/mode swaps.
+                changed = generation_rx_listener.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let _ = generation_rx_listener.borrow_and_update();
+                }
+                // Keep display_rx drained so it doesn't lag; dimension rebuilds are
+                // driven by SourceBuildRequest from the tick loop, not this channel.
+                changed = display_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let _ = display_rx.borrow_and_update();
                 }
                 change = mode_rx.recv() => {
                     let Some(change) = change else {
@@ -436,11 +468,20 @@ async fn main() -> Result<()> {
                     };
                     match change {
                         ModeChange::Layout { name, vars, ack } => {
-                            // Build the new source FIRST — before touching the existing handle.
-                            // If build_layout_source fails (bad path, render error), the old
-                            // source keeps streaming and the handle is left intact.
                             let layout_path = layout_dir_clone.join(&name);
-                            let mode_display = *display_rx.borrow();
+                            // Prefer active negotiated dims; fall back to last known.
+                            let mode_display = if current_display.width() > 0 {
+                                current_display
+                            } else {
+                                *display_rx.borrow()
+                            };
+                            // Disconnected placeholder: use internal 480 when display is 0x0.
+                            let mode_display = if mode_display.width() == 0 || mode_display.height() == 0 {
+                                RuntimeDisplayDimensions::new(480, 480)
+                            } else {
+                                mode_display
+                            };
+                            let generation = *generation_rx_listener.borrow();
                             match mode_display.build_layout_source(
                                 &layout_path,
                                 vars.clone(),
@@ -449,13 +490,39 @@ async fn main() -> Result<()> {
                                 reload_theme.clone(),
                             ) {
                                 Ok(new_source) => {
-                                    if source_tx.send(new_source).await.is_err() {
-                                        let msg = "Failed to send new frame source to tick loop — receiver dropped".to_string();
-                                        log::warn!("{}", msg);
-                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                    if generation == 0 {
+                                        // Disconnected: record layout for next reconnect rebuild.
+                                        drop(new_source);
+                                        if let Some(h) = xvfb_handle.take() {
+                                            drop(h);
+                                        }
+                                        active_mode = if name.ends_with(".html") {
+                                            "html".to_string()
+                                        } else {
+                                            "svg".to_string()
+                                        };
+                                        active_layout = name.clone();
+                                        active_layout_vars = vars;
+                                        active_xvfb_shell = None;
+                                        active_xvfb_argv = None;
+                                        if let Ok(template) = std::fs::read_to_string(&layout_path) {
+                                            let _ = template_tx.send(template);
+                                        }
+                                        info!("Recorded layout '{}' while disconnected", name);
+                                        let _ = ack.send(Ok(()));
                                         continue;
                                     }
-                                    // Source confirmed sent — NOW it is safe to drop the old handle.
+                                    if let Err(error) = commit_frame_source(
+                                        &source_result_tx,
+                                        generation,
+                                        new_source,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Layout source commit failed: {error:#}");
+                                        let _ = ack.send(Err(error));
+                                        continue;
+                                    }
                                     if let Some(h) = xvfb_handle.take() {
                                         drop(h);
                                     }
@@ -469,47 +536,85 @@ async fn main() -> Result<()> {
                                     active_layout_vars = vars;
                                     active_xvfb_shell = None;
                                     active_xvfb_argv = None;
-                                    // Push raw template for the set_template hot-swap path.
                                     if let Ok(template) = std::fs::read_to_string(&layout_path) {
                                         let _ = template_tx.send(template);
                                     }
-                                    info!("Switched to layout: {}", name);
+                                    info!("Switched to layout: {} (gen {generation})", name);
                                     let _ = ack.send(Ok(()));
                                 }
                                 Err(e) => {
-                                    // Build failed — old handle stays live; stream keeps rendering.
                                     log::warn!("Layout transition failed for '{}': {}", name, e);
                                     let _ = ack.send(Err(e));
                                 }
                             }
                         }
                         ModeChange::Background { image, ack } => {
-                            current_background = image.clone();
-                            // Push to tick loop immediately so the running renderer updates
-                            // without waiting for a layout switch.
-                            let _ = background_tx.send(image.clone());
-                            info!(
-                                "Background updated ({})",
-                                if image.is_some() { "set" } else { "cleared" }
-                            );
-                            // Background changes use their own bg_change_lock for ordering;
-                            // ack here satisfies the contract for callers that await it.
-                            let _ = ack.send(Ok(()));
+                            // Forward to tick for transactional set_background; only
+                            // update local cache on success so reconnect rebuilds match.
+                            let (inner_ack_tx, inner_ack_rx) = tokio::sync::oneshot::channel();
+                            if background_apply_tx
+                                .send(BackgroundApply {
+                                    image: image.clone(),
+                                    ack: inner_ack_tx,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                let _ = ack.send(Err(anyhow::anyhow!(
+                                    "tick loop dropped background apply channel"
+                                )));
+                                continue;
+                            }
+                            match inner_ack_rx.await {
+                                Ok(Ok(())) => {
+                                    current_background = image.clone();
+                                    let _ = background_tx.send(image);
+                                    info!(
+                                        "Background updated ({})",
+                                        if current_background.is_some() {
+                                            "set"
+                                        } else {
+                                            "cleared"
+                                        }
+                                    );
+                                    let _ = ack.send(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = ack.send(Err(anyhow::anyhow!("{e}")));
+                                }
+                                Err(_) => {
+                                    let _ = ack.send(Err(anyhow::anyhow!(
+                                        "background apply ack dropped"
+                                    )));
+                                }
+                            }
                         }
                         ModeChange::Xvfb { command, ack } => {
-                            // Start the new Xvfb process FIRST — before dropping the existing handle.
-                            // If start or source-creation fails, the old source/handle stays live.
-                            let mode_display = *display_rx.borrow();
+                            let mode_display = if current_display.width() > 0 {
+                                current_display
+                            } else {
+                                RuntimeDisplayDimensions::new(480, 480)
+                            };
+                            let generation = *generation_rx_listener.borrow();
+                            if generation == 0 {
+                                let _ = ack.send(Err(anyhow::anyhow!(
+                                    "cannot start xvfb while disconnected"
+                                )));
+                                continue;
+                            }
                             match mode_display.start_xvfb_shell(&command) {
                                 Ok((new_handle, source)) => {
-                                    if source_tx.send(Box::new(source)).await.is_err() {
-                                        let msg = "Failed to send xvfb frame source to tick loop — receiver dropped".to_string();
-                                        log::warn!("{}", msg);
-                                        // new_handle drops here (Xvfb killed) — old handle still in place.
-                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                    if let Err(error) = commit_frame_source(
+                                        &source_result_tx,
+                                        generation,
+                                        Box::new(source),
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Xvfb source commit failed: {error:#}");
+                                        let _ = ack.send(Err(error));
                                         continue;
                                     }
-                                    // New source confirmed sent — NOW drop the old handle.
                                     if let Some(h) = xvfb_handle.take() {
                                         drop(h);
                                     }
@@ -519,7 +624,7 @@ async fn main() -> Result<()> {
                                     active_xvfb_shell = Some(command.clone());
                                     active_xvfb_argv = None;
                                     info!(
-                                        "Switched to xvfb mode: {} ({}fps)",
+                                        "Switched to xvfb mode: {} ({}fps, gen {generation})",
                                         command, xvfb_tick_rate_cfg
                                     );
                                     let _ = ack.send(Ok(()));
@@ -533,17 +638,29 @@ async fn main() -> Result<()> {
                             }
                         }
                         ModeChange::XvfbArgv { argv, ack } => {
-                            // Argv-based launch (no shell). SDL_VIDEODRIVER=x11 is injected
-                            // unconditionally by start_argv — no per-variant env_extra needed.
-                            // Mirror the Xvfb arm: start FIRST, drop old handle only after
-                            // new source is confirmed sent to the tick loop.
-                            let mode_display = *display_rx.borrow();
+                            let mode_display = if current_display.width() > 0 {
+                                current_display
+                            } else {
+                                RuntimeDisplayDimensions::new(480, 480)
+                            };
+                            let generation = *generation_rx_listener.borrow();
+                            if generation == 0 {
+                                let _ = ack.send(Err(anyhow::anyhow!(
+                                    "cannot start xvfb while disconnected"
+                                )));
+                                continue;
+                            }
                             match mode_display.start_xvfb_argv(&argv) {
                                 Ok((new_handle, source)) => {
-                                    if source_tx.send(Box::new(source)).await.is_err() {
-                                        let msg = "Failed to send argv xvfb frame source to tick loop — receiver dropped".to_string();
-                                        log::warn!("{}", msg);
-                                        let _ = ack.send(Err(anyhow::anyhow!("{}", msg)));
+                                    if let Err(error) = commit_frame_source(
+                                        &source_result_tx,
+                                        generation,
+                                        Box::new(source),
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Xvfb argv source commit failed: {error:#}");
+                                        let _ = ack.send(Err(error));
                                         continue;
                                     }
                                     if let Some(h) = xvfb_handle.take() {
@@ -555,7 +672,7 @@ async fn main() -> Result<()> {
                                     active_xvfb_shell = None;
                                     active_xvfb_argv = Some(argv.clone());
                                     info!(
-                                        "Switched to xvfb mode (argv): {:?} ({}fps)",
+                                        "Switched to xvfb mode (argv): {:?} ({}fps, gen {generation})",
                                         argv, xvfb_tick_rate_cfg
                                     );
                                     let _ = ack.send(Ok(()));
@@ -583,20 +700,25 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         res = tick::run_tick_loop(
-            transport.as_mut(),
+            transport,
+            device_info,
+            connector,
             initial_frame_source,
-            &mut source_rx,
+            source_build_tx,
+            &mut source_result_rx,
             &mut sensor_hub,
             active_tick_rate,
             jpeg_quality,
             rotation,
             template_rx,
             background_rx,
+            &mut background_apply_rx,
             shutdown_rx,
             initial_sensor_history,
             sensor_poll_interval,
             connected_tx,
             display_tx,
+            generation_tx,
             tick_rate_rx,
         ) => { res?; }
         _ = tokio::signal::ctrl_c() => {
@@ -610,7 +732,6 @@ async fn main() -> Result<()> {
     // Signal the tick loop to stop (no-op if it already exited normally)
     let _ = state.lock().await.shutdown_tx.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    transport.close();
     info!("thermalwriter shutdown complete");
     Ok(())
 }

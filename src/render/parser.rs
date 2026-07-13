@@ -93,7 +93,31 @@ pub struct Element {
 }
 
 /// Parse an HTML string (our subset) into an element tree.
+/// Strip Tera comments `{# ... #}` (including multi-line) used as layout frontmatter.
+pub fn strip_tera_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("{#") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start + 2..].find("#}") {
+            rest = &rest[start + 2 + end + 2..];
+            if let Some(stripped) = rest.strip_prefix('\n') {
+                rest = stripped;
+            } else if let Some(stripped) = rest.strip_prefix("\r\n") {
+                rest = stripped;
+            }
+        } else {
+            out.push_str(rest);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn parse_html(html: &str) -> anyhow::Result<Element> {
+    let stripped = strip_tera_comments(html);
+    let html = stripped.as_str();
     let html = html.trim();
     let mut parser = HtmlParser::new(html);
     parser.parse_element()

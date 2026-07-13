@@ -1,0 +1,27 @@
+{# canvas: responsive #}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
+  <rect width="100%" height="100%" fill="{{ theme_background }}"/>
+
+  {% set m = token_margin %}
+  <rect x="{{ m }}" y="{{ m }}" width="{{ width - m * 2 }}" height="{{ height - m * 2 }}"
+        fill="none" stroke="#3a3a50" stroke-width="2" stroke-dasharray="6 4"/>
+
+  {% set short = width %}
+  {% if height < width %}{% set short = height %}{% endif %}
+  {% set cx = width / 2 %}
+  {% set cy = height / 2 %}
+  {% set r = short * 0.18 %}
+  <circle cx="{{ cx }}" cy="{{ cy }}" r="{{ r }}" fill="none" stroke="#00e5ff" stroke-width="3"/>
+  <rect x="{{ cx - r * 0.7 }}" y="{{ cy - r * 0.7 }}" width="{{ r * 1.4 }}" height="{{ r * 1.4 }}"
+        fill="none" stroke="#ff00aa" stroke-width="2"/>
+
+  {% set fs = token_medium %}
+  {% if fs < 28 %}{% set fs = 28 %}{% endif %}
+  <text x="{{ m + 4 }}" y="{{ m + fs }}" fill="#ff3333" font-size="{{ fs }}" font-family="DejaVu Sans Mono, monospace">TL</text>
+  <text x="{{ width - m - 4 }}" y="{{ m + fs }}" fill="#33ff33" font-size="{{ fs }}" font-family="DejaVu Sans Mono, monospace" text-anchor="end">TR</text>
+  <text x="{{ m + 4 }}" y="{{ height - m - 4 }}" fill="#3333ff" font-size="{{ fs }}" font-family="DejaVu Sans Mono, monospace">BL</text>
+  <text x="{{ width - m - 4 }}" y="{{ height - m - 4 }}" fill="#ffff33" font-size="{{ fs }}" font-family="DejaVu Sans Mono, monospace" text-anchor="end">BR</text>
+
+  <text x="{{ cx }}" y="{{ cy + fs * 0.35 }}" fill="#e0e0ff" font-size="{{ fs }}" font-family="DejaVu Sans Mono, monospace" text-anchor="middle">{{ width }}x{{ height }}</text>
+  <text x="{{ cx }}" y="{{ cy + fs * 1.4 }}" fill="#8888aa" font-size="{{ token_small }}" font-family="DejaVu Sans Mono, monospace" text-anchor="middle">{{ shape }}</text>
+</svg>

@@ -72,6 +72,13 @@ pub fn clear_frame(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("last.jpg.tmp"));
 }
 
+/// Clear the published frame only when an installed source leaves streaming mode.
+pub fn clear_frame_on_stream_exit(dir: &Path, was_streaming: bool, is_streaming: bool) {
+    if was_streaming && !is_streaming {
+        clear_frame(dir);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +243,34 @@ mod tests {
         let dir = tmp.path().join("tw_test_e_nonexistent");
         // Should not panic even if dir or file doesn't exist
         clear_frame(&dir);
+    }
+
+    #[test]
+    fn stream_exit_clears_published_files_only_on_true_to_false_transition() {
+        for (was_streaming, is_streaming, should_exist) in [
+            (false, false, true),
+            (false, true, true),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("transition");
+            write_frame_atomic(&dir, b"published").unwrap();
+            let tmp_path = dir.join("last.jpg.tmp");
+            std::fs::write(&tmp_path, b"partial").unwrap();
+
+            clear_frame_on_stream_exit(&dir, was_streaming, is_streaming);
+
+            assert_eq!(
+                frame_path(&dir).exists(),
+                should_exist,
+                "{was_streaming}->{is_streaming} last.jpg state"
+            );
+            assert_eq!(
+                tmp_path.exists(),
+                should_exist,
+                "{was_streaming}->{is_streaming} temp state"
+            );
+        }
     }
 }

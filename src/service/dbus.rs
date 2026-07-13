@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, oneshot, watch};
 use zbus::{interface, object_server::SignalEmitter};
 
 use crate::config::Config;
+use crate::render::background::BackgroundImage;
 use crate::render::frontmatter::LayoutFrontmatter;
 
 /// Message sent through the mode change channel to switch display modes.
@@ -56,7 +57,7 @@ pub enum ModeChange {
     },
     /// Set or clear the global background image.
     Background {
-        image: Option<Arc<tiny_skia::Pixmap>>,
+        image: Option<Arc<BackgroundImage>>,
         /// Confirmation channel: listener sends Ok once the background is
         /// applied to the tick loop. Callers that don't need confirmation
         /// may drop this sender by passing `oneshot::channel().0`.
@@ -117,7 +118,7 @@ pub struct ServiceState {
     /// Used by start_stream_preset to build absolute config paths for preset argv.
     pub wrapper_dir: PathBuf,
     /// Currently active decoded background pixmap (premultiplied RGBA 480x480).
-    pub current_background: Option<Arc<tiny_skia::Pixmap>>,
+    pub current_background: Option<Arc<BackgroundImage>>,
     /// Serializes all writes to config.toml so concurrent D-Bus calls don't lose
     /// each other's edits (each writer does a read-modify-write cycle).
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -900,7 +901,6 @@ impl DisplayInterface {
 
     /// Set the global background image by filename (must exist in background_dir).
     async fn set_background(&self, name: String) -> zbus::fdo::Result<()> {
-        // Clone handles out of the state lock, then release before heavy work.
         let (bg_lock, write_lock, background_dir, config_path, tx) = {
             let state = self.state.lock().await;
             (
@@ -913,53 +913,70 @@ impl DisplayInterface {
         };
 
         let bg_path = validate_background_path(&background_dir, &name)?;
-
-        // Serialize the full body so concurrent callers cannot interleave their
-        // disk writes and channel sends (which would leave them out of sync).
         let _bg_guard = bg_lock.lock().await;
 
-        // CPU-bound decode + Lanczos3 resize on a blocking thread — 50-200 ms.
-        let pixmap = tokio::task::spawn_blocking(move || {
-            crate::render::background::decode_from_file(&bg_path)
+        let image = tokio::task::spawn_blocking(move || {
+            crate::render::background::load_background(&bg_path)
         })
         .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("decode task panicked: {}", e)))?
+        .map_err(|e| zbus::fdo::Error::Failed(format!("decode task panicked: {e}")))?
         .map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Failed to decode background '{}': {}", name, e))
+            zbus::fdo::Error::Failed(format!("Failed to decode background '{name}': {e}"))
         })?;
 
-        // Serialize the disk write alongside all other config writers.
+        let prior_image = {
+            let state = self.state.lock().await;
+            state.config.background.image.clone()
+        };
         {
             let _write_guard = write_lock.lock().await;
             Config::save_background_image(&config_path, Some(&name)).map_err(|e| {
-                zbus::fdo::Error::Failed(format!("Failed to persist background image: {}", e))
+                zbus::fdo::Error::Failed(format!("Failed to persist background image: {e}"))
             })?;
         }
 
-        // Signal the tick loop (still inside bg_guard, so channel send is ordered).
-        // Throwaway ack: bg_guard + disk write already serialize correctness; no
-        // need to block here on tick-loop confirmation.
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        let pixmap_arc = Arc::new(pixmap);
-        tx.send(ModeChange::Background {
-            image: Some(pixmap_arc.clone()),
-            ack: ack_tx,
-        })
-        .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
-
-        // Brief commit lock: update in-memory state mirror.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let image_arc = Arc::new(image);
+        if tx
+            .send(ModeChange::Background {
+                image: Some(image_arc.clone()),
+                ack: ack_tx,
+            })
+            .await
+            .is_err()
         {
-            let mut state = self.state.lock().await;
-            state.current_background = Some(pixmap_arc);
-            state.config.background.image = Some(name);
+            let _write_guard = write_lock.lock().await;
+            let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+            return Err(zbus::fdo::Error::Failed(
+                "Failed to notify tick loop of background change".into(),
+            ));
         }
-        Ok(())
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                let mut state = self.state.lock().await;
+                state.current_background = Some(image_arc);
+                state.config.background.image = Some(name);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let _write_guard = write_lock.lock().await;
+                let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+                Err(zbus::fdo::Error::Failed(format!(
+                    "Background apply failed: {e}"
+                )))
+            }
+            Err(_) => {
+                let _write_guard = write_lock.lock().await;
+                let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+                Err(zbus::fdo::Error::Failed(
+                    "Background apply ack dropped".into(),
+                ))
+            }
+        }
     }
 
     /// Clear the global background image.
     async fn clear_background(&self) -> zbus::fdo::Result<()> {
-        // Clone handles out of the state lock, then release before disk I/O.
         let (bg_lock, write_lock, config_path, tx) = {
             let state = self.state.lock().await;
             (
@@ -970,34 +987,55 @@ impl DisplayInterface {
             )
         };
 
-        // Serialize against concurrent set_background calls.
         let _bg_guard = bg_lock.lock().await;
-
-        // Serialize the disk write alongside all other config writers.
+        let prior_image = {
+            let state = self.state.lock().await;
+            state.config.background.image.clone()
+        };
         {
             let _write_guard = write_lock.lock().await;
             Config::save_background_image(&config_path, None).map_err(|e| {
-                zbus::fdo::Error::Failed(format!("Failed to clear background: {}", e))
+                zbus::fdo::Error::Failed(format!("Failed to clear background: {e}"))
             })?;
         }
 
-        // Signal the tick loop (still inside bg_guard). Throwaway ack — same
-        // rationale as set_background: bg_guard already serializes correctness.
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        tx.send(ModeChange::Background {
-            image: None,
-            ack: ack_tx,
-        })
-        .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {}", e)))?;
-
-        // Brief commit lock: update in-memory state mirror.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if tx
+            .send(ModeChange::Background {
+                image: None,
+                ack: ack_tx,
+            })
+            .await
+            .is_err()
         {
-            let mut state = self.state.lock().await;
-            state.current_background = None;
-            state.config.background.image = None;
+            let _write_guard = write_lock.lock().await;
+            let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+            return Err(zbus::fdo::Error::Failed(
+                "Failed to notify tick loop of background clear".into(),
+            ));
         }
-        Ok(())
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                let mut state = self.state.lock().await;
+                state.current_background = None;
+                state.config.background.image = None;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let _write_guard = write_lock.lock().await;
+                let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+                Err(zbus::fdo::Error::Failed(format!(
+                    "Background clear apply failed: {e}"
+                )))
+            }
+            Err(_) => {
+                let _write_guard = write_lock.lock().await;
+                let _ = Config::save_background_image(&config_path, prior_image.as_deref());
+                Err(zbus::fdo::Error::Failed(
+                    "Background clear apply ack dropped".into(),
+                ))
+            }
+        }
     }
 
     /// List available background image filenames in the background directory.
@@ -1164,6 +1202,7 @@ mod tests {
                 jpeg_quality: 85,
                 rotation: 180,
                 mode: "svg".to_string(),
+                device: "auto".to_string(),
             },
             xvfb: XvfbConfig {
                 command: String::new(),

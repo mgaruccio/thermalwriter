@@ -6,7 +6,7 @@ use fontdue::{Font, FontSettings};
 use std::io::Cursor;
 use std::thread;
 use std::time::Duration;
-use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::transport::{EncodedFrame, FrameEncoding, discovery::TransportConnector};
 use tiny_skia::*;
 
 const WIDTH: u32 = 480;
@@ -192,16 +192,21 @@ fn main() -> Result<()> {
 
     // Open device
     println!("Opening device...");
-    let mut transport = BulkUsb::new()?;
-    let info = transport.handshake()?;
-    println!("Device: {}x{}, PM={}", info.width, info.height, info.pm);
+    let connector = TransportConnector::from_config_device("auto")?;
+    let (mut transport, info) = connector.connect()?;
+    println!("Device: {}x{}, PM={}", info.width(), info.height(), info.pm);
 
     // Continuously send for 30 seconds
     println!("Sending frames continuously for 30 seconds — go look at the display!");
     let start = std::time::Instant::now();
     let mut count = 0u32;
     while start.elapsed() < Duration::from_secs(30) {
-        transport.send_frame(&jpeg)?;
+        transport.send_frame(&EncodedFrame {
+            data: jpeg.clone(),
+            width: info.width(),
+            height: info.height(),
+            encoding: FrameEncoding::Jpeg,
+        })?;
         count += 1;
         thread::sleep(Duration::from_millis(500));
     }

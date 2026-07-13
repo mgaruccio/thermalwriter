@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::render::FrameSource;
 use crate::render::TemplateRenderer;
+use crate::render::background::BackgroundImage;
 use crate::render::frontmatter::LayoutFrontmatter;
 use crate::render::svg::SvgRenderer;
 #[cfg(feature = "daemon")]
@@ -43,7 +44,7 @@ impl RuntimeDisplayDimensions {
         self,
         layout_path: &Path,
         vars: HashMap<String, String>,
-        background: Option<Arc<tiny_skia::Pixmap>>,
+        background: Option<Arc<BackgroundImage>>,
         sensor_history: Option<Arc<Mutex<SensorHistory>>>,
         theme: ThemePalette,
     ) -> anyhow::Result<Box<dyn FrameSource>> {
@@ -84,7 +85,7 @@ impl RuntimeDisplayDimensions {
 pub fn build_layout_source(
     layout_path: &Path,
     vars: HashMap<String, String>,
-    background: Option<Arc<tiny_skia::Pixmap>>,
+    background: Option<Arc<BackgroundImage>>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     theme: ThemePalette,
     width: u32,
@@ -122,7 +123,7 @@ pub fn build_layout_source(
             renderer.set_history(hist.clone());
         }
         renderer.set_layout_vars(vars);
-        renderer.set_background(background);
+        renderer.set_background(background)?;
         Ok(Box::new(renderer))
     } else {
         let renderer = TemplateRenderer::new(&template, width, height).map_err(|e| {

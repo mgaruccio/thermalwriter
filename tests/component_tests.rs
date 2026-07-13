@@ -204,6 +204,29 @@ fn background_pattern_grid_emits_svg_pattern() {
 }
 
 #[test]
+fn documented_background_sample_covers_responsive_canvas() {
+    let mut tera = Tera::default();
+    thermalwriter::render::components::register_all(&mut tera);
+
+    let mut context = Context::new();
+    context.insert("width", &1920);
+    context.insert("height", &462);
+    let template =
+        r##"{{ background(pattern="grid", color="#ffffff08", spacing=24, w=width, h=height) }}"##;
+    assert!(
+        include_str!("../skills/designing-layouts/SKILL.md").contains(template),
+        "layout guidance must pass responsive width and height to background()"
+    );
+    tera.add_raw_template("test.svg", template).unwrap();
+    let result = tera.render("test.svg", &context).unwrap();
+
+    assert!(
+        result.contains(r#"<rect x="0" y="0" width="1920" height="462""#),
+        "responsive background must cover the full negotiated canvas: {result}"
+    );
+}
+
+#[test]
 fn background_image_emits_base64_image_tag() {
     let mut tera = Tera::default();
     thermalwriter::render::components::register_all(&mut tera);

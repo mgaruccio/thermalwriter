@@ -23,9 +23,8 @@ use thermalwriter::sensor::mock::{mock_sensors, mock_sensors_varying};
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
-use thermalwriter::service::tick::encode_jpeg;
 use thermalwriter::theme::ThemePalette;
-use thermalwriter::transport::{Transport, bulk_usb::BulkUsb};
+use thermalwriter::transport::{discovery::TransportConnector, encode::encode_frame};
 
 /// Returns (content, display_name, is_svg).
 fn load_template(name_or_path: &str) -> Result<(String, String, bool)> {
@@ -176,14 +175,20 @@ fn main() -> Result<()> {
     frame.save_png(&png_path)?;
     println!("\nSaved preview: {}", png_path);
 
-    let jpeg_data = encode_jpeg(&frame, 85, 180)?;
-    println!("JPEG encoded: {} bytes (rotated 180°)", jpeg_data.len());
-
     // Open device and send continuously
     println!("\nOpening device...");
-    let mut transport = BulkUsb::new()?;
-    let info = transport.handshake()?;
-    println!("Device: {}x{}, PM={}", info.width, info.height, info.pm);
+    let connector = TransportConnector::from_config_device("auto")?;
+    let (mut transport, info) = connector.connect()?;
+    println!(
+        "Device: {}x{} PM={} SUB={} FBL={} {} encoding={}",
+        info.width(),
+        info.height(),
+        info.pm,
+        info.sub,
+        info.fbl,
+        info.protocol,
+        info.encoding()
+    );
 
     let mode = if use_mock { "mock" } else { "live" };
     println!(
@@ -207,7 +212,7 @@ fn main() -> Result<()> {
         }
 
         let frame = renderer.render(&sensors)?;
-        let jpeg_data = encode_jpeg(&frame, 85, 180)?;
+        let jpeg_data = encode_frame(&frame, &info, 180, 85)?;
         transport.send_frame(&jpeg_data)?;
         thread::sleep(Duration::from_millis(500));
         iteration += 1;

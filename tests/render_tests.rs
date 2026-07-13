@@ -378,7 +378,7 @@ fn decode_resizes_non_480_input_to_480() {
 #[test]
 fn svg_renderer_composites_background_under_transparent_layout() {
     let bg_bytes = make_solid_color_png(480, 480, 255, 0, 0); // solid red
-    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
+    let bg = thermalwriter::render::background::BackgroundImage::decode(&bg_bytes).unwrap();
 
     // No canvas-fill rect — layout canvas is transparent except for text
     let template = r##"<svg viewBox="0 0 480 480" xmlns="http://www.w3.org/2000/svg">
@@ -386,7 +386,7 @@ fn svg_renderer_composites_background_under_transparent_layout() {
     </svg>"##;
 
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
-    renderer.set_background(Some(Arc::new(bg)));
+    renderer.set_background(Some(Arc::new(bg))).unwrap();
 
     let frame = renderer.render(&Default::default()).unwrap();
     // Top-left pixel (0,0): no text there, so bg red shows through
@@ -531,8 +531,8 @@ fn frame_source_set_background_applies_to_running_renderer() {
 
     // Apply background via trait method — same path the tick loop uses
     let bg_bytes = make_solid_color_png(480, 480, 0, 255, 0); // solid green
-    let bg = thermalwriter::render::background::decode_to_pixmap(&bg_bytes).unwrap();
-    source.set_background(Some(Arc::new(bg)));
+    let bg = thermalwriter::render::background::BackgroundImage::decode(&bg_bytes).unwrap();
+    source.set_background(Some(Arc::new(bg))).unwrap();
 
     // After: green background shows through transparent canvas at (0,0)
     let frame_after = source.render(&Default::default()).unwrap();
@@ -544,7 +544,7 @@ fn frame_source_set_background_applies_to_running_renderer() {
     assert_eq!(frame_after.data[2], 0, "B after: should be 0 (green bg)");
 
     // Clear background — pixel (0,0) returns to black
-    source.set_background(None);
+    source.set_background(None).unwrap();
     let frame_cleared = source.render(&Default::default()).unwrap();
     assert_eq!(
         frame_cleared.data[0], 8,

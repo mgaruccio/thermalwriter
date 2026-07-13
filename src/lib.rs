@@ -2,6 +2,7 @@
 pub mod cli;
 pub mod config;
 pub mod dbus_types;
+pub mod display_geometry;
 pub mod render;
 pub mod sensor;
 #[cfg(feature = "daemon")]
