@@ -28,17 +28,17 @@
   {% else %}
   <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ content_h }}px; gap: {{ g }}px;">
   {% endif %}
-    <div style="display: flex; flex-direction: column; width: {{ hero_w }}px; height: {{ hero_card_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+    <div style="display: flex; flex-direction: column; width: {{ hero_w }}px; height: {{ hero_card_h }}px; background: #151525; padding: {{ p }}px; box-sizing: border-box; justify-content: center; align-items: center;">
       <span style="width: {{ hero_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">TEMPERATURE</span>
       <span style="width: {{ hero_w - p - p }}px; height: {{ hero_h }}px; font-size: {{ token_hero }}px; color: #ff2e9f; text-align: center;">{{ gpu_temp | default(value="--") }}°C</span>
     </div>
 
     <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {% if is_portrait %}{{ detail_h + detail_h + g }}{% else %}{{ content_h }}{% endif %}px; gap: {{ g }}px;">
-      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; box-sizing: border-box; justify-content: center; align-items: center;">
         <span style="width: {{ detail_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">UTILIZATION</span>
         <span style="width: {{ detail_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
       </div>
-      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ detail_w }}px; height: {{ detail_h }}px; background: #151525; padding: {{ p }}px; box-sizing: border-box; justify-content: center; align-items: center;">
         <span style="width: {{ detail_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">VRAM</span>
         <span style="width: {{ detail_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #00e5ff; text-align: center;">{{ vram_used | default(value="--") }}G</span>
       </div>
