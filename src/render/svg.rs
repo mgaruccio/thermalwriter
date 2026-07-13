@@ -802,6 +802,72 @@ mod tests {
     }
 
     #[test]
+    fn cyber_grid_uses_short_axis_for_compact_typography_and_positions() {
+        let render = |width, height| {
+            let template = include_str!("../../layouts/svg/cyber-grid.svg");
+            let mut renderer =
+                SvgRenderer::new(template, width, height).expect("valid cyber grid SVG template");
+            renderer.set_theme(ThemePalette::default());
+            let context = renderer.build_context(&SensorData::new());
+            renderer
+                .render_template(&context)
+                .expect("cyber grid template renders")
+        };
+
+        let assert_needle = |rendered: &str, needle: &str| {
+            assert_eq!(rendered.matches(needle).count(), 1, "{rendered}");
+        };
+
+        for (width, height) in [(640, 240), (960, 320), (320, 240)] {
+            let compact = render(width, height);
+            assert_eq!(
+                compact.matches(r#"font-size="20""#).count(),
+                12,
+                "{compact}"
+            );
+            assert_needle(
+                &compact,
+                r#"x="88" y="392" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+            );
+            assert_needle(
+                &compact,
+                r#"x="392" y="392" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+            );
+            assert_needle(
+                &compact,
+                r#"x="88" y="428" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+            );
+            assert_needle(
+                &compact,
+                r#"x="392" y="428" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+            );
+        }
+
+        let canonical = render(854, 480);
+        assert_eq!(
+            canonical.matches(r#"font-size="20""#).count(),
+            2,
+            "{canonical}"
+        );
+        assert_needle(
+            &canonical,
+            r#"x="56" y="400" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+        );
+        assert_needle(
+            &canonical,
+            r#"x="424" y="400" font-family="DejaVu Sans Mono, monospace" font-size="20""#,
+        );
+        assert_needle(
+            &canonical,
+            r#"x="56" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9""#,
+        );
+        assert_needle(
+            &canonical,
+            r#"x="424" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9""#,
+        );
+    }
+
+    #[test]
     fn runtime_geometry_cannot_be_overridden_by_layout_variables() {
         let template = r#"{# canvas: responsive #}
 {# vars:

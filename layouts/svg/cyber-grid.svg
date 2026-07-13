@@ -11,6 +11,7 @@ ram_label: text = "RAM" "Memory label"
 vram_label: text = "VRAM" "Video memory label"
 #}
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
+  {% set use_compact_typography = width <= 320 or height <= 320 %}
   <defs>
     <linearGradient id="hotGrad" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="{{ cpu_color }}"/>
@@ -57,49 +58,49 @@ vram_label: text = "VRAM" "Video memory label"
   <line x1="0" y1="340" x2="480" y2="340" stroke="#111122" stroke-width="1"/>
 
   <!-- ===== CPU Section ===== -->
-  <text x="32" y="40" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}12{% endif %}" fill="{{ cpu_color }}" letter-spacing="4">{{ cpu_label }}</text>
+  <text x="32" y="40" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}12{% endif %}" fill="{{ cpu_color }}" letter-spacing="4">{{ cpu_label }}</text>
   <line x1="32" y1="50" x2="200" y2="50" stroke="#ff336644" stroke-width="1"/>
 
   <!-- CPU Temp — large hero number -->
   <text x="32" y="116" font-family="DejaVu Sans Mono, monospace" font-size="72" fill="url(#hotGrad)" font-weight="bold">{{ cpu_temp | default(value="--") }}°</text>
-  <text x="320" y="100" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
+  <text x="320" y="100" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
 
   <!-- CPU Utilization bar -->
   <rect x="32" y="140" width="416" height="18" rx="4" fill="url(#barBg)"/>
   <rect x="32" y="140" width="416" height="18" rx="4" fill="url(#hotGrad)" clip-path="url(#cpuBar)" opacity="0.8"/>
-  <text x="448" y="155" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="#ff8899" text-anchor="end">{{ cpu_util | default(value="--") }}%</text>
+  <text x="448" y="155" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="#ff8899" text-anchor="end">{{ cpu_util | default(value="--") }}%</text>
 
   <!-- ===== GPU Section ===== -->
-  <text x="32" y="210" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}12{% endif %}" fill="{{ gpu_color }}" letter-spacing="4">{{ gpu_label }}</text>
+  <text x="32" y="210" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}12{% endif %}" fill="{{ gpu_color }}" letter-spacing="4">{{ gpu_label }}</text>
   <line x1="32" y1="220" x2="200" y2="220" stroke="#3366ff44" stroke-width="1"/>
 
   <!-- GPU Temp — large hero number -->
   <text x="32" y="286" font-family="DejaVu Sans Mono, monospace" font-size="72" fill="url(#coldGrad)" font-weight="bold">{{ gpu_temp | default(value="--") }}°</text>
-  <text x="320" y="270" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
-  <text x="448" y="270" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}18{% endif %}" fill="#9966cc" text-anchor="end">{{ gpu_power | default(value="--") }}W</text>
+  <text x="320" y="270" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="{{ dim_color }}" text-anchor="end">{{ temp_label }}</text>
+  <text x="448" y="270" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}18{% endif %}" fill="#9966cc" text-anchor="end">{{ gpu_power | default(value="--") }}W</text>
 
   <!-- GPU Utilization bar -->
   <rect x="32" y="310" width="416" height="18" rx="4" fill="url(#barBg)"/>
   <rect x="32" y="310" width="416" height="18" rx="4" fill="url(#coldGrad)" clip-path="url(#gpuBar)" opacity="0.8"/>
-  <text x="448" y="325" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}14{% endif %}" fill="#77bbff" text-anchor="end">{{ gpu_util | default(value="--") }}%</text>
+  <text x="448" y="325" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="#77bbff" text-anchor="end">{{ gpu_util | default(value="--") }}%</text>
 
   <!-- ===== Bottom Stats ===== -->
   <!-- FPS — center hero -->
   <text x="240" y="415" font-family="DejaVu Sans Mono, monospace" font-size="52" fill="url(#greenGrad)"
         text-anchor="middle" font-weight="bold">{{ fps | default(value="--") }}</text>
-  <text x="240" y="438" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}11{% endif %}" fill="#88aa99"
+  <text x="240" y="438" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}11{% endif %}" fill="#88aa99"
         text-anchor="middle">{{ frametime | default(value="--") }}ms</text>
 
   <!-- RAM — left -->
-  <text x="{% if width <= 320 %}88{% else %}56{% endif %}" y="{% if width <= 320 %}392{% else %}400{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
+  <text x="{% if use_compact_typography %}88{% else %}56{% endif %}" y="{% if use_compact_typography %}392{% else %}400{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
         text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
-  <text x="{% if width <= 320 %}88{% else %}56{% endif %}" y="{% if width <= 320 %}428{% else %}418{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}9{% endif %}" fill="{{ dim_color }}"
+  <text x="{% if use_compact_typography %}88{% else %}56{% endif %}" y="{% if use_compact_typography %}428{% else %}418{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}9{% endif %}" fill="{{ dim_color }}"
         text-anchor="middle">{{ ram_label }} / {{ ram_total | default(value="--") }}G</text>
 
   <!-- VRAM — right -->
-  <text x="{% if width <= 320 %}392{% else %}424{% endif %}" y="{% if width <= 320 %}392{% else %}400{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
+  <text x="{% if use_compact_typography %}392{% else %}424{% endif %}" y="{% if use_compact_typography %}392{% else %}400{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="20" fill="#cc99ff"
         text-anchor="middle">{{ vram_used | default(value="--") }}G</text>
-  <text x="{% if width <= 320 %}392{% else %}424{% endif %}" y="{% if width <= 320 %}428{% else %}418{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="{% if width <= 320 %}20{% else %}9{% endif %}" fill="{{ dim_color }}"
+  <text x="{% if use_compact_typography %}392{% else %}424{% endif %}" y="{% if use_compact_typography %}428{% else %}418{% endif %}" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}9{% endif %}" fill="{{ dim_color }}"
         text-anchor="middle">{{ vram_label }} / {{ vram_total | default(value="--") }}G</text>
 
   <!-- Corner accents -->
