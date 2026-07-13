@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::{FrameSource, RawFrame, SensorData};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
-use thermalwriter::service::tick::{BackgroundApply, SourceBuildRequest, SourceBuildResult};
+use thermalwriter::service::tick::{
+    BackgroundApply, SourceBuildRequest, SourceBuildResult, SourceRevisionApply,
+};
 use thermalwriter::transport::discovery::TransportConnector;
 use thermalwriter::transport::{
     DeviceInfo, EncodedFrame, Transport, WireProtocol, build_device_info,
@@ -218,6 +220,9 @@ async fn run_mock_tick(
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     generation_tx: tokio::sync::watch::Sender<u64>,
+    mut source_revision_rx: tokio::sync::mpsc::Receiver<
+        thermalwriter::service::tick::SourceRevisionApply,
+    >,
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
 ) {
@@ -229,7 +234,6 @@ async fn run_mock_tick(
         frames_sent,
         connected: true,
     }));
-    let (_source_revision_tx, mut source_revision_rx) = tokio::sync::mpsc::channel(4);
     run_tick_loop(
         transport,
         Some(bulk_info()),
@@ -272,6 +276,42 @@ fn spawn_tick(
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
 ) -> tokio::task::JoinHandle<()> {
+    let (_source_revision_tx, source_revision_rx) = tokio::sync::mpsc::channel(4);
+    spawn_tick_with_source_revision(
+        frames_sent,
+        source_build_tx,
+        source_result_rx,
+        template_rx,
+        bg_rx,
+        bg_apply_rx,
+        shutdown_rx,
+        connected_tx,
+        display_tx,
+        generation_tx,
+        source_revision_rx,
+        tick_rate_rx,
+        fps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_tick_with_source_revision(
+    frames_sent: Arc<AtomicU32>,
+    source_build_tx: tokio::sync::mpsc::Sender<SourceBuildRequest>,
+    source_result_rx: tokio::sync::mpsc::Receiver<SourceBuildResult>,
+    template_rx: tokio::sync::watch::Receiver<String>,
+    bg_rx: tokio::sync::watch::Receiver<Option<Arc<BackgroundImage>>>,
+    bg_apply_rx: tokio::sync::mpsc::Receiver<BackgroundApply>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    connected_tx: tokio::sync::watch::Sender<bool>,
+    display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    generation_tx: tokio::sync::watch::Sender<u64>,
+    source_revision_rx: tokio::sync::mpsc::Receiver<
+        thermalwriter::service::tick::SourceRevisionApply,
+    >,
+    tick_rate_rx: tokio::sync::watch::Receiver<u32>,
+    fps: u32,
+) -> tokio::task::JoinHandle<()> {
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -293,6 +333,7 @@ fn spawn_tick(
                     connected_tx,
                     display_tx,
                     generation_tx,
+                    source_revision_rx,
                     tick_rate_rx,
                     fps,
                 )
@@ -575,16 +616,39 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
-    let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
+    let (generation_tx, _generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
     let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
+    let (source_revision_tx, source_revision_rx) = tokio::sync::mpsc::channel(4);
     let helper = tokio::spawn(source_build_helper(
         source_build_rx,
         source_result_tx.clone(),
     ));
+    let generation = 1;
 
-    let handle = spawn_tick(
+    let (old_commit_tx, old_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(MockFrameSource)),
+            source_revision: 1,
+            commit: Some(old_commit_tx),
+        })
+        .await
+        .expect("queue stale source");
+
+    let (revision_ack_tx, revision_ack_rx) = tokio::sync::oneshot::channel();
+    source_revision_tx
+        .send(SourceRevisionApply {
+            revision: 2,
+            reset_connection: false,
+            ack: revision_ack_tx,
+        })
+        .await
+        .expect("send source revision apply");
+
+    let handle = spawn_tick_with_source_revision(
         frames_sent,
         source_build_tx,
         source_result_rx,
@@ -595,21 +659,22 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
         connected_tx,
         display_tx,
         generation_tx,
+        source_revision_rx,
         tick_rate_rx,
         20,
     );
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if *generation_rx.borrow() >= 1 {
-                break;
-            }
-            generation_rx.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("generation commit timed out");
-    let generation = *generation_rx.borrow();
+    let revision_ack = tokio::time::timeout(std::time::Duration::from_secs(2), revision_ack_rx)
+        .await
+        .expect("source revision acknowledgement timed out")
+        .expect("source revision acknowledgement channel closed");
+    assert_eq!(revision_ack, Ok(()));
+
+    let old_commit = tokio::time::timeout(std::time::Duration::from_secs(2), old_commit_rx)
+        .await
+        .expect("stale source commit timed out")
+        .expect("stale source commit channel closed");
+    assert!(old_commit.is_err());
 
     let (new_template_tx, new_template_rx) = tokio::sync::oneshot::channel();
     let (new_commit_tx, new_commit_rx) = tokio::sync::oneshot::channel();
@@ -629,22 +694,6 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
         .expect("newer source commit timed out")
         .expect("newer source commit channel closed");
     assert_eq!(new_commit, Ok(()));
-
-    let (old_commit_tx, old_commit_rx) = tokio::sync::oneshot::channel();
-    source_result_tx
-        .send(SourceBuildResult {
-            generation,
-            source: Ok(Box::new(MockFrameSource)),
-            source_revision: 1,
-            commit: Some(old_commit_tx),
-        })
-        .await
-        .expect("send stale source");
-    let old_commit = tokio::time::timeout(std::time::Duration::from_secs(2), old_commit_rx)
-        .await
-        .expect("stale source commit timed out")
-        .expect("stale source commit channel closed");
-    assert!(old_commit.is_err());
 
     template_tx
         .send("newer-template".to_owned())
