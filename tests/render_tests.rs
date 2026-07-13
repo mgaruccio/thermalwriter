@@ -40,6 +40,28 @@ fn parse_style_extracts_font_size() {
 }
 
 #[test]
+fn strip_tera_comments_preserves_unterminated_suffix() {
+    let input = "<div>before</div>{# unterminated";
+    assert_eq!(strip_tera_comments(input), input);
+}
+
+#[test]
+fn template_renderer_handles_generated_unterminated_tera_comment() {
+    let template =
+        r#"<div style="width: 480px; height: 480px; background: #010203;">{{ suffix }}</div>"#;
+    let mut renderer = TemplateRenderer::new(template, 480, 480).unwrap();
+    let sensors = HashMap::from([("suffix".to_string(), "{# trailing".to_string())]);
+
+    let frame = renderer
+        .render(&sensors)
+        .expect("generated unterminated comment should not duplicate markup");
+    assert_eq!(frame.width, 480);
+    assert_eq!(frame.height, 480);
+    assert_eq!(frame.data.len(), 480 * 480 * 3);
+    assert_eq!(&frame.data[0..3], &[0x01, 0x02, 0x03]);
+}
+
+#[test]
 fn parse_html_single_div_with_text() {
     let el = parse_html(r#"<div style="color: #fff;">Hello</div>"#).unwrap();
     assert_eq!(el.tag, "div");
