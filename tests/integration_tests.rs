@@ -1,6 +1,7 @@
 #![cfg(feature = "daemon")]
 
 use anyhow::Result;
+use serial_test::serial;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thermalwriter::render::background::BackgroundImage;
@@ -51,6 +52,26 @@ impl FrameSource for MockFrameSource {
     fn set_template(&mut self, _template: &str) {}
 }
 
+struct StreamingMockSource;
+
+impl FrameSource for StreamingMockSource {
+    fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+        Ok(RawFrame {
+            data: vec![0u8; 480 * 480 * 3],
+            width: 480,
+            height: 480,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "streaming-mock"
+    }
+
+    fn is_streaming(&self) -> bool {
+        true
+    }
+}
+
 struct TemplateTrackingSource {
     applied_tx: Option<tokio::sync::oneshot::Sender<String>>,
 }
@@ -71,6 +92,29 @@ impl FrameSource for TemplateTrackingSource {
     fn set_template(&mut self, template: &str) {
         if let Some(applied_tx) = self.applied_tx.take() {
             let _ = applied_tx.send(template.to_owned());
+        }
+    }
+}
+
+struct RuntimeDirGuard {
+    original: Option<std::ffi::OsString>,
+}
+
+impl RuntimeDirGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let original = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", path);
+        }
+        Self { original }
+    }
+}
+
+impl Drop for RuntimeDirGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
     }
 }
@@ -507,6 +551,105 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
         .expect("stale commit acknowledgement timed out")
         .expect("stale commit acknowledgement channel closed");
     assert!(stale_commit.is_err());
+    let _ = shutdown_tx.send(true);
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
+    helper.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
+    use thermalwriter::service::frame_dump;
+
+    let runtime = tempfile::tempdir().unwrap();
+    let _runtime_guard = RuntimeDirGuard::set(runtime.path());
+    let frames_sent = Arc::new(AtomicU32::new(0));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _guard = ShutdownOnDrop(shutdown_tx.clone());
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+    let (_bg_tx, bg_rx) = tokio::sync::watch::channel(None);
+    let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
+    let (connected_tx, _) = tokio::sync::watch::channel(true);
+    let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
+    let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
+    let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
+    let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
+    let helper = tokio::spawn(source_build_helper(
+        source_build_rx,
+        source_result_tx.clone(),
+    ));
+    let handle = spawn_tick(
+        frames_sent,
+        source_build_tx,
+        source_result_rx,
+        template_rx,
+        bg_rx,
+        bg_apply_rx,
+        shutdown_rx,
+        connected_tx,
+        display_tx,
+        generation_tx,
+        tick_rate_rx,
+        20,
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if *generation_rx.borrow() >= 1 {
+                break;
+            }
+            generation_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("generation commit timed out");
+    let generation = *generation_rx.borrow();
+
+    let (streaming_commit_tx, streaming_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(StreamingMockSource)),
+            commit: Some(streaming_commit_tx),
+        })
+        .await
+        .expect("send streaming source");
+    tokio::time::timeout(std::time::Duration::from_secs(2), streaming_commit_rx)
+        .await
+        .expect("streaming source commit timed out")
+        .expect("streaming source commit channel closed")
+        .expect("streaming source commit rejected");
+
+    let frame_path = frame_dump::frame_path(&runtime.path().join("thermalwriter"));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !frame_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("streaming source did not publish last.jpg");
+
+    let (replacement_commit_tx, replacement_commit_rx) = tokio::sync::oneshot::channel();
+    source_result_tx
+        .send(SourceBuildResult {
+            generation,
+            source: Ok(Box::new(MockFrameSource)),
+            commit: Some(replacement_commit_tx),
+        })
+        .await
+        .expect("send non-streaming source");
+    tokio::time::timeout(std::time::Duration::from_secs(2), replacement_commit_rx)
+        .await
+        .expect("non-streaming source commit timed out")
+        .expect("non-streaming source commit channel closed")
+        .expect("non-streaming source commit rejected");
+
+    assert!(!frame_path.exists());
+
     let _ = shutdown_tx.send(true);
     tokio::time::timeout(std::time::Duration::from_secs(2), handle)
         .await

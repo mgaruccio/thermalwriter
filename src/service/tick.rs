@@ -404,6 +404,19 @@ fn handle_source_result(
                 return;
             }
 
+            let was_streaming = frame_source.is_streaming();
+            let is_streaming = source.is_streaming();
+            if was_streaming && !is_streaming {
+                match frame_dump::frame_dir() {
+                    Ok(dir) => {
+                        frame_dump::clear_frame_on_stream_exit(&dir, was_streaming, is_streaming)
+                    }
+                    Err(error) => {
+                        warn!("Failed to locate stale stream frame for cleanup: {error:#}");
+                    }
+                }
+            }
+
             *frame_source = source;
             if pending_match {
                 let connection = pending.take().expect("pending_match");
