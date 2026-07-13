@@ -5,6 +5,11 @@
 // Source pixels are retained as straight RGBA. Rasterization to a target
 // canvas uses centered cover: crop first to the target aspect, then a single
 // Lanczos3 resize. Premultiply only on the final target pixmap.
+//
+// Rasterization accounts for the retained source, the resize sampler's
+// float intermediate, and the final target buffer as one live allocation
+// budget. The source is borrowed throughout, so no full-size clone or crop
+// buffer is needed.
 
 use anyhow::{Context, Result, anyhow, bail};
 use image::imageops::FilterType;
@@ -15,13 +20,13 @@ use tiny_skia::{IntSize, Pixmap};
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024; // 8 MB file-size pre-check
 const MAX_DIM_PX: u32 = 8192; // max decoded width or height
-const MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024; // 256 MB decoded allocation cap
+const MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024; // aggregate live rasterization cap
 
 /// Decoded background retained at source dimensions (straight RGBA).
 #[derive(Clone)]
 pub struct BackgroundImage {
     /// Straight RGBA8 source pixels.
-    rgba: Arc<Vec<u8>>,
+    rgba: Arc<RgbaImage>,
     width: u32,
     height: u32,
     /// Optional originating path for diagnostics / config restore.
@@ -52,7 +57,7 @@ impl BackgroundImage {
             bail!("background image has zero dimensions");
         }
         Ok(Self {
-            rgba: Arc::new(img.into_raw()),
+            rgba: Arc::new(img),
             width,
             height,
             source_path: None,
@@ -89,22 +94,17 @@ impl BackgroundImage {
         if target_w == 0 || target_h == 0 {
             bail!("invalid background target dimensions {target_w}x{target_h}");
         }
-        // Checked u64 width*height*4 for allocation bound.
-        let pixels = u64::from(target_w)
-            .checked_mul(u64::from(target_h))
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| anyhow!("background target size overflow {target_w}x{target_h}"))?;
-        if pixels > MAX_ALLOC_BYTES {
-            bail!("background target {target_w}x{target_h} exceeds allocation limit");
-        }
-
-        let src = RgbaImage::from_raw(self.width, self.height, (*self.rgba).clone())
-            .ok_or_else(|| anyhow!("invalid source RGBA buffer"))?;
 
         let (crop_x, crop_y, crop_w, crop_h) =
             cover_crop(self.width, self.height, target_w, target_h)?;
-        let cropped = image::imageops::crop_imm(&src, crop_x, crop_y, crop_w, crop_h).to_image();
-        let resized = image::imageops::resize(&cropped, target_w, target_h, FilterType::Lanczos3);
+        let live_bytes =
+            rasterization_alloc_bytes(self.width, self.height, crop_w, crop_h, target_w, target_h)?;
+        if live_bytes > MAX_ALLOC_BYTES {
+            bail!("background rasterization requires {live_bytes} bytes (max {MAX_ALLOC_BYTES})");
+        }
+        let src = self.rgba.as_ref();
+        let cropped = image::imageops::crop_imm(src, crop_x, crop_y, crop_w, crop_h);
+        let resized = image::imageops::resize(&*cropped, target_w, target_h, FilterType::Lanczos3);
 
         let mut data = resized.into_raw();
         // Premultiply alpha once on the target buffer.
@@ -119,6 +119,39 @@ impl BackgroundImage {
             .ok_or_else(|| anyhow!("invalid target size {target_w}x{target_h}"))?;
         Pixmap::from_vec(data, size).ok_or_else(|| anyhow!("Pixmap::from_vec rejected RGBA buffer"))
     }
+}
+
+/// Estimate the retained source, Lanczos vertical-sampling intermediate, and
+/// target RGBA buffers that coexist during rasterization.
+fn rasterization_alloc_bytes(
+    source_w: u32,
+    source_h: u32,
+    crop_w: u32,
+    crop_h: u32,
+    target_w: u32,
+    target_h: u32,
+) -> Result<u64> {
+    let source_bytes = u64::from(source_w)
+        .checked_mul(u64::from(source_h))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| anyhow!("background source size overflow {source_w}x{source_h}"))?;
+    let intermediate_bytes = if (crop_w, crop_h) == (target_w, target_h) {
+        0
+    } else {
+        u64::from(crop_w)
+            .checked_mul(u64::from(target_h))
+            .and_then(|n| n.checked_mul(16))
+            .ok_or_else(|| anyhow!("background resize intermediate size overflow"))?
+    };
+    let target_bytes = u64::from(target_w)
+        .checked_mul(u64::from(target_h))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| anyhow!("background target size overflow {target_w}x{target_h}"))?;
+
+    source_bytes
+        .checked_add(intermediate_bytes)
+        .and_then(|n| n.checked_add(target_bytes))
+        .ok_or_else(|| anyhow!("background rasterization allocation overflow"))
 }
 
 /// Compute centered cover crop rectangle in source pixels for target aspect.
@@ -219,5 +252,39 @@ mod tests {
         let bg = BackgroundImage::decode(&solid_png(8192, 1, [0, 0, 255, 255])).unwrap();
         let pm = bg.to_pixmap(854, 480).unwrap();
         assert_eq!((pm.width(), pm.height()), (854, 480));
+    }
+
+    #[test]
+    fn rasterization_budget_rejects_maximum_source_before_allocation() {
+        let (_, _, crop_w, crop_h) = cover_crop(8192, 8192, 480, 480).unwrap();
+        let live_bytes = rasterization_alloc_bytes(8192, 8192, crop_w, crop_h, 480, 480).unwrap();
+
+        assert_eq!(8192_u64 * 8192 * 4, MAX_ALLOC_BYTES);
+        assert!(
+            live_bytes > MAX_ALLOC_BYTES,
+            "source plus resize buffers must exceed the aggregate cap"
+        );
+
+        // Keep the fixture tiny: the budget check must run before touching the
+        // source view, so this exercises the real `to_pixmap` rejection path
+        // without allocating a 256 MiB test image.
+        let bg = BackgroundImage {
+            rgba: Arc::new(RgbaImage::new(1, 1)),
+            width: 8192,
+            height: 8192,
+            source_path: None,
+        };
+        assert!(bg.to_pixmap(480, 480).is_err());
+    }
+
+    #[test]
+    fn rasterization_budget_allows_same_size_copy_within_cap() {
+        let live_bytes = rasterization_alloc_bytes(4096, 4096, 4096, 4096, 4096, 4096).unwrap();
+        assert_eq!(live_bytes, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rasterization_budget_rejects_overflow() {
+        assert!(rasterization_alloc_bytes(u32::MAX, u32::MAX, 1, 1, 1, 1).is_err());
     }
 }
