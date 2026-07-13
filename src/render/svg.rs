@@ -715,6 +715,52 @@ mod tests {
     }
 
     #[test]
+    fn neon_dash_v2_uses_short_axis_for_compact_typography() {
+        let render = |width, height| {
+            let template = include_str!("../../layouts/svg/neon-dash-v2.svg");
+            let mut renderer =
+                SvgRenderer::new(template, width, height).expect("valid neon dash v2 SVG template");
+            renderer.set_theme(ThemePalette::default());
+            let mut history = SensorHistory::new();
+            history.configure_metric("cpu_temp", std::time::Duration::from_secs(60));
+            history.configure_metric("gpu_temp", std::time::Duration::from_secs(60));
+            history.configure_metric("ram_used", std::time::Duration::from_secs(120));
+            renderer.set_history(Arc::new(Mutex::new(history)));
+            let context = renderer.build_context(&SensorData::new());
+            renderer
+                .render_template(&context)
+                .expect("neon dash v2 template renders")
+        };
+
+        let compact = render(960, 320);
+        assert_eq!(compact.matches(r#"font-size="20""#).count(), 5, "{compact}");
+
+        let compact_short_wide = render(640, 172);
+        assert_eq!(
+            compact_short_wide.matches(r#"font-size="20""#).count(),
+            5,
+            "{compact_short_wide}"
+        );
+
+        let canonical = render(854, 480);
+        let panel_14 = [
+            r#"x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
+            r#"x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
+        ]
+        .iter()
+        .map(|needle| canonical.matches(needle).count())
+        .sum::<usize>();
+        assert_eq!(panel_14, 2, "{canonical}");
+        assert_eq!(
+            canonical
+                .matches(r#"y="452" font-family="DejaVu Sans Mono, monospace" font-size="16""#)
+                .count(),
+            3,
+            "{canonical}"
+        );
+    }
+
+    #[test]
     fn runtime_geometry_cannot_be_overridden_by_layout_variables() {
         let template = r#"{# canvas: responsive #}
 {# vars:
