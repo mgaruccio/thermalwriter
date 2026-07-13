@@ -130,6 +130,26 @@ Render a layout preview PNG:
 cargo run --example preview_layout layouts/svg/neon-dash-v2.svg
 ```
 
+Preview the same 480×480 background/SVG compositing path used by the daemon. The
+default 180° rotation matches the LCD mounting orientation:
+
+```sh
+cargo run --example preview_composite -- \
+  --background assets/backgrounds/dark-gradient.png \
+  --overlay examples/fixtures/calibration.svg \
+  --output target/composite-preview.png \
+  --inspect 240,240
+```
+
+The overlay is optional; `--rotation` accepts `0`, `90`, `180`, or `270`:
+
+```sh
+cargo run --example preview_composite -- \
+  --background assets/backgrounds/dark-solid.png \
+  --output target/background-only.png \
+  --rotation 180
+```
+
 Render to hardware for a short mock-data run:
 
 ```sh

@@ -115,6 +115,11 @@ required-features = ["daemon"]
 test = true
 
 [[example]]
+name = "preview_composite"
+required-features = ["daemon"]
+test = true
+
+[[example]]
 name = "preview_blitz"
 required-features = ["blitz"]
 

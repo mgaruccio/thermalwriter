@@ -535,21 +535,30 @@ pub fn composite(
     Ok(composed)
 }
 
-impl FrameSource for SvgRenderer<'static> {
-    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
+impl SvgRenderer<'static> {
+    /// Render the composited frame before conversion to straight RGB.
+    ///
+    /// This is the canonical daemon compositing path and is also used by
+    /// hardware-free preview tooling that needs to inspect premultiplied
+    /// pixels.
+    pub fn render_pixmap(&mut self, sensors: &SensorData) -> Result<Pixmap> {
         let context = self.build_context(sensors);
         let svg_string = self.render_template(&context)?;
         let tree = parse_svg(&svg_string, &self.options)?;
         let layout_pixmap = rasterize(&tree, self.width, self.height)?;
-        let final_pixmap = composite(
+        composite(
             &layout_pixmap,
             self.background.as_deref(),
             self.width,
             self.height,
             self.fallback_background_color(),
-        )?;
+        )
+    }
+}
 
-        Ok(RawFrame::from_pixmap(&final_pixmap))
+impl FrameSource for SvgRenderer<'static> {
+    fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
+        Ok(RawFrame::from_pixmap(&self.render_pixmap(sensors)?))
     }
 
     fn name(&self) -> &str {
