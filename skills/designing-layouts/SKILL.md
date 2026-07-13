@@ -58,7 +58,7 @@ SVG is the primary layout format. Use the `SvgRenderer` pipeline: SVG template â
 <svg xmlns="http://www.w3.org/2000/svg"
      viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
   <!-- Background pattern -->
-  {{ background(pattern="grid", color="#ffffff08", spacing=24) }}
+  {{ background(pattern="grid", color="#ffffff08", spacing=24, w=width, h=height) }}
 
   <!-- Area graph: CPU utilization history -->
   {{ graph(data=cpu_util_history, x=0, y=height-100, w=width, h=100,
