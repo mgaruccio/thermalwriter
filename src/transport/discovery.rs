@@ -706,6 +706,24 @@ mod tests {
         u16::from_str_radix(value, 16).ok()
     }
 
+    fn udev_rule(rules: &'static str, subsystem: &str, vid: u16, pid: u16) -> &'static str {
+        let subsystem = format!("SUBSYSTEM==\"{subsystem}\"");
+        let vendor = format!("idVendor}}==\"{vid:04x}\"");
+        let product = format!("idProduct}}==\"{pid:04x}\"");
+        let matching: Vec<_> = rules
+            .lines()
+            .filter(|line| {
+                line.starts_with(&subsystem) && line.contains(&vendor) && line.contains(&product)
+            })
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one {subsystem} udev rule for {vid:04x}:{pid:04x}, found {matching:?}"
+        );
+        matching[0]
+    }
+
     #[test]
     fn scsi_discovery_matrix_covers_permitted_ids_and_dual_path() {
         let expected_scsi_only = [(0x87cd, 0x70db), (0x0402, 0x3922)];
@@ -814,6 +832,41 @@ mod tests {
             udev_scsi_ids, expected_udev_ids,
             "SCSI discovery and permission matrices drifted"
         );
+
+        for (vid, pid) in expected_scsi_only {
+            let usb_rule = udev_rule(udev_rules, "usb", vid, pid);
+            let expected_power_attrs: &[&str] = match (vid, pid) {
+                (0x87cd, 0x70db) => &[r#"ATTR{power/control}="on""#],
+                (0x0402, 0x3922) => &[
+                    r#"ATTR{power/control}="auto""#,
+                    r#"ATTR{power/autosuspend_delay_ms}="10000""#,
+                ],
+                _ => unreachable!("unexpected SCSI-only ID"),
+            };
+            for attr in expected_power_attrs {
+                assert!(
+                    usb_rule.contains(attr),
+                    "SCSI-only USB parent lost power attribute {attr}: {usb_rule}"
+                );
+            }
+            assert!(
+                !usb_rule.contains("TAG+=\"uaccess\""),
+                "SCSI-only USB parent must not grant direct access: {usb_rule}"
+            );
+            let sg_rule = udev_rule(udev_rules, "scsi_generic", vid, pid);
+            assert!(
+                sg_rule.contains("TAG+=\"uaccess\""),
+                "SCSI-only sg node must grant active-session access: {sg_rule}"
+            );
+        }
+
+        let (dual_vid, dual_pid) = DUAL_PATH_LCD_ID;
+        let dual_usb_rule = udev_rule(udev_rules, "usb", dual_vid, dual_pid);
+        assert!(dual_usb_rule.contains(r#"ATTR{power/control}="auto""#));
+        assert!(dual_usb_rule.contains(r#"ATTR{power/autosuspend_delay_ms}="10000""#));
+        assert!(dual_usb_rule.contains("TAG+=\"uaccess\""));
+        let dual_sg_rule = udev_rule(udev_rules, "scsi_generic", dual_vid, dual_pid);
+        assert!(dual_sg_rule.contains("TAG+=\"uaccess\""));
     }
 
     #[test]
