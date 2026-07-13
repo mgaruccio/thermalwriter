@@ -52,6 +52,11 @@ impl BlitzRenderer {
             },
         );
 
+        // Later user-agent rules override Blitz defaults while author CSS still wins by origin.
+        document
+            .as_mut()
+            .add_user_agent_stylesheet("html, body { width: 100%; height: 100%; margin: 0; }");
+
         // Resolve styles and compute layout
         document.as_mut().resolve(0.0);
 
@@ -170,6 +175,19 @@ mod tests {
     fn rgb_at(frame: &RawFrame, x: u32, y: u32) -> [u8; 3] {
         let offset = ((y * frame.width + x) * 3) as usize;
         frame.data[offset..offset + 3].try_into().unwrap()
+    }
+
+    #[test]
+    fn full_canvas_blitz_reaches_all_edges() {
+        let template = r#"<html><body><div style="box-sizing:border-box;width:480px;height:480px;border:2px solid #00ff00;background:#ff0000"></div></body></html>"#;
+        let mut renderer = BlitzRenderer::new(template, 480, 480).unwrap();
+        let frame = renderer.render(&SensorData::new()).unwrap();
+
+        assert_eq!(rgb_at(&frame, 1, 240), [0, 255, 0]);
+        assert_eq!(rgb_at(&frame, 478, 240), [0, 255, 0]);
+        assert_eq!(rgb_at(&frame, 240, 1), [0, 255, 0]);
+        assert_eq!(rgb_at(&frame, 240, 478), [0, 255, 0]);
+        assert_eq!(rgb_at(&frame, 240, 240), [255, 0, 0]);
     }
 
     #[test]
