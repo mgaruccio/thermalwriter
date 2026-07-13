@@ -87,16 +87,63 @@ where
     Ok(())
 }
 
-/// Injectable bulk endpoint I/O for tests and the rusb production backend.
+/// Injectable count-aware bulk endpoint I/O for tests and the rusb backend.
 pub trait BulkIo: Send {
-    fn write(&mut self, data: &[u8]) -> Result<()>;
+    fn write(&mut self, data: &[u8]) -> Result<usize>;
     fn read(&mut self, max_len: usize) -> Result<Vec<u8>>;
+}
+
+fn write_all_with_io(io: &mut dyn BulkIo, data: &[u8]) -> Result<()> {
+    let mut sent = 0;
+    while sent < data.len() {
+        let remaining = &data[sent..];
+        let written = io.write(remaining).context("Bulk write failed")?;
+        if written == 0 {
+            return Err(ZeroLengthTransfer {
+                bytes_written: sent,
+            }
+            .into());
+        }
+        if written > remaining.len() {
+            bail!(
+                "bulk writer reported {written} bytes for a {}-byte buffer",
+                remaining.len()
+            );
+        }
+        sent += written;
+    }
+    Ok(())
+}
+
+struct UsbBulkIo<'a> {
+    handle: &'a DeviceHandle<GlobalContext>,
+    ep_out: u8,
+    ep_in: u8,
+    write_timeout: Duration,
+}
+
+impl BulkIo for UsbBulkIo<'_> {
+    fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.handle
+            .write_bulk(self.ep_out, data, self.write_timeout)
+            .context("USB bulk write failed")
+    }
+
+    fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
+        let mut data = vec![0; max_len];
+        let read = self
+            .handle
+            .read_bulk(self.ep_in, &mut data, TIMEOUT)
+            .context("USB bulk read failed")?;
+        data.truncate(read);
+        Ok(data)
+    }
 }
 
 /// Pure handshake over injectable I/O — production and tests share this control flow.
 pub fn handshake_with_io(io: &mut dyn BulkIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
     let payload = handshake_payload();
-    io.write(&payload).context("Handshake write failed")?;
+    write_all_with_io(io, &payload).context("Handshake write failed")?;
     let resp = io
         .read(HANDSHAKE_READ_SIZE)
         .context("Handshake read failed")?;
@@ -144,14 +191,7 @@ pub fn send_frame_with_io(
     wire.extend_from_slice(&header);
     wire.extend_from_slice(&frame.data);
     for chunk in wire.chunks(CHUNK_SIZE) {
-        // write_all style via BulkIo single-shot writes of each chunk.
-        // Partial writes: loop until complete for this chunk.
-        let mut sent = 0;
-        while sent < chunk.len() {
-            // BulkIo writes whole buffer; for scripted tests we write remaining.
-            io.write(&chunk[sent..])?;
-            sent = chunk.len();
-        }
+        write_all_with_io(io, chunk)?;
     }
     if wire.len() % 512 == 0 {
         io.write(&[])?; // ZLP
@@ -241,106 +281,68 @@ fn find_device(bus: u8, address: u8) -> Result<rusb::Device<GlobalContext>> {
 
 impl Transport for BulkUsb {
     fn handshake(&mut self) -> Result<DeviceInfo> {
-        let handle = self.handle.as_ref().context("Device not open")?;
+        let result = {
+            let handle = self.handle.as_ref().context("Device not open")?;
+            let mut io = UsbBulkIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: TIMEOUT,
+            };
+            handshake_with_io(&mut io, self.vid, self.pid)
+        };
 
-        let payload = handshake_payload();
-        handle
-            .write_bulk(self.ep_out, &payload, TIMEOUT)
-            .context("Handshake write failed")?;
-        debug!("Handshake sent ({} bytes)", payload.len());
-
-        let mut resp = [0u8; HANDSHAKE_READ_SIZE];
-        let n = handle
-            .read_bulk(self.ep_in, &mut resp, TIMEOUT)
-            .context("Handshake read failed")?;
-        info!("Handshake response: {n} bytes");
-
-        if n < 41 || resp[24] == 0 {
-            bail!(
-                "Handshake failed: resp[24]={} (expected non-zero)",
-                resp[24]
-            );
+        match result {
+            Ok(info) => {
+                info!(
+                    "Handshake OK: PM={}, SUB={}, FBL={}, resolution={}x{}, encoding={}",
+                    info.pm,
+                    info.sub,
+                    info.fbl,
+                    info.width(),
+                    info.height(),
+                    info.encoding()
+                );
+                self.info = Some(info.clone());
+                Ok(info)
+            }
+            Err(error) => {
+                self.mark_disconnected_if_fatal(&error);
+                Err(error)
+            }
         }
-
-        let pm = resp[24];
-        let sub = resp[36];
-        let info = build_device_info(WireProtocol::Bulk, self.vid, self.pid, pm, sub, None)?;
-
-        info!(
-            "Handshake OK: PM={}, SUB={}, FBL={}, resolution={}x{}, encoding={}",
-            pm,
-            sub,
-            info.fbl,
-            info.width(),
-            info.height(),
-            info.encoding()
-        );
-
-        self.info = Some(info.clone());
-        Ok(info)
     }
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
-        let (wire, log_info) = {
+        let send_result = {
             let info = self.info.as_ref().context("Handshake not performed")?;
-            let (wire_width, wire_height) = info.wire_dimensions()?;
-            if frame.width != wire_width || frame.height != wire_height {
-                bail!(
-                    "frame {}x{} does not match wire dimensions {}x{}",
+            let handle = self.handle.as_ref().context("Device not open")?;
+            let mut io = UsbBulkIo {
+                handle,
+                ep_out: self.ep_out,
+                ep_in: self.ep_in,
+                write_timeout: WRITE_TIMEOUT,
+            };
+            send_frame_with_io(&mut io, info, frame)
+        };
+
+        match send_result {
+            Ok(()) => {
+                self.frames_sent += 1;
+                debug!(
+                    "Frame sent: {}x{}, encoding={}, {} bytes",
                     frame.width,
                     frame.height,
-                    wire_width,
-                    wire_height
-                );
-            }
-            if frame.encoding != info.encoding() {
-                bail!(
-                    "frame encoding {} does not match device {}",
                     frame.encoding,
-                    info.encoding()
+                    frame.data.len()
                 );
+                Ok(())
             }
-            let cmd: u32 = match frame.encoding {
-                FrameEncoding::Jpeg => 2,
-                FrameEncoding::Rgb565Le | FrameEncoding::Rgb565Be => 3,
-            };
-            let payload_len = u32::try_from(frame.data.len()).context("frame too large")?;
-            let header = build_frame_header(cmd, frame.width, frame.height, payload_len);
-            let mut wire = Vec::with_capacity(64 + frame.data.len());
-            wire.extend_from_slice(&header);
-            wire.extend_from_slice(&frame.data);
-            let log = (frame.width, frame.height, cmd, frame.data.len());
-            (wire, log)
-        };
-
-        let send_result: Result<()> = {
-            let handle = self.handle.as_ref().context("Device not open")?;
-            let ep_out = self.ep_out;
-
-            let chunk_result: Result<()> = wire.chunks(CHUNK_SIZE).try_for_each(|chunk| {
-                write_all(chunk, |buf| handle.write_bulk(ep_out, buf, WRITE_TIMEOUT))
-            });
-
-            if chunk_result.is_ok() && wire.len() % 512 == 0 {
-                handle
-                    .write_bulk(ep_out, &[], WRITE_TIMEOUT)
-                    .map(|_| ())
-                    .context("ZLP write failed")
-            } else {
-                chunk_result
+            Err(error) => {
+                self.mark_disconnected_if_fatal(&error);
+                Err(error)
             }
-        };
-
-        if let Err(e) = &send_result {
-            self.mark_disconnected_if_fatal(e);
-        } else {
-            self.frames_sent += 1;
-            debug!(
-                "Frame sent: {}x{}, cmd={}, {} bytes",
-                log_info.0, log_info.1, log_info.2, log_info.3
-            );
         }
-        send_result
     }
 
     fn close(&mut self) {

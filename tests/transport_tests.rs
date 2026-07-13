@@ -465,6 +465,7 @@ fn scripted_bulk_pm32_rgb565_and_pm64_wide() {
 struct MemBulkIo {
     reads: std::collections::VecDeque<Vec<u8>>,
     log: Vec<IoOp>,
+    writes: std::collections::VecDeque<std::result::Result<usize, &'static str>>,
 }
 
 impl MemBulkIo {
@@ -472,18 +473,34 @@ impl MemBulkIo {
         Self {
             reads: reads.into(),
             log: Vec::new(),
+            writes: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn with_writes(
+        reads: Vec<Vec<u8>>,
+        writes: Vec<std::result::Result<usize, &'static str>>,
+    ) -> Self {
+        Self {
+            reads: reads.into(),
+            log: Vec::new(),
+            writes: writes.into(),
         }
     }
 }
 
 impl bulk_usb::BulkIo for MemBulkIo {
-    fn write(&mut self, data: &[u8]) -> Result<()> {
+    fn write(&mut self, data: &[u8]) -> Result<usize> {
         if data.is_empty() {
             self.log.push(IoOp::Zlp);
         } else {
             self.log.push(IoOp::Write(data.to_vec()));
         }
-        Ok(())
+        match self.writes.pop_front() {
+            Some(Ok(written)) => Ok(written),
+            Some(Err(error)) => Err(anyhow::anyhow!(error)),
+            None => Ok(data.len()),
+        }
     }
     fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
         self.log.push(IoOp::Read(max_len));
@@ -542,6 +559,64 @@ fn bulk_handshake_with_io_pm32_rgb565_cmd3() {
     }
 }
 
+#[test]
+fn bulk_shared_io_handles_partial_handshake_and_frame_writes() {
+    let mut response = vec![0; 64];
+    response[24] = 4;
+    response[36] = 5;
+    let mut handshake_io = MemBulkIo::with_writes(vec![response], vec![Ok(10), Ok(54)]);
+    let info = bulk_usb::handshake_with_io(&mut handshake_io, 0x87ad, 0x70db).unwrap();
+    assert!(matches!(handshake_io.log[0], IoOp::Write(ref data) if data.len() == 64));
+    assert!(matches!(handshake_io.log[1], IoOp::Write(ref data) if data.len() == 54));
+    assert!(matches!(handshake_io.log[2], IoOp::Read(1024)));
+
+    let frame = EncodedFrame {
+        data: vec![0x5a; 16_400],
+        width: 480,
+        height: 480,
+        encoding: FrameEncoding::Jpeg,
+    };
+    let mut frame_io = MemBulkIo::with_writes(Vec::new(), vec![Ok(10), Ok(20)]);
+    bulk_usb::send_frame_with_io(&mut frame_io, &info, &frame).unwrap();
+    let requested: Vec<_> = frame_io
+        .log
+        .iter()
+        .filter_map(|op| match op {
+            IoOp::Write(data) => Some(data.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested, [16_384, 16_374, 16_354, 80]);
+}
+
+#[test]
+fn bulk_shared_io_rejects_zero_progress_and_propagates_errors() {
+    let info = build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, None).unwrap();
+    let frame = EncodedFrame {
+        data: vec![0x5a; 100],
+        width: 480,
+        height: 480,
+        encoding: FrameEncoding::Jpeg,
+    };
+
+    let mut zero_io = MemBulkIo::with_writes(Vec::new(), vec![Ok(0)]);
+    let error = bulk_usb::send_frame_with_io(&mut zero_io, &info, &frame)
+        .expect_err("zero-byte write must fail");
+    assert!(error.to_string().contains("zero-length"), "{error:#}");
+    assert_eq!(zero_io.log.len(), 1);
+
+    let mut error_io = MemBulkIo::with_writes(Vec::new(), vec![Err("injected bulk failure")]);
+    let error = bulk_usb::send_frame_with_io(&mut error_io, &info, &frame)
+        .expect_err("write error must propagate");
+    assert!(error.to_string().contains("Bulk write failed"), "{error:#}");
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("injected bulk failure")),
+        "{error:#}"
+    );
+    assert_eq!(error_io.log.len(), 1);
+}
 struct MemHidIo {
     reads: std::collections::VecDeque<Vec<u8>>,
     log: Vec<IoOp>,
