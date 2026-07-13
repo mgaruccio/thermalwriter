@@ -866,6 +866,56 @@ mod tests {
             r#"x="424" y="418" font-family="DejaVu Sans Mono, monospace" font-size="9""#,
         );
     }
+    #[test]
+    fn arc_gauge_uses_short_axis_for_compact_typography() {
+        let render = |width, height| {
+            let template = include_str!("../../layouts/svg/arc-gauge.svg");
+            let mut renderer =
+                SvgRenderer::new(template, width, height).expect("valid arc gauge SVG template");
+            renderer.set_theme(ThemePalette::default());
+            let context = renderer.build_context(&SensorData::new());
+            let rendered = renderer
+                .render_template(&context)
+                .expect("arc gauge template renders");
+            let frame = renderer
+                .render(&SensorData::new())
+                .expect("arc gauge frame renders");
+            assert_eq!(frame.width, width);
+            assert_eq!(frame.height, height);
+            assert_eq!(frame.data.len(), (width * height * 3) as usize);
+            rendered
+        };
+
+        for (width, height) in [(640, 240), (960, 320)] {
+            let compact = render(width, height);
+            assert_eq!(
+                compact.matches(r#"font-size="20""#).count(),
+                11,
+                "{compact}"
+            );
+            for size in ["10", "12", "13", "14", "18"] {
+                assert_eq!(
+                    compact.matches(&format!(r#"font-size="{size}""#)).count(),
+                    0,
+                    "{compact}"
+                );
+            }
+        }
+
+        let canonical = render(854, 480);
+        assert_eq!(
+            canonical.matches(r#"font-size="20""#).count(),
+            3,
+            "{canonical}"
+        );
+        for (size, count) in [("10", 2), ("12", 2), ("13", 1), ("14", 1), ("18", 2)] {
+            assert_eq!(
+                canonical.matches(&format!(r#"font-size="{size}""#)).count(),
+                count,
+                "{canonical}"
+            );
+        }
+    }
 
     #[test]
     fn runtime_geometry_cannot_be_overridden_by_layout_variables() {
