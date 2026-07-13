@@ -25,11 +25,11 @@
       {% set card_w = half_w %}{% set card_h = half_h %}
   {% endif %}
 
-      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; box-sizing: border-box; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
         <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">CPU TEMP</span>
         <span style="width: {{ card_w - p - p }}px; height: {{ value_h }}px; font-size: {{ token_hero }}px; color: #00e5ff; text-align: center;">{{ cpu_temp | default(value="--") }}°</span>
       </div>
-      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; box-sizing: border-box; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
         <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">CPU LOAD</span>
         <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ cpu_util | default(value="--") }}%</span>
       </div>
@@ -39,11 +39,11 @@
     <div style="display: flex; flex-direction: row; width: {{ content_w }}px; height: {{ half_h }}px; gap: {{ g }}px;">
   {% endif %}
 
-      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; box-sizing: border-box; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
         <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">GPU TEMP</span>
         <span style="width: {{ card_w - p - p }}px; height: {{ value_h }}px; font-size: {{ token_hero }}px; color: #ff2e9f; text-align: center;">{{ gpu_temp | default(value="--") }}°</span>
       </div>
-      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
+      <div style="display: flex; flex-direction: column; width: {{ card_w }}px; height: {{ card_h }}px; box-sizing: border-box; background: #121222; padding: {{ p }}px; justify-content: center; align-items: center;">
         <span style="width: {{ card_w - p - p }}px; height: {{ label_h }}px; font-size: {{ token_label }}px; color: #8888a0; text-align: center;">GPU LOAD</span>
         <span style="width: {{ card_w - p - p }}px; height: {{ token_medium + token_small + 8 }}px; font-size: {{ token_medium + token_small }}px; color: #ffffff; text-align: center;">{{ gpu_util | default(value="--") }}%</span>
       </div>
