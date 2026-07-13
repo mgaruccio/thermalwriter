@@ -149,17 +149,39 @@ fn main() -> Result<()> {
         sensors
     };
 
+    // Negotiate the display before constructing the renderer so its canvas
+    // matches the frame dimensions required by the selected device profile.
+    println!("\nOpening device...");
+    let connector = TransportConnector::from_config_device("auto")?;
+    let (mut transport, info) = connector.connect()?;
+    println!(
+        "Device: {}x{} PM={} SUB={} FBL={} {} encoding={}",
+        info.width(),
+        info.height(),
+        info.pm,
+        info.sub,
+        info.fbl,
+        info.protocol,
+        info.encoding()
+    );
+    let rotation = 180;
+    let (display_width, display_height) = info.oriented_dimensions(rotation)?;
+
     // Render initial frame
     let mut renderer: Box<dyn FrameSource> = if is_svg {
         println!("Using SVG renderer");
-        let mut renderer = SvgRenderer::new(&template, 480, 480)?;
+        let mut renderer = SvgRenderer::new(&template, display_width, display_height)?;
         if let Some(ref hist) = sensor_history {
             renderer.set_history(hist.clone());
         }
         renderer.set_theme(ThemePalette::default());
         Box::new(renderer)
     } else {
-        Box::new(TemplateRenderer::new(&template, 480, 480)?)
+        Box::new(TemplateRenderer::new(
+            &template,
+            display_width,
+            display_height,
+        )?)
     };
 
     // Record initial sensors into history
@@ -174,21 +196,6 @@ fn main() -> Result<()> {
     let png_path = format!("/tmp/thermalwriter_{}.png", display_name);
     frame.save_png(&png_path)?;
     println!("\nSaved preview: {}", png_path);
-
-    // Open device and send continuously
-    println!("\nOpening device...");
-    let connector = TransportConnector::from_config_device("auto")?;
-    let (mut transport, info) = connector.connect()?;
-    println!(
-        "Device: {}x{} PM={} SUB={} FBL={} {} encoding={}",
-        info.width(),
-        info.height(),
-        info.pm,
-        info.sub,
-        info.fbl,
-        info.protocol,
-        info.encoding()
-    );
 
     let mode = if use_mock { "mock" } else { "live" };
     println!(
@@ -212,7 +219,7 @@ fn main() -> Result<()> {
         }
 
         let frame = renderer.render(&sensors)?;
-        let jpeg_data = encode_frame(&frame, &info, 180, 85)?;
+        let jpeg_data = encode_frame(&frame, &info, rotation, 85)?;
         transport.send_frame(&jpeg_data)?;
         thread::sleep(Duration::from_millis(500));
         iteration += 1;
