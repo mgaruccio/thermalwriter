@@ -1015,6 +1015,25 @@ select {
   text-align: right;
 }
 
+/* — Variables header actions (Suggest + Apply) — */
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* — Suggest button (secondary action, subtle accent tint) — */
+.btn-suggest {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line-strong));
+  color: var(--text-primary);
+}
+
+.btn-suggest:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-elev));
+  border-color: var(--accent);
+}
+
 /* — Apply button (primary action) — */
 .btn-apply {
   background: linear-gradient(180deg,

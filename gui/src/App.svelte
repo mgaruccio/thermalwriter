@@ -66,6 +66,7 @@
   let loading = $state(true);
   let previewing = $state(false);
   let applying = $state(false);
+  let suggesting = $state(false);
   let status = $state("");
   let error = $state("");
   let canvas = $state<HTMLCanvasElement | undefined>();
@@ -82,6 +83,7 @@
   );
 
   const selected = $derived(layouts.find((layout) => layout.name === selectedLayout));
+  const hasColorVars = $derived(variables.some((variable) => variable.type === "color"));
   const configurableLayouts = $derived(layouts.filter((l) => l.configurable));
   const previewOnlyLayouts = $derived(layouts.filter((l) => !l.configurable));
 
@@ -265,6 +267,29 @@
     }
   }
 
+  // Derive suggested values for the layout's color vars from the selected
+  // background's dominant colors. Merging into `values` retriggers the live
+  // preview, so the suggestion is visible immediately and adjustable before
+  // Apply — nothing is persisted until the user applies/saves as usual.
+  async function suggestColors() {
+    if (!selectedLayout || !selectedBackground || suggesting) return;
+    suggesting = true;
+    status = "";
+    error = "";
+    try {
+      const suggested = await invoke<Record<string, string>>("suggest_colors", {
+        layout: selectedLayout,
+        background: selectedBackground,
+      });
+      values = { ...values, ...suggested };
+      status = `Suggested ${Object.keys(suggested).length} colors from ${selectedBackground}. Tweak freely, then Apply.`;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      suggesting = false;
+    }
+  }
+
   function kindClass(kind: string): string {
     if (kind === "html") return "kind-html";
     if (kind === "xvfb") return "kind-xvfb";
@@ -445,14 +470,29 @@
           </nav>
         </div>
         {#if activeTab === "variables"}
-          <button
-            type="button"
-            class="btn-apply"
-            onclick={apply}
-            disabled={applying || !selectedLayout}
-          >
-            {applying ? "Applying…" : "Apply ↳"}
-          </button>
+          <div class="header-actions">
+            <button
+              type="button"
+              class="btn-suggest"
+              onclick={suggestColors}
+              disabled={suggesting || !selectedBackground || !hasColorVars}
+              title={!selectedBackground
+                ? "Select a background to suggest colors from"
+                : !hasColorVars
+                  ? "This layout declares no color variables"
+                  : "Suggest overlay colors from the background's dominant colors"}
+            >
+              {suggesting ? "Sampling…" : "◑ Suggest"}
+            </button>
+            <button
+              type="button"
+              class="btn-apply"
+              onclick={apply}
+              disabled={applying || !selectedLayout}
+            >
+              {applying ? "Applying…" : "Apply ↳"}
+            </button>
+          </div>
         {/if}
       </div>
       <div class="panel-body">

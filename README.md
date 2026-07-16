@@ -25,7 +25,7 @@ Current status: Public Beta (`v0.1.0`).
 - Sensor providers for hwmon, sysinfo, AMDGPU, NVIDIA, MangoHud, and Intel RAPL.
 - Global background image support for PNG/JPEG assets.
 - Xvfb capture mode for streaming any X11 application onto the LCD, with built-in presets for conky, cava, and btop (session-only; never persisted as a boot default).
-- Optional Tauri/Svelte configuration GUI under `gui/`, including a Stream tab with a live preview.
+- Optional Tauri/Svelte configuration GUI under `gui/`, including a Stream tab with a live preview and one-click overlay color suggestions derived from the selected background's dominant colors.
 - No hardware required for layout previews and most tests.
 
 ## Requirements

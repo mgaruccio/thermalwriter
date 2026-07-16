@@ -6,6 +6,7 @@ pub mod components;
 pub mod draw;
 pub mod frontmatter;
 pub mod layout;
+pub mod palette;
 pub mod parser;
 pub mod svg;
 #[cfg(feature = "daemon")]

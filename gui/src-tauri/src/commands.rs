@@ -8,6 +8,7 @@ use thermalwriter::config::Config;
 use thermalwriter::dbus_types::DisplayProxy;
 use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
+use thermalwriter::render::palette::{self, SchemeSuggestion};
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, SensorData};
 use thermalwriter::sensor::history::SensorHistory;
@@ -379,6 +380,92 @@ pub fn import_background(
     state: tauri::State<'_, RendererState>,
 ) -> Result<String, AppError> {
     import_background_impl(&state.background_dir, &filename, &data)
+}
+
+/// Suggest values for a layout's `color` vars from a background image's
+/// dominant colors (Material You-style extraction + fixed HCT recipe in
+/// `render::palette`). Returns a map of var name → `#rrggbb` covering only
+/// the layout's color-typed vars; the frontend merges it into its live
+/// `values` so the user can preview and tweak before applying.
+#[tauri::command]
+pub fn suggest_colors(
+    layout: String,
+    background: String,
+    state: tauri::State<'_, RendererState>,
+) -> Result<HashMap<String, String>, AppError> {
+    let bg_path = validate_background_path(&state.background_dir, &background)?;
+    let layout_path = validate_layout_path(&state.layout_dir, &layout)?;
+    let content =
+        std::fs::read_to_string(&layout_path).map_err(|e| AppError::LayoutIo(e.to_string()))?;
+    let frontmatter = LayoutFrontmatter::parse(&content);
+
+    let image =
+        BackgroundImage::from_file(&bg_path).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+    // Aspect-preserving thumbnail: when the target aspect equals the source
+    // aspect, cover-crop degenerates to a pure resize, so the whole image
+    // (not a center crop) informs the extraction.
+    let (w, h) = image.source_dimensions();
+    let scale = (128.0 / f64::from(w.max(h))).min(1.0);
+    let tw = ((f64::from(w) * scale).round() as u32).max(1);
+    let th = ((f64::from(h) * scale).round() as u32).max(1);
+    let pixmap = image
+        .to_pixmap(tw, th)
+        .map_err(|e| AppError::BackgroundIo(e.to_string()))?;
+
+    let scheme = palette::suggest_scheme(&pixmap);
+    Ok(assign_scheme_to_vars(&frontmatter, &scheme))
+}
+
+/// Map suggested role colors onto a layout's color vars by name convention.
+///
+/// Known role patterns (checked in order, case-insensitive substring):
+/// background/panel → panel_bg, text → text, dim/muted/label → dim,
+/// primary/cpu → primary, secondary/gpu → secondary,
+/// accent/tertiary/fps → tertiary. Color vars matching no pattern cycle
+/// through the three accents in name order so every color var gets a value.
+fn assign_scheme_to_vars(
+    frontmatter: &LayoutFrontmatter,
+    scheme: &SchemeSuggestion,
+) -> HashMap<String, String> {
+    let mut color_vars: Vec<&String> = frontmatter
+        .variables
+        .iter()
+        .filter(|(_, decl)| decl.var_type == "color")
+        .map(|(name, _)| name)
+        .collect();
+    color_vars.sort();
+
+    let role_for = |name: &str| -> Option<&str> {
+        let n = name.to_ascii_lowercase();
+        if n.contains("background") || n.contains("panel") {
+            Some(&scheme.panel_bg)
+        } else if n.contains("text") {
+            Some(&scheme.text)
+        } else if n.contains("dim") || n.contains("muted") || n.contains("label") {
+            Some(&scheme.dim)
+        } else if n.contains("primary") || n.contains("cpu") {
+            Some(&scheme.primary)
+        } else if n.contains("secondary") || n.contains("gpu") {
+            Some(&scheme.secondary)
+        } else if n.contains("accent") || n.contains("tertiary") || n.contains("fps") {
+            Some(&scheme.tertiary)
+        } else {
+            None
+        }
+    };
+
+    let accents = [&scheme.primary, &scheme.secondary, &scheme.tertiary];
+    let mut next_accent = 0usize;
+    let mut out = HashMap::new();
+    for name in color_vars {
+        let hex = role_for(name).unwrap_or_else(|| {
+            let hex = accents[next_accent % accents.len()];
+            next_accent += 1;
+            hex
+        });
+        out.insert(name.clone(), hex.to_string());
+    }
+    out
 }
 
 // ---- daemon status ----
@@ -1017,6 +1104,85 @@ mod tests {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    // ---- color scheme suggestion ----
+
+    fn test_scheme() -> SchemeSuggestion {
+        SchemeSuggestion {
+            primary: "#111111".into(),
+            secondary: "#222222".into(),
+            tertiary: "#333333".into(),
+            text: "#444444".into(),
+            dim: "#555555".into(),
+            panel_bg: "#666666".into(),
+        }
+    }
+
+    #[test]
+    fn assign_scheme_maps_theme_style_vars() {
+        // neon-dash family naming
+        let fm = LayoutFrontmatter::parse(
+            "{# vars:\n\
+             theme_primary: color = \"#e94560\" \"CPU accent\"\n\
+             theme_secondary: color = \"#53d8fb\" \"GPU accent\"\n\
+             theme_accent: color = \"#20f5d8\" \"Bottom accent\"\n\
+             theme_background: color = \"#08080f\" \"Background\"\n\
+             cpu_label: text = \"CPU\" \"label\"\n\
+             #}",
+        );
+        let out = assign_scheme_to_vars(&fm, &test_scheme());
+        assert_eq!(out.get("theme_primary").unwrap(), "#111111");
+        assert_eq!(out.get("theme_secondary").unwrap(), "#222222");
+        assert_eq!(out.get("theme_accent").unwrap(), "#333333");
+        assert_eq!(out.get("theme_background").unwrap(), "#666666");
+        // non-color vars must not be touched
+        assert!(!out.contains_key("cpu_label"));
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn assign_scheme_maps_sensor_style_vars() {
+        // arc-gauge / cyber-grid family naming
+        let fm = LayoutFrontmatter::parse(
+            "{# vars:\n\
+             cpu_color: color = \"#f7768e\" \"CPU\"\n\
+             gpu_color: color = \"#7aa2f7\" \"GPU\"\n\
+             fps_color: color = \"#9ece6a\" \"FPS\"\n\
+             text_color: color = \"#c0caf5\" \"Text\"\n\
+             dim_color: color = \"#565f89\" \"Labels\"\n\
+             #}",
+        );
+        let out = assign_scheme_to_vars(&fm, &test_scheme());
+        assert_eq!(out.get("cpu_color").unwrap(), "#111111");
+        assert_eq!(out.get("gpu_color").unwrap(), "#222222");
+        assert_eq!(out.get("fps_color").unwrap(), "#333333");
+        assert_eq!(out.get("text_color").unwrap(), "#444444");
+        assert_eq!(out.get("dim_color").unwrap(), "#555555");
+    }
+
+    #[test]
+    fn assign_scheme_cycles_accents_for_unknown_names() {
+        let fm = LayoutFrontmatter::parse(
+            "{# vars:\n\
+             alpha: color = \"#000000\" \"a\"\n\
+             beta: color = \"#000000\" \"b\"\n\
+             gamma: color = \"#000000\" \"c\"\n\
+             delta: color = \"#000000\" \"d\"\n\
+             #}",
+        );
+        let out = assign_scheme_to_vars(&fm, &test_scheme());
+        // name-sorted: alpha, beta, delta, gamma — accents cycle P, S, T, P
+        assert_eq!(out.get("alpha").unwrap(), "#111111");
+        assert_eq!(out.get("beta").unwrap(), "#222222");
+        assert_eq!(out.get("delta").unwrap(), "#333333");
+        assert_eq!(out.get("gamma").unwrap(), "#111111");
+    }
+
+    #[test]
+    fn suggest_colors_layout_without_color_vars_returns_empty() {
+        let fm = LayoutFrontmatter::parse("{# vars:\nlabel: text = \"x\" \"label\"\n#}");
+        assert!(assign_scheme_to_vars(&fm, &test_scheme()).is_empty());
     }
 
     // ---- pixel format / byte count ----

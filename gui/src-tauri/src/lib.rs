@@ -55,6 +55,7 @@ pub fn run() {
             commands::save_background,
             commands::get_active_background,
             commands::import_background,
+            commands::suggest_colors,
             // stream commands (Phase 3)
             commands::get_status,
             commands::apply_stream,
