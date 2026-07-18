@@ -1,5 +1,6 @@
 /target
 /profiling-results/
+/dhat-heap.json
 .worktrees/
 .agents/
 .claude/

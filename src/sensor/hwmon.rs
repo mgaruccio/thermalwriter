@@ -1,8 +1,11 @@
 // hwmon sensor provider: reads /sys/class/hwmon for CPU temperatures and power.
 
 use anyhow::Result;
+use log::warn;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
 
@@ -12,8 +15,22 @@ const DEFAULT_HWMON_PATH: &str = "/sys/class/hwmon";
 /// These receive a canonical `cpu_temp` alias on their first temp reading.
 const CPU_CHIP_NAMES: &[&str] = &["k10temp", "coretemp", "zenpower", "k8temp", "fam15h_power"];
 
+/// Wireless NIC hwmon chips are never read: their temp*_input is a firmware
+/// RPC, not a register read, and blocks uninterruptibly for seconds when the
+/// firmware is wedged (observed: ath12k "fw stats" stalls freezing the tick
+/// loop 6s per poll).
+const WIRELESS_CHIP_PREFIXES: &[&str] =
+    &["ath10k", "ath11k", "ath12k", "iwlwifi", "mt76", "mt79", "rtw88", "rtw89", "brcmfmac"];
+
+/// Any chip whose full read takes longer than this is quarantined for the
+/// rest of the provider's lifetime. Normal sysfs sensor reads are microseconds;
+/// crossing this means the read is blocking in a driver.
+const SLOW_CHIP_THRESHOLD: Duration = Duration::from_millis(250);
+
 pub struct HwmonProvider {
     base_path: PathBuf,
+    /// Chips quarantined after a slow read; skipped on all subsequent polls.
+    slow_chips: HashSet<String>,
 }
 
 impl Default for HwmonProvider {
@@ -26,12 +43,16 @@ impl HwmonProvider {
     pub fn new() -> Self {
         Self {
             base_path: PathBuf::from(DEFAULT_HWMON_PATH),
+            slow_chips: HashSet::new(),
         }
     }
 
     /// For testing with a fake sysfs tree.
     pub fn with_base_path(base: PathBuf) -> Self {
-        Self { base_path: base }
+        Self {
+            base_path: base,
+            slow_chips: HashSet::new(),
+        }
     }
 
     fn read_file_trimmed(path: &std::path::Path) -> Option<String> {
@@ -59,7 +80,18 @@ impl SensorProvider for HwmonProvider {
             let chip_name = Self::read_file_trimmed(&hwmon_dir.join("name"))
                 .unwrap_or_else(|| "unknown".to_string());
 
+            if WIRELESS_CHIP_PREFIXES
+                .iter()
+                .any(|p| chip_name.starts_with(p))
+                || self.slow_chips.contains(&chip_name)
+            {
+                continue;
+            }
+
             let is_cpu_chip = CPU_CHIP_NAMES.contains(&chip_name.as_str());
+            let chip_start = Instant::now();
+            let readings_before_chip = readings.len();
+            let aliased_before_chip = (cpu_temp_aliased, cpu_fan_aliased);
 
             // Read temperatures (temp*_input files, millidegrees C)
             for i in 1..=16 {
@@ -143,6 +175,20 @@ impl SensorProvider for HwmonProvider {
                     }
                 }
             }
+
+            let chip_elapsed = chip_start.elapsed();
+            if chip_elapsed > SLOW_CHIP_THRESHOLD {
+                warn!(
+                    "hwmon chip '{}' took {:?} to read (blocking driver call?); \
+                     quarantining it for the rest of this run",
+                    chip_name, chip_elapsed
+                );
+                // Drop this chip's readings so it never appears as a sensor,
+                // and roll back alias flags it may have claimed.
+                readings.truncate(readings_before_chip);
+                (cpu_temp_aliased, cpu_fan_aliased) = aliased_before_chip;
+                self.slow_chips.insert(chip_name);
+            }
         }
 
         Ok(readings)
@@ -150,7 +196,10 @@ impl SensorProvider for HwmonProvider {
 
     fn available_sensors(&self) -> Vec<SensorDescriptor> {
         // Discover by polling once — use a mutable clone to avoid borrow issues
-        let mut probe = HwmonProvider::with_base_path(self.base_path.clone());
+        let mut probe = HwmonProvider {
+            base_path: self.base_path.clone(),
+            slow_chips: self.slow_chips.clone(),
+        };
         match probe.poll() {
             Ok(readings) => readings
                 .iter()

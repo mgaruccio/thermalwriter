@@ -867,3 +867,104 @@ fn nvidia_poll_times_out_on_hung_subprocess() {
         result
     );
 }
+
+// --- Slow/wireless hwmon chip protection ---
+// A wedged WiFi NIC (e.g. ath12k firmware stall) turns a temp*_input read into
+// a multi-second uninterruptible block, freezing the tick loop. The provider
+// must never read wireless-NIC chips, and must quarantine any chip whose read
+// stalls so it is skipped on subsequent polls.
+
+fn make_fifo(path: &std::path::Path) {
+    let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o644) };
+    assert_eq!(rc, 0, "mkfifo failed");
+}
+
+#[test]
+fn hwmon_skips_wireless_nic_chips() {
+    let tmp = TempDir::new().unwrap();
+    let wifi_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&wifi_dir).unwrap();
+    fs::write(wifi_dir.join("name"), "ath12k_hwmon\n").unwrap();
+    fs::write(wifi_dir.join("temp1_input"), "45000\n").unwrap();
+
+    let cpu_dir = tmp.path().join("hwmon1");
+    fs::create_dir_all(&cpu_dir).unwrap();
+    fs::write(cpu_dir.join("name"), "k10temp\n").unwrap();
+    fs::write(cpu_dir.join("temp1_input"), "72000\n").unwrap();
+    fs::write(cpu_dir.join("temp1_label"), "Tctl\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    assert!(
+        !readings.iter().any(|r| r.key.contains("ath12k")),
+        "wireless NIC chip must not be polled, got {:?}",
+        readings
+    );
+    assert!(
+        readings.iter().any(|r| r.key == "cpu_temp"),
+        "CPU chip should still be read"
+    );
+}
+
+#[test]
+fn hwmon_quarantines_slow_chip_after_first_poll() {
+    use std::time::{Duration, Instant};
+
+    let tmp = TempDir::new().unwrap();
+    let slow_dir = tmp.path().join("hwmon0");
+    fs::create_dir_all(&slow_dir).unwrap();
+    fs::write(slow_dir.join("name"), "slowchip\n").unwrap();
+    let fifo = slow_dir.join("temp1_input");
+    make_fifo(&fifo);
+
+    let cpu_dir = tmp.path().join("hwmon1");
+    fs::create_dir_all(&cpu_dir).unwrap();
+    fs::write(cpu_dir.join("name"), "k10temp\n").unwrap();
+    fs::write(cpu_dir.join("temp1_input"), "72000\n").unwrap();
+
+    // First poll: reading temp1_input blocks until this writer opens the FIFO
+    // 400ms later — well past the quarantine threshold.
+    let fifo_clone = fifo.clone();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        fs::write(&fifo_clone, "45000\n").unwrap();
+    });
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let first = provider.poll().unwrap();
+    writer.join().unwrap();
+
+    assert!(
+        !first.iter().any(|r| r.key.contains("slowchip")),
+        "slow chip readings should be dropped, got {:?}",
+        first
+    );
+
+    // Second poll: a writer is standing by, so if the provider (incorrectly)
+    // reads the FIFO again it gets a value quickly instead of hanging the test.
+    let fifo_clone = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = fs::write(&fifo_clone, "45000\n");
+    });
+
+    let start = Instant::now();
+    let second = provider.poll().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        !second.iter().any(|r| r.key.contains("slowchip")),
+        "quarantined chip must be skipped on later polls, got {:?}",
+        second
+    );
+    assert!(
+        second.iter().any(|r| r.key == "cpu_temp"),
+        "healthy chips should still be read after quarantine"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "post-quarantine poll should be fast, took {:?}",
+        elapsed
+    );
+}
