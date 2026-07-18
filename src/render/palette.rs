@@ -178,14 +178,11 @@ fn rank_hues(samples: &[Argb]) -> (Vec<Hct>, f64) {
 
 /// First candidate whose hue is ≥ `MIN_HUE_SEPARATION`° from every taken hue.
 fn pick_distinct_hue(candidates: &[Hct], taken: &[f64]) -> Option<f64> {
-    candidates
-        .iter()
-        .map(|hct| hct.get_hue())
-        .find(|hue| {
-            taken
-                .iter()
-                .all(|t| difference_degrees(*hue, *t) >= MIN_HUE_SEPARATION)
-        })
+    candidates.iter().map(|hct| hct.get_hue()).find(|hue| {
+        taken
+            .iter()
+            .all(|t| difference_degrees(*hue, *t) >= MIN_HUE_SEPARATION)
+    })
 }
 
 /// CIELAB L* (== HCT tone) of an sRGB color, without a full CAM16 conversion.

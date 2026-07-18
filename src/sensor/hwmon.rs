@@ -19,8 +19,9 @@ const CPU_CHIP_NAMES: &[&str] = &["k10temp", "coretemp", "zenpower", "k8temp", "
 /// RPC, not a register read, and blocks uninterruptibly for seconds when the
 /// firmware is wedged (observed: ath12k "fw stats" stalls freezing the tick
 /// loop 6s per poll).
-const WIRELESS_CHIP_PREFIXES: &[&str] =
-    &["ath10k", "ath11k", "ath12k", "iwlwifi", "mt76", "mt79", "rtw88", "rtw89", "brcmfmac"];
+const WIRELESS_CHIP_PREFIXES: &[&str] = &[
+    "ath10k", "ath11k", "ath12k", "iwlwifi", "mt76", "mt79", "rtw88", "rtw89", "brcmfmac",
+];
 
 /// Any chip whose full read takes longer than this is quarantined for the
 /// rest of the provider's lifetime. Normal sysfs sensor reads are microseconds;
