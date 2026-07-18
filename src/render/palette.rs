@@ -162,7 +162,7 @@ fn rank_hues(samples: &[Argb]) -> (Vec<Hct>, f64) {
         return (vec![Hct::new(FALLBACK_SEED)], 0.0);
     }
 
-    let mut tones: Vec<f64> = samples.iter().map(|argb| lstar(argb)).collect();
+    let mut tones: Vec<f64> = samples.iter().map(lstar).collect();
     tones.sort_by(|a, b| a.total_cmp(b));
     let median = tones[tones.len() / 2];
 
