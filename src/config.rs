@@ -192,6 +192,30 @@ impl Config {
                 self.xvfb.tick_rate
             );
         }
+        match self.display.mode.as_str() {
+            "svg" => {
+                if !self.display.default_layout.ends_with(".svg") {
+                    anyhow::bail!(
+                        "display.default_layout='{}' must end with .svg when display.mode is svg",
+                        self.display.default_layout
+                    );
+                }
+            }
+            "html" => {
+                if !(self.display.default_layout.ends_with(".html")
+                    || self.display.default_layout.ends_with(".htm"))
+                {
+                    anyhow::bail!(
+                        "display.default_layout='{}' must end with .html/.htm when display.mode is html",
+                        self.display.default_layout
+                    );
+                }
+            }
+            "xvfb" => {}
+            other => {
+                anyhow::bail!("display.mode='{other}' must be one of svg, html, xvfb")
+            }
+        }
         Ok(())
     }
 
@@ -476,6 +500,30 @@ pub mod builtin_layouts {
         Ok(())
     }
 
+    /// Builtin layout identity used when a configured `.svg` file is missing.
+    pub const FALLBACK_SVG_NAME: &str = "svg/neon-dash-v2.svg";
+    /// Builtin layout identity used when a configured HTML file is missing.
+    pub const FALLBACK_HTML_NAME: &str = "system-stats.html";
+
+    /// Resolve startup layout identity and content together.
+    ///
+    /// When `on_disk` is `Some`, the configured name is preserved. When the
+    /// configured file is missing, both the fallback content and its canonical
+    /// name are chosen from the configured layout kind so an SVG mode/name
+    /// never receives HTML (and vice versa).
+    pub fn resolve_layout_identity(
+        configured_name: &str,
+        on_disk: Option<String>,
+    ) -> (String, String) {
+        match on_disk {
+            Some(content) => (configured_name.to_string(), content),
+            None if configured_name.ends_with(".svg") => {
+                (FALLBACK_SVG_NAME.to_string(), SVG_NEON_DASH_V2.to_string())
+            }
+            None => (FALLBACK_HTML_NAME.to_string(), SYSTEM_STATS.to_string()),
+        }
+    }
+
     /// Copy built-in layouts to the layouts directory if they don't already exist.
     /// This lets users edit the layouts without losing the originals on first run.
     pub fn seed_layout_dir(layout_dir: &std::path::Path) -> anyhow::Result<()> {
@@ -509,6 +557,83 @@ pub mod builtin_layouts {
 #[cfg(test)]
 mod tests {
     use super::builtin_layouts;
+    use crate::render::svg::SvgRenderer;
+
+    #[test]
+    fn missing_svg_layout_falls_back_to_svg_builtin_not_html() {
+        let (name, content) = builtin_layouts::resolve_layout_identity("missing/custom.svg", None);
+        assert_eq!(name, builtin_layouts::FALLBACK_SVG_NAME);
+        assert_eq!(content, builtin_layouts::SVG_NEON_DASH_V2);
+        assert!(
+            content.contains("<svg"),
+            "missing .svg must fall back to SVG content, not HTML"
+        );
+        // Construction succeeds; feeding SYSTEM_STATS HTML here would fail later
+        // at tick time after a misleadingly successful path.
+        SvgRenderer::new(&content, 480, 480).expect("fallback SVG must construct SvgRenderer");
+    }
+
+    #[test]
+    fn missing_html_layout_falls_back_to_system_stats() {
+        let (name, content) = builtin_layouts::resolve_layout_identity("missing/custom.html", None);
+        assert_eq!(name, builtin_layouts::FALLBACK_HTML_NAME);
+        assert_eq!(content, builtin_layouts::SYSTEM_STATS);
+    }
+
+    #[test]
+    fn present_layout_keeps_configured_identity() {
+        let (name, content) = builtin_layouts::resolve_layout_identity(
+            "svg/custom.svg",
+            Some("<svg></svg>".to_string()),
+        );
+        assert_eq!(name, "svg/custom.svg");
+        assert_eq!(content, "<svg></svg>");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_display_mode() {
+        let mut cfg = super::Config::default();
+        cfg.display.mode = "svgg".into();
+        let err = cfg.validate().expect_err("unknown mode must fail");
+        assert!(
+            err.to_string().contains("must be one of svg, html, xvfb"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_mode_layout_extension_mismatch() {
+        let mut cfg = super::Config::default();
+        cfg.display.mode = "svg".into();
+        cfg.display.default_layout = "system-stats.html".into();
+        let err = cfg
+            .validate()
+            .expect_err("svg mode + html layout must fail");
+        assert!(err.to_string().contains("must end with .svg"), "{err}");
+
+        cfg.display.mode = "html".into();
+        cfg.display.default_layout = "svg/neon-dash-v2.svg".into();
+        let err = cfg
+            .validate()
+            .expect_err("html mode + svg layout must fail");
+        assert!(err.to_string().contains("must end with .html"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_matching_mode_and_layout() {
+        let mut cfg = super::Config::default();
+        cfg.display.mode = "svg".into();
+        cfg.display.default_layout = "svg/neon-dash-v2.svg".into();
+        cfg.validate().expect("matching svg mode/layout");
+
+        cfg.display.mode = "html".into();
+        cfg.display.default_layout = "system-stats.html".into();
+        cfg.validate().expect("matching html mode/layout");
+
+        cfg.display.mode = "xvfb".into();
+        cfg.display.default_layout = "svg/neon-dash-v2.svg".into();
+        cfg.validate().expect("xvfb mode ignores layout extension");
+    }
 
     #[test]
     fn seed_wrapper_dir_creates_both_configs() {

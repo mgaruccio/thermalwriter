@@ -126,13 +126,14 @@ pub fn build_layout_source(
         renderer.set_background(background)?;
         Ok(Box::new(renderer))
     } else {
-        let renderer = TemplateRenderer::new(&template, width, height).map_err(|e| {
+        let mut renderer = TemplateRenderer::new(&template, width, height).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to create TemplateRenderer for '{}': {}",
                 layout_path.display(),
                 e
             )
         })?;
+        renderer.set_layout_vars(vars);
         Ok(Box::new(renderer))
     }
 }

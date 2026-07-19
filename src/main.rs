@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
     // populates correctly even when starting in xvfb mode.
     let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> =
         Some(Arc::new(std::sync::Mutex::new(SensorHistory::new())));
-    let (initial_frame_source, initial_xvfb_handle, active_tick_rate) =
+    let (initial_frame_source, initial_xvfb_handle, active_tick_rate, resolved_active_layout) =
         if config.display.mode == "xvfb" {
             if config.xvfb.command.is_empty() {
                 anyhow::bail!("xvfb mode requires [xvfb] command in config");
@@ -259,15 +259,24 @@ async fn main() -> Result<()> {
             let boxed: Box<dyn FrameSource> = Box::new(source);
             // History is allocated but not seeded with layout frontmatter — metrics get configured
             // when the user switches to a layout via D-Bus set_layout.
-            (boxed, Some(handle), xvfb_tick_rate)
+            (
+                boxed,
+                Some(handle),
+                xvfb_tick_rate,
+                config.display.default_layout.clone(),
+            )
         } else {
-            // Load configured layout — user file takes precedence over built-in
+            // Load configured layout — user file takes precedence over built-in.
+            // Missing files fall back to a builtin whose content AND identity match
+            // the configured layout kind (SVG↔SVG, HTML↔HTML).
             let layout_path = layout_dir.join(&config.display.default_layout);
-            let template = if layout_path.exists() {
-                std::fs::read_to_string(&layout_path)?
+            let on_disk = if layout_path.exists() {
+                Some(std::fs::read_to_string(&layout_path)?)
             } else {
-                builtin_layouts::SYSTEM_STATS.to_string()
+                None
             };
+            let (resolved_layout, template) =
+                builtin_layouts::resolve_layout_identity(&config.display.default_layout, on_disk);
 
             let frontmatter = LayoutFrontmatter::parse(&template);
             // Configure history metrics from the layout's frontmatter into the
@@ -281,8 +290,13 @@ async fn main() -> Result<()> {
             }
 
             let theme_palette: ThemePalette = config.theme.manual.clone().unwrap_or_default();
+            let layout_vars = config
+                .layout_vars
+                .get(&resolved_layout)
+                .cloned()
+                .unwrap_or_default();
 
-            let is_svg = config.display.default_layout.ends_with(".svg");
+            let is_svg = resolved_layout.ends_with(".svg");
             let boxed: Box<dyn FrameSource> = if is_svg {
                 let mut renderer =
                     SvgRenderer::new(&template, source_display.width(), source_display.height())?;
@@ -290,29 +304,25 @@ async fn main() -> Result<()> {
                     renderer.set_history(hist.clone());
                 }
                 renderer.set_theme(theme_palette);
-                renderer.set_layout_vars(
-                    config
-                        .layout_vars
-                        .get(&config.display.default_layout)
-                        .cloned()
-                        .unwrap_or_default(),
-                );
+                renderer.set_layout_vars(layout_vars);
                 let _ = renderer.set_background(initial_background.clone());
                 Box::new(renderer)
             } else {
-                Box::new(TemplateRenderer::new(
+                let mut renderer = TemplateRenderer::new(
                     &template,
                     source_display.width(),
                     source_display.height(),
-                )?)
+                )?;
+                renderer.set_layout_vars(layout_vars);
+                Box::new(renderer)
             };
 
-            (boxed, None, config.display.tick_rate)
+            (boxed, None, config.display.tick_rate, resolved_layout)
         };
 
     // Shared state for D-Bus ↔ tick loop communication
     let state = Arc::new(Mutex::new(ServiceState {
-        active_layout: config.display.default_layout.clone(),
+        active_layout: resolved_active_layout.clone(),
         mode: config.display.mode.clone(),
         connected,
         resolution: (display.width(), display.height()),
@@ -376,7 +386,7 @@ async fn main() -> Result<()> {
     let mut generation_rx_listener = generation_rx.clone();
     let source_revision_tx_listener = source_revision_tx.clone();
     let initial_mode = config.display.mode.clone();
-    let initial_active_layout = config.display.default_layout.clone();
+    let initial_active_layout = resolved_active_layout;
     let initial_layout_vars = config
         .layout_vars
         .get(&initial_active_layout)

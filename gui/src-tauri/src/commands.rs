@@ -10,7 +10,7 @@ use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
 use thermalwriter::render::palette::{self, SchemeSuggestion};
 use thermalwriter::render::svg::SvgRenderer;
-use thermalwriter::render::{FrameSource, SensorData};
+use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::validation::{
     LayoutVarError, PathContainmentError, validate_layout_vars, validate_path_within_dir,
@@ -34,9 +34,15 @@ pub struct RendererState {
 /// Cached preview renderer state. The renderer is keyed by layout; the decoded
 /// background pixmap is keyed by image name so slider/keystroke previews avoid
 /// re-reading and re-decoding the same background file.
+/// Cached preview renderer. SVG and HTML layouts use different backends.
+enum CachedRenderer {
+    Svg(Box<SvgRenderer<'static>>),
+    Html(TemplateRenderer),
+}
+
 struct RendererCache {
     current_layout: Option<String>,
-    renderer: Option<SvgRenderer<'static>>,
+    renderer: Option<CachedRenderer>,
     current_background: Option<String>,
     background_pixmap: Option<Arc<BackgroundImage>>,
 }
@@ -189,22 +195,30 @@ pub fn render_preview(
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
     let background_image = cached_preview_background(&state, &mut cache, background.as_deref())?;
+    let is_svg = layout.ends_with(".svg");
     if cache.current_layout.as_deref() != Some(layout.as_str()) || cache.renderer.is_none() {
-        let mut renderer =
-            SvgRenderer::new(&content, 480, 480).map_err(|e| AppError::Render(e.to_string()))?;
-        // Layouts that declare history metrics reference history arrays via
-        // graph(data=...); Tera errors on the undefined arg if they're absent.
-        // Seed synthetic history (same approach as the preview_layout example)
-        // so the live preview matches what the daemon renders instead of failing.
-        if !frontmatter.history_configs.is_empty() {
-            let mut history = SensorHistory::new();
-            for (metric, cfg) in &frontmatter.history_configs {
-                history.configure_metric(metric, cfg.duration);
+        let renderer = if is_svg {
+            let mut renderer = SvgRenderer::new(&content, 480, 480)
+                .map_err(|e| AppError::Render(e.to_string()))?;
+            // Layouts that declare history metrics reference history arrays via
+            // graph(data=...); Tera errors on the undefined arg if they're absent.
+            // Seed synthetic history (same approach as the preview_layout example)
+            // so the live preview matches what the daemon renders instead of failing.
+            if !frontmatter.history_configs.is_empty() {
+                let mut history = SensorHistory::new();
+                for (metric, cfg) in &frontmatter.history_configs {
+                    history.configure_metric(metric, cfg.duration);
+                }
+                let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
+                fill_synthetic_history(&mut history, &metrics, &mock_sensors());
+                renderer.set_history(Arc::new(std::sync::Mutex::new(history)));
             }
-            let metrics: Vec<String> = frontmatter.history_configs.keys().cloned().collect();
-            fill_synthetic_history(&mut history, &metrics, &mock_sensors());
-            renderer.set_history(Arc::new(std::sync::Mutex::new(history)));
-        }
+            CachedRenderer::Svg(Box::new(renderer))
+        } else {
+            let renderer = TemplateRenderer::new(&content, 480, 480)
+                .map_err(|e| AppError::Render(e.to_string()))?;
+            CachedRenderer::Html(renderer)
+        };
         cache.renderer = Some(renderer);
         cache.current_layout = Some(layout.clone());
     }
@@ -212,15 +226,24 @@ pub fn render_preview(
         .renderer
         .as_mut()
         .ok_or_else(|| AppError::Render("renderer not initialized".into()))?;
-    renderer.set_theme(theme);
-    renderer.set_layout_vars(vars);
-    renderer
-        .set_background(background_image)
-        .map_err(|error| AppError::Render(error.to_string()))?;
-
-    let frame = renderer
-        .render(&mock_sensors())
-        .map_err(|e| AppError::Render(e.to_string()))?;
+    let frame = match renderer {
+        CachedRenderer::Svg(renderer) => {
+            renderer.set_theme(theme);
+            renderer.set_layout_vars(vars);
+            renderer
+                .set_background(background_image)
+                .map_err(|error| AppError::Render(error.to_string()))?;
+            renderer
+                .render(&mock_sensors())
+                .map_err(|e| AppError::Render(e.to_string()))?
+        }
+        CachedRenderer::Html(renderer) => {
+            renderer.set_layout_vars(vars);
+            renderer
+                .render(&mock_sensors())
+                .map_err(|e| AppError::Render(e.to_string()))?
+        }
+    };
     Ok(Response::new(rgb_to_rgba(&frame.data)))
 }
 
@@ -1181,6 +1204,23 @@ mod tests {
     }
 
     #[test]
+    fn html_layout_preview_builds_template_renderer_not_svg() {
+        let html = r#"<div style="width: 480px; height: 480px; background: #112233;"></div>"#;
+        // Dispatch by extension: .html -> TemplateRenderer. Construction + render
+        // must succeed for HTML (the old path always built SvgRenderer).
+        let mut renderer = TemplateRenderer::new(html, 480, 480).expect("html preview renderer");
+        let frame = renderer
+            .render(&SensorData::new())
+            .expect("html preview must render");
+        assert_eq!(frame.width, 480);
+        assert_eq!(frame.height, 480);
+        assert_eq!(frame.data.len(), 480 * 480 * 3);
+        // Center pixel should be the declared fill (straight RGB).
+        let offset = ((240 * 480 + 240) * 3) as usize;
+        assert_eq!(&frame.data[offset..offset + 3], &[0x11, 0x22, 0x33]);
+    }
+
+    #[test]
     fn render_preview_helper_produces_921600_bytes() {
         // Drive the same pipeline render_preview uses — but call into it via
         // the helpers we can construct in tests (no Tauri runtime available).
@@ -1264,7 +1304,7 @@ mod tests {
             let mut cache = lock_cache(&state);
             assert!(cache.renderer.is_none(), "cache empty initially");
             let r = SvgRenderer::new(&content, 480, 480).unwrap();
-            cache.renderer = Some(r);
+            cache.renderer = Some(CachedRenderer::Svg(Box::new(r)));
             cache.current_layout = Some(layout.clone());
         }
 
@@ -1288,7 +1328,7 @@ mod tests {
         {
             let mut cache = lock_cache(&state);
             let r = SvgRenderer::new(SIMPLE_SVG, 480, 480).unwrap();
-            cache.renderer = Some(r);
+            cache.renderer = Some(CachedRenderer::Svg(Box::new(r)));
             cache.current_layout = Some(layout1.clone());
         }
 

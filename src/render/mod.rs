@@ -94,6 +94,8 @@ pub struct TemplateRenderer {
     height: u32,
     render_width: u32,
     render_height: u32,
+    variable_defaults: HashMap<String, String>,
+    variable_overrides: HashMap<String, String>,
 }
 
 fn template_canvas_dimensions(template: &str, width: u32, height: u32) -> (u32, u32) {
@@ -126,6 +128,14 @@ fn contain_pixmap(source: &Pixmap, width: u32, height: u32) -> Result<Pixmap> {
     Ok(output)
 }
 
+fn template_variable_defaults(template: &str) -> HashMap<String, String> {
+    frontmatter::LayoutFrontmatter::parse(template)
+        .variables
+        .iter()
+        .map(|(name, decl)| (name.clone(), decl.default.clone()))
+        .collect()
+}
+
 impl TemplateRenderer {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
         let (render_width, render_height) = template_canvas_dimensions(template, width, height);
@@ -135,6 +145,8 @@ impl TemplateRenderer {
             height,
             render_width,
             render_height,
+            variable_defaults: template_variable_defaults(template),
+            variable_overrides: HashMap::new(),
         })
     }
 
@@ -142,6 +154,13 @@ impl TemplateRenderer {
         self.template = template.to_string();
         (self.render_width, self.render_height) =
             template_canvas_dimensions(template, self.width, self.height);
+        self.variable_defaults = template_variable_defaults(template);
+    }
+
+    /// Set per-layout variable overrides. Injected after frontmatter defaults so
+    /// saved GUI choices win.
+    pub fn set_layout_vars(&mut self, vars: HashMap<String, String>) {
+        self.variable_overrides = vars;
     }
 }
 
@@ -150,6 +169,13 @@ impl FrameSource for TemplateRenderer {
         // Step 1: Template substitution via tera
         let mut context = tera::Context::new();
         for (key, value) in sensors {
+            context.insert(key, value);
+        }
+        // Frontmatter defaults, then user overrides (GUI/config).
+        for (key, value) in &self.variable_defaults {
+            context.insert(key, value);
+        }
+        for (key, value) in &self.variable_overrides {
             context.insert(key, value);
         }
         context.insert("width", &self.render_width);
@@ -211,6 +237,10 @@ impl FrameSource for TemplateRenderer {
     fn name(&self) -> &str {
         "template"
     }
+
+    fn set_template(&mut self, template: &str) {
+        TemplateRenderer::set_template(self, template);
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +277,40 @@ mod tests {
         assert_eq!(rgb_at(&frame, 120, 240), [0, 0, 255]);
         assert_eq!(rgb_at(&frame, 730, 240), [0, 0, 255]);
         assert_eq!(rgb_at(&frame, 754, 240), [8, 8, 15]);
+    }
+
+    #[test]
+    fn template_renderer_set_template_hot_reloads_via_frame_source() {
+        let initial = r#"<div style="width: 480px; height: 480px; background: #ff0000;"></div>"#;
+        let updated = r#"<div style="width: 480px; height: 480px; background: #00ff00;"></div>"#;
+        let mut renderer = TemplateRenderer::new(initial, 480, 480).unwrap();
+        let before = renderer.render(&SensorData::new()).unwrap();
+        assert_eq!(rgb_at(&before, 240, 240), [255, 0, 0]);
+
+        FrameSource::set_template(&mut renderer, updated);
+        let after = renderer.render(&SensorData::new()).unwrap();
+        assert_eq!(
+            rgb_at(&after, 240, 240),
+            [0, 255, 0],
+            "FrameSource::set_template must hot-reload HTML templates"
+        );
+    }
+
+    #[test]
+    fn template_renderer_injects_layout_vars_with_overrides() {
+        let template = r##"{# vars:
+accent: color = "#112233" "Accent fill"
+#}
+<div style="width: 480px; height: 480px; background: {{ accent }};"></div>"##;
+        let mut renderer = TemplateRenderer::new(template, 480, 480).unwrap();
+        let defaults = renderer.render(&SensorData::new()).unwrap();
+        assert_eq!(rgb_at(&defaults, 240, 240), [0x11, 0x22, 0x33]);
+
+        renderer.set_layout_vars(HashMap::from([(
+            "accent".to_string(),
+            "#445566".to_string(),
+        )]));
+        let overridden = renderer.render(&SensorData::new()).unwrap();
+        assert_eq!(rgb_at(&overridden, 240, 240), [0x44, 0x55, 0x66]);
     }
 }

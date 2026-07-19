@@ -320,7 +320,7 @@ tick_rate = 15
 default_layout = "minimal.html"
 jpeg_quality = 100
 rotation = 0
-mode = "svg"
+mode = "html"
 device = "auto"
 "#,
     )

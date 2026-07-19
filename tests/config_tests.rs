@@ -84,6 +84,7 @@ fn config_loads_from_valid_toml() {
 tick_rate = 5
 default_layout = "gpu-focus.html"
 jpeg_quality = 90
+mode = "html"
 
 [sensors]
 poll_interval_ms = 500
