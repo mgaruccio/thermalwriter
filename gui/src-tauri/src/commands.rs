@@ -12,6 +12,9 @@ use thermalwriter::render::palette::{self, SchemeSuggestion};
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, SensorData};
 use thermalwriter::sensor::history::SensorHistory;
+use thermalwriter::validation::{
+    LayoutVarError, PathContainmentError, validate_layout_vars, validate_path_within_dir,
+};
 
 use crate::error::AppError;
 
@@ -825,31 +828,38 @@ fn dedupe_background_name(bg_dir: &Path, name: &str) -> String {
     format!("{stem}-import.{ext}")
 }
 
+fn map_background_path_error(err: PathContainmentError) -> AppError {
+    match err {
+        PathContainmentError::NotFound { name, .. } => AppError::BackgroundNotFound(name),
+        PathContainmentError::BaseInaccessible { source, .. } => {
+            AppError::InvalidBackground(format!("background dir not accessible: {source}"))
+        }
+        PathContainmentError::Escapes { name, .. } => {
+            AppError::InvalidBackground(format!("{name} escapes background directory"))
+        }
+        PathContainmentError::Absolute { name, .. }
+        | PathContainmentError::ParentDir { name, .. } => AppError::InvalidBackground(name),
+    }
+}
+
 /// Resolve a background filename relative to the background directory, rejecting
 /// any path that escapes via `..`, absolute paths, or symlinks pointing outside.
 fn validate_background_path(bg_dir: &Path, name: &str) -> Result<PathBuf, AppError> {
-    let candidate = Path::new(name);
-    if candidate.is_absolute()
-        || candidate
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(AppError::InvalidBackground(name.to_string()));
-    }
+    validate_path_within_dir(bg_dir, name, "Background").map_err(map_background_path_error)
+}
 
-    let base = bg_dir
-        .canonicalize()
-        .map_err(|e| AppError::InvalidBackground(format!("background dir not accessible: {e}")))?;
-    let resolved = base
-        .join(name)
-        .canonicalize()
-        .map_err(|_| AppError::BackgroundNotFound(name.to_string()))?;
-    if !resolved.starts_with(&base) {
-        return Err(AppError::InvalidBackground(format!(
-            "{name} escapes background directory"
-        )));
+fn map_layout_path_error(err: PathContainmentError) -> AppError {
+    match err {
+        PathContainmentError::NotFound { name, .. } => AppError::LayoutNotFound(name),
+        PathContainmentError::BaseInaccessible { source, .. } => {
+            AppError::InvalidLayout(format!("layout dir not accessible: {source}"))
+        }
+        PathContainmentError::Escapes { name, .. } => {
+            AppError::InvalidLayout(format!("{name} escapes layout directory"))
+        }
+        PathContainmentError::Absolute { name, .. }
+        | PathContainmentError::ParentDir { name, .. } => AppError::InvalidLayout(name),
     }
-    Ok(resolved)
 }
 
 /// Resolve a layout name relative to the layout directory, rejecting any path
@@ -857,80 +867,15 @@ fn validate_background_path(bg_dir: &Path, name: &str) -> Result<PathBuf, AppErr
 /// pointing outside). Uses `canonicalize` + `starts_with` per the security
 /// requirement — never relies on textual `..` checks alone.
 fn validate_layout_path(layout_dir: &Path, name: &str) -> Result<PathBuf, AppError> {
-    let candidate = Path::new(name);
-    if candidate.is_absolute()
-        || candidate
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(AppError::InvalidLayout(name.to_string()));
-    }
-
-    let base = layout_dir
-        .canonicalize()
-        .map_err(|e| AppError::InvalidLayout(format!("layout dir not accessible: {e}")))?;
-    let resolved = base
-        .join(name)
-        .canonicalize()
-        .map_err(|_| AppError::LayoutNotFound(name.to_string()))?;
-    if !resolved.starts_with(&base) {
-        return Err(AppError::InvalidLayout(format!(
-            "{name} escapes layout directory"
-        )));
-    }
-    Ok(resolved)
+    validate_path_within_dir(layout_dir, name, "Layout").map_err(map_layout_path_error)
 }
 
 fn validate_vars(
     declarations: &HashMap<String, FrontmatterVar>,
     vars: &HashMap<String, String>,
 ) -> Result<(), AppError> {
-    for (name, value) in vars {
-        let Some(decl) = declarations.get(name) else {
-            return Err(AppError::InvalidVariable(format!(
-                "unknown layout variable: {name}"
-            )));
-        };
-        match decl.var_type.as_str() {
-            "color" if !is_valid_color(value) => {
-                return Err(AppError::InvalidVariable(format!(
-                    "{name} must be a #rrggbb or #rrggbbaa color"
-                )));
-            }
-            "text" if contains_template_syntax(value) => {
-                return Err(AppError::InvalidVariable(format!(
-                    "{name} may not contain template syntax"
-                )));
-            }
-            "sensor" if value.trim().is_empty() => {
-                return Err(AppError::InvalidVariable(format!(
-                    "{name} must select a sensor"
-                )));
-            }
-            "number" => {
-                let n = value
-                    .parse::<f64>()
-                    .map_err(|_| AppError::InvalidVariable(format!("{name} must be a number")))?;
-                if let Some(min) = decl.min
-                    && n < min
-                {
-                    return Err(AppError::InvalidVariable(format!("{name} must be ≥ {min}")));
-                }
-                if let Some(max) = decl.max
-                    && n > max
-                {
-                    return Err(AppError::InvalidVariable(format!("{name} must be ≤ {max}")));
-                }
-            }
-            "color" | "text" | "sensor" => {}
-            other => {
-                return Err(AppError::InvalidVariable(format!(
-                    "unsupported variable type for {name}: {other}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    validate_layout_vars(declarations, vars)
+        .map_err(|LayoutVarError(msg)| AppError::InvalidVariable(msg))
 }
 
 fn cached_preview_background(
@@ -954,17 +899,6 @@ fn cached_preview_background(
     }
 
     Ok(cache.background_pixmap.clone())
-}
-
-fn is_valid_color(value: &str) -> bool {
-    let Some(hex) = value.strip_prefix('#') else {
-        return false;
-    };
-    matches!(hex.len(), 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn contains_template_syntax(value: &str) -> bool {
-    value.contains("{{") || value.contains("}}") || value.contains("{%") || value.contains("%}")
 }
 
 /// Pre-fill `history` with a deterministic sinusoidal wave per metric so the
@@ -1080,6 +1014,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
     use thermalwriter::render::FrameSource;
+    use thermalwriter::validation::{contains_template_syntax, is_valid_color};
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480">
@@ -1588,6 +1523,19 @@ mod tests {
             validate_vars(&decls, &vars).unwrap_err(),
             AppError::InvalidVariable(_)
         ));
+    }
+
+    #[test]
+    fn validate_vars_number_rejects_non_finite() {
+        let decls = number_decl(Some(0.0), Some(100.0));
+        for bad in ["NaN", "inf", "-inf"] {
+            let vars = HashMap::from([("panel_opacity".to_string(), bad.to_string())]);
+            let err = validate_vars(&decls, &vars).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidVariable(ref m) if m.contains("finite")),
+                "expected finite rejection for {bad}, got {err:?}"
+            );
+        }
     }
 
     // ---- background import ----

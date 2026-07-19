@@ -10,3 +10,4 @@ pub mod service;
 pub mod theme;
 #[cfg(feature = "daemon")]
 pub mod transport;
+pub mod validation;

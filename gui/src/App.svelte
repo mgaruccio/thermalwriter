@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import BgGallery from "./lib/BgGallery.svelte";
   import StreamTab from "./lib/StreamTab.svelte";
+  import { bumpRevision, isCurrentRevision } from "./lib/asyncSelection";
 
   // Canonical prefix of AppError::DaemonUnavailable's serialized Display string.
   // AppError serializes to a plain string; this prefix is guaranteed by the
@@ -61,6 +62,8 @@
   let sensors = $state<SensorDescriptor[]>([]);
   let values = $state<Record<string, string>>({});
   let selectedLayout = $state("");
+  let layoutSelectionRev = 0;
+  let previewRequestRev = 0;
   let backgrounds = $state<string[]>([]);
   let selectedBackground = $state<string | null>(null);
   let loading = $state(true);
@@ -179,10 +182,13 @@
   });
 
   async function selectLayout(name: string) {
+    const rev = (layoutSelectionRev = bumpRevision(layoutSelectionRev));
     selectedLayout = name;
     status = "";
     error = "";
-    variables = await invoke<VariableDecl[]>("get_layout_vars", { layout: name });
+    const decls = await invoke<VariableDecl[]>("get_layout_vars", { layout: name });
+    if (!isCurrentRevision(rev, layoutSelectionRev)) return;
+    variables = decls;
     values = Object.fromEntries(variables.map((variable) => [variable.name, variable.value]));
     schedulePreview();
   }
@@ -209,22 +215,28 @@
 
   async function renderPreview() {
     if (!selectedLayout || !canvas) return;
+    const rev = (previewRequestRev = bumpRevision(previewRequestRev));
+    const layout = selectedLayout;
+    const varsSnapshot = { ...values };
+    const background = selectedBackground;
     previewing = true;
     error = "";
     try {
       const buffer = await invoke<ArrayBuffer>("render_preview", {
-        layout: selectedLayout,
-        vars: values,
-        background: selectedBackground,
+        layout,
+        vars: varsSnapshot,
+        background,
       });
+      if (!isCurrentRevision(rev, previewRequestRev) || layout !== selectedLayout) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
       const image = new ImageData(new Uint8ClampedArray(buffer), 480, 480);
       ctx.putImageData(image, 0, 0);
     } catch (e) {
+      if (!isCurrentRevision(rev, previewRequestRev) || layout !== selectedLayout) return;
       error = String(e);
     } finally {
-      previewing = false;
+      if (isCurrentRevision(rev, previewRequestRev)) previewing = false;
     }
   }
 

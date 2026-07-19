@@ -15,6 +15,7 @@ use zbus::{interface, object_server::SignalEmitter};
 use crate::config::Config;
 use crate::render::background::BackgroundImage;
 use crate::render::frontmatter::LayoutFrontmatter;
+use crate::validation::{PathContainmentError, validate_layout_vars, validate_path_within_dir};
 
 /// Message sent through the mode change channel to switch display modes.
 ///
@@ -150,50 +151,24 @@ impl DisplayInterface {
 // Factored out so tests can call them without binding a D-Bus service name.
 // ---------------------------------------------------------------------------
 
-/// Shared traversal guard: resolve `name` against `base_dir` and return the
-/// canonical path only if it stays within the directory. Rejects absolute paths,
-/// `..` components, symlink escapes, and non-existent names.
-/// `kind` labels error messages ("Layout", "Background").
-fn validate_path_within_dir(
+fn map_path_error(err: PathContainmentError) -> zbus::fdo::Error {
+    match err {
+        PathContainmentError::BaseInaccessible { .. } => zbus::fdo::Error::Failed(err.to_string()),
+        other => zbus::fdo::Error::InvalidArgs(other.to_string()),
+    }
+}
+
+fn validate_path_within_dir_fdo(
     base_dir: &Path,
     name: &str,
-    kind: &str,
+    kind: &'static str,
 ) -> Result<PathBuf, zbus::fdo::Error> {
-    let candidate = Path::new(name);
-    if candidate.is_absolute() {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "{kind} name must be relative: {name}"
-        )));
-    }
-    if candidate
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "{kind} name may not contain '..': {name}"
-        )));
-    }
-    let base = base_dir.canonicalize().map_err(|e| {
-        zbus::fdo::Error::Failed(format!(
-            "{kind} directory not accessible ({}): {e}",
-            base_dir.display()
-        ))
-    })?;
-    let resolved = base
-        .join(name)
-        .canonicalize()
-        .map_err(|_| zbus::fdo::Error::InvalidArgs(format!("{kind} not found: {name}")))?;
-    if !resolved.starts_with(&base) {
-        return Err(zbus::fdo::Error::InvalidArgs(format!(
-            "{kind} path escapes directory: {name}"
-        )));
-    }
-    Ok(resolved)
+    validate_path_within_dir(base_dir, name, kind).map_err(map_path_error)
 }
 
 /// Resolve `name` against `layout_dir`, rejecting traversal and symlink escapes.
 pub fn validate_layout_path(layout_dir: &Path, name: &str) -> Result<PathBuf, zbus::fdo::Error> {
-    validate_path_within_dir(layout_dir, name, "Layout")
+    validate_path_within_dir_fdo(layout_dir, name, "Layout")
 }
 
 /// List layout files (`.html` and `.svg`) under `layout_dir`, recursing one
@@ -263,7 +238,7 @@ fn has_image_ext(p: &Path) -> bool {
 
 /// Resolve `name` against `bg_dir`, rejecting traversal and symlink escapes.
 pub fn validate_background_path(bg_dir: &Path, name: &str) -> Result<PathBuf, zbus::fdo::Error> {
-    validate_path_within_dir(bg_dir, name, "Background")
+    validate_path_within_dir_fdo(bg_dir, name, "Background")
 }
 
 /// List background image files (PNG/JPEG) under `bg_dir`. Flat listing only.
@@ -828,7 +803,17 @@ impl DisplayInterface {
 
         // Serialize all config.toml writers — prevents read-modify-write races.
         let _write_guard = write_lock.lock().await;
-        validate_layout_path(&layout_dir, &name)?;
+        let layout_path = validate_layout_path(&layout_dir, &name)?;
+        let layout_content = std::fs::read_to_string(&layout_path).map_err(|e| {
+            zbus::fdo::Error::Failed(format!(
+                "Failed to read layout {}: {}",
+                layout_path.display(),
+                e
+            ))
+        })?;
+        let frontmatter = LayoutFrontmatter::parse(&layout_content);
+        validate_layout_vars(&frontmatter.variables, &vars)
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         Config::save_layout_vars(&config_path, &name, &vars).map_err(|e| {
             zbus::fdo::Error::Failed(format!("Failed to persist layout vars: {}", e))
         })?;
@@ -1189,7 +1174,14 @@ mod tests {
         let layout_dir = dir.path().join("layouts");
         std::fs::create_dir_all(&layout_dir).unwrap();
         // A real file so validate_layout_path can canonicalize it.
-        std::fs::write(layout_dir.join("test.svg"), "<svg/>").unwrap();
+        std::fs::write(
+            layout_dir.join("test.svg"),
+            r##"{# vars:
+accent_color: color = "#ff0000" "Accent"
+#}
+<svg/>"##,
+        )
+        .unwrap();
 
         let (shutdown_tx, _) = watch::channel(false);
         let (tick_rate_tx, _) = watch::channel::<u32>(display_tick_rate);
@@ -2159,6 +2151,62 @@ mod tests {
             spy_rx2.try_recv().is_err(),
             "must not send ModeChange::Layout while streaming"
         );
+    }
+
+    /// [#61/#66]: D-Bus set_layout_vars must reject undeclared / non-finite vars
+    /// before persisting them.
+    #[tokio::test]
+    async fn set_layout_vars_rejects_unknown_and_nonfinite_vars() {
+        let (state, dir) = make_test_state(15, 2).await;
+        // Seed a layout that declares a bounded number var.
+        let layout_dir = {
+            let s = state.lock().await;
+            s.layout_dir.clone()
+        };
+        std::fs::write(
+            layout_dir.join("vars.svg"),
+            r#"{# vars:
+scale: number(0,10,1) = "1" "Scale"
+#}
+<svg/>"#,
+        )
+        .unwrap();
+
+        let iface = DisplayInterface::new(state.clone());
+        let unknown = iface
+            .set_layout_vars(
+                "vars.svg".to_string(),
+                [("nope".to_string(), "1".to_string())].into(),
+            )
+            .await
+            .expect_err("unknown var must fail");
+        assert!(
+            unknown.to_string().contains("unknown layout variable"),
+            "{unknown}"
+        );
+
+        let nonfinite = iface
+            .set_layout_vars(
+                "vars.svg".to_string(),
+                [("scale".to_string(), "NaN".to_string())].into(),
+            )
+            .await
+            .expect_err("NaN must fail");
+        assert!(nonfinite.to_string().contains("finite"), "{nonfinite}");
+
+        // Nothing should have been persisted for the failed writes.
+        let config_path = dir.path().join("config.toml");
+        if config_path.exists() {
+            let written = std::fs::read_to_string(&config_path).unwrap_or_default();
+            assert!(
+                !written.contains("nope"),
+                "failed validation must not persist unknown var: {written}"
+            );
+            assert!(
+                !written.contains("NaN"),
+                "failed validation must not persist NaN: {written}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

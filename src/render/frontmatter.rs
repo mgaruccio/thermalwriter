@@ -272,6 +272,24 @@ impl LayoutFrontmatter {
     }
 }
 
+/// `#rrggbb` / `#rrggbbaa` color check shared with layout-variable validation.
+pub fn is_valid_color(s: &str) -> bool {
+    if !s.starts_with('#') {
+        return false;
+    }
+    let hex = &s[1..];
+    let len = hex.len();
+    if len != 6 && len != 8 {
+        return false;
+    }
+    hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Reject Tera markers in free-text layout variables.
+pub fn contains_template_syntax(s: &str) -> bool {
+    s.contains("{{") || s.contains("}}") || s.contains("{%") || s.contains("%}")
+}
+
 /// Parse the inner text of a `number(min,max,step)` bounds spec. Each field is
 /// optional (empty → None), but at most three comma-separated fields are allowed
 /// and every present field must parse as f64.
@@ -297,22 +315,6 @@ fn is_valid_var_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'))
-}
-
-fn is_valid_color(s: &str) -> bool {
-    if !s.starts_with('#') {
-        return false;
-    }
-    let hex = &s[1..];
-    let len = hex.len();
-    if len != 6 && len != 8 {
-        return false;
-    }
-    hex.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn contains_template_syntax(s: &str) -> bool {
-    s.contains("{{") || s.contains("}}") || s.contains("{%") || s.contains("%}")
 }
 
 /// Parse two consecutive quoted strings from a trimmed input, e.g.:
