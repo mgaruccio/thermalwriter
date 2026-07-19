@@ -117,6 +117,23 @@ pub struct ThemeConfig {
     pub manual: Option<ThemePalette>,
 }
 
+impl ThemeConfig {
+    /// Resolve the active palette from `source`.
+    ///
+    /// - `""` / `"default"` → built-in defaults (ignores any manual table)
+    /// - `"manual"` → configured manual palette, or defaults if unset
+    /// - anything else → error
+    pub fn resolve_palette(&self) -> Result<ThemePalette> {
+        match self.source.as_str() {
+            "" | "default" => Ok(ThemePalette::default()),
+            "manual" => Ok(self.manual.clone().unwrap_or_default()),
+            other => {
+                anyhow::bail!("theme.source='{other}' must be one of default, manual (or empty)")
+            }
+        }
+    }
+}
+
 /// Background image configuration. The image file lives under
 /// `~/.config/thermalwriter/backgrounds/`. Empty/None = no background.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -216,6 +233,8 @@ impl Config {
                 anyhow::bail!("display.mode='{other}' must be one of svg, html, xvfb")
             }
         }
+        // Validate theme.source the same way resolve_palette does.
+        let _ = self.theme.resolve_palette()?;
         Ok(())
     }
 
@@ -557,7 +576,9 @@ pub mod builtin_layouts {
 #[cfg(test)]
 mod tests {
     use super::builtin_layouts;
+    use super::{Config, ThemeConfig};
     use crate::render::svg::SvgRenderer;
+    use crate::theme::ThemePalette;
 
     #[test]
     fn missing_svg_layout_falls_back_to_svg_builtin_not_html() {
@@ -741,5 +762,85 @@ mod tests {
         );
         // Pulse audio input
         assert!(conf.contains("method = pulse"));
+    }
+
+    #[test]
+    fn resolve_palette_default_ignores_manual() {
+        let theme = ThemeConfig {
+            source: "default".to_string(),
+            manual: Some(ThemePalette {
+                primary: "#aabbcc".to_string(),
+                ..ThemePalette::default()
+            }),
+        };
+        let palette = theme.resolve_palette().unwrap();
+        assert_eq!(palette.primary, ThemePalette::default().primary);
+        assert_ne!(palette.primary, "#aabbcc");
+    }
+
+    #[test]
+    fn resolve_palette_empty_source_ignores_manual() {
+        let theme = ThemeConfig {
+            source: String::new(),
+            manual: Some(ThemePalette {
+                primary: "#aabbcc".to_string(),
+                ..ThemePalette::default()
+            }),
+        };
+        let palette = theme.resolve_palette().unwrap();
+        assert_eq!(palette, ThemePalette::default());
+    }
+
+    #[test]
+    fn resolve_palette_manual_uses_table() {
+        let manual = ThemePalette {
+            primary: "#aabbcc".to_string(),
+            secondary: "#112233".to_string(),
+            ..ThemePalette::default()
+        };
+        let theme = ThemeConfig {
+            source: "manual".to_string(),
+            manual: Some(manual.clone()),
+        };
+        let palette = theme.resolve_palette().unwrap();
+        assert_eq!(palette.primary, "#aabbcc");
+        assert_eq!(palette.secondary, "#112233");
+    }
+
+    #[test]
+    fn resolve_palette_manual_missing_table_uses_defaults() {
+        let theme = ThemeConfig {
+            source: "manual".to_string(),
+            manual: None,
+        };
+        assert_eq!(theme.resolve_palette().unwrap(), ThemePalette::default());
+    }
+
+    #[test]
+    fn resolve_palette_unknown_source_fails() {
+        let theme = ThemeConfig {
+            source: "garbage".to_string(),
+            manual: None,
+        };
+        assert!(theme.resolve_palette().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_theme_source() {
+        let mut cfg = Config::default();
+        cfg.theme.source = "garbage".to_string();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("theme.source"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_default_and_manual_theme_source() {
+        let mut cfg = Config::default();
+        cfg.theme.source = "default".to_string();
+        cfg.validate().unwrap();
+        cfg.theme.source = "manual".to_string();
+        cfg.validate().unwrap();
+        cfg.theme.source = String::new();
+        cfg.validate().unwrap();
     }
 }

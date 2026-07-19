@@ -68,6 +68,22 @@ impl SensorProvider for AmdGpuProvider {
                 continue;
             }
 
+            // Skip non-AMD cards when vendor/driver identity is present.
+            if let Some(vendor) = Self::read_trimmed(&device_dir.join("vendor")) {
+                if vendor != "0x1002" {
+                    continue;
+                }
+            }
+            if let Ok(driver_target) = fs::read_link(device_dir.join("driver")) {
+                let basename = driver_target
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if basename != "amdgpu" {
+                    continue;
+                }
+            }
+
             // GPU utilization
             if let Some(val) = Self::read_trimmed(&device_dir.join("gpu_busy_percent")) {
                 readings.push(SensorReading {
@@ -121,8 +137,10 @@ impl SensorProvider for AmdGpuProvider {
                 }
             }
 
-            // Only read the first valid card (one GPU)
-            break;
+            // Only commit once we have at least one reading from a candidate card.
+            if !readings.is_empty() {
+                break;
+            }
         }
 
         Ok(readings)

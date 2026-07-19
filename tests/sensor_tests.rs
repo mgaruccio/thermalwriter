@@ -203,6 +203,9 @@ fn build_fake_drm_tree(tmp: &TempDir) -> std::path::PathBuf {
     let card_dir = tmp.path().join("card0").join("device");
     fs::create_dir_all(&card_dir).unwrap();
 
+    // AMD PCI vendor so the provider accepts this card.
+    fs::write(card_dir.join("vendor"), "0x1002\n").unwrap();
+
     // GPU utilization
     fs::write(card_dir.join("gpu_busy_percent"), "42\n").unwrap();
 
@@ -292,6 +295,28 @@ fn amdgpu_partial_sysfs_no_panic() {
     // gpu_util should be present, no panic on missing files
     let util = readings.iter().find(|r| r.key == "gpu_util").unwrap();
     assert_eq!(util.value, "55");
+}
+
+#[test]
+fn amdgpu_skips_non_amd_card_and_reads_later_amd() {
+    // Hybrid systems often enumerate Intel first. card0 is Intel (no AMD nodes);
+    // card1 is AMD with util 77 — poll must return 77, not empty.
+    let tmp = TempDir::new().unwrap();
+
+    let intel = tmp.path().join("card0").join("device");
+    fs::create_dir_all(&intel).unwrap();
+    fs::write(intel.join("vendor"), "0x8086\n").unwrap();
+
+    let amd = tmp.path().join("card1").join("device");
+    fs::create_dir_all(&amd).unwrap();
+    fs::write(amd.join("vendor"), "0x1002\n").unwrap();
+    fs::write(amd.join("gpu_busy_percent"), "77\n").unwrap();
+
+    let mut provider = AmdGpuProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    let util = readings.iter().find(|r| r.key == "gpu_util").unwrap();
+    assert_eq!(util.value, "77");
 }
 
 // ─── SysinfoProvider tests ───────────────────────────────────────────────────

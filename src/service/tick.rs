@@ -306,8 +306,10 @@ pub async fn run_tick_loop(
             }
         }
 
+        // Poll/render/encode are CPU-bound; run them under block_in_place so
+        // Tokio can keep servicing D-Bus on other worker threads.
         let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
-            let data = sensor_hub.poll();
+            let data = tokio::task::block_in_place(|| sensor_hub.poll());
             if let Some(hist) = &sensor_history
                 && let Ok(mut h) = hist.lock()
             {
@@ -322,56 +324,58 @@ pub async fn run_tick_loop(
 
         // Render + encode + send only when ActiveConnection is committed.
         if let Some(conn) = active.as_mut() {
-            match frame_source.render(sensors) {
-                Ok(frame) => match encode_frame(&frame, &conn.info, rotation, jpeg_quality) {
-                    Ok(encoded) => {
-                        debug!(
-                            "Frame encoded: {} bytes ({})",
-                            encoded.data.len(),
-                            encoded.encoding
-                        );
+            let rendered = tokio::task::block_in_place(|| {
+                let frame = frame_source.render(sensors)?;
+                let encoded = encode_frame(&frame, &conn.info, rotation, jpeg_quality)?;
+                Ok::<_, anyhow::Error>((frame, encoded))
+            });
+            match rendered {
+                Ok((frame, encoded)) => {
+                    debug!(
+                        "Frame encoded: {} bytes ({})",
+                        encoded.data.len(),
+                        encoded.encoding
+                    );
 
-                        if frame_source.is_streaming() {
-                            match frame_dump::frame_dir() {
-                                Ok(dir) => {
-                                    let dump_bytes = if encoded.encoding.is_jpeg() {
-                                        encoded.data.clone()
-                                    } else {
-                                        encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
-                                    };
-                                    if !dump_bytes.is_empty()
-                                        && let Err(e) = tokio::task::block_in_place(|| {
-                                            frame_dump::write_frame_atomic(&dir, &dump_bytes)
-                                        })
-                                    {
-                                        warn!("frame_dump write failed: {e}");
-                                    }
+                    if frame_source.is_streaming() {
+                        match frame_dump::frame_dir() {
+                            Ok(dir) => {
+                                let dump_bytes = if encoded.encoding.is_jpeg() {
+                                    encoded.data.clone()
+                                } else {
+                                    encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
+                                };
+                                if !dump_bytes.is_empty()
+                                    && let Err(e) = tokio::task::block_in_place(|| {
+                                        frame_dump::write_frame_atomic(&dir, &dump_bytes)
+                                    })
+                                {
+                                    warn!("frame_dump write failed: {e}");
                                 }
-                                Err(e) => warn!("frame_dump disabled: {e}"),
                             }
-                        }
-
-                        let send_result =
-                            tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
-                        if let Err(e) = send_result {
-                            warn!("Failed to send frame: {e}");
-                            if !conn.transport.is_connected() {
-                                warn!(
-                                    "Fatal send — dropping generation {} and reconnecting",
-                                    conn.generation
-                                );
-                                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                                let _ = connected_tx.send(false);
-                                let _ = generation_tx.send(0);
-                                active = None;
-                                pending = None;
-                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
-                            }
+                            Err(e) => warn!("frame_dump disabled: {e}"),
                         }
                     }
-                    Err(e) => warn!("Frame encode failed: {e:#}"),
-                },
-                Err(e) => warn!("Render failed: {e:#}"),
+
+                    let send_result =
+                        tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
+                    if let Err(e) = send_result {
+                        warn!("Failed to send frame: {e}");
+                        if !conn.transport.is_connected() {
+                            warn!(
+                                "Fatal send — dropping generation {} and reconnecting",
+                                conn.generation
+                            );
+                            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                            let _ = connected_tx.send(false);
+                            let _ = generation_tx.send(0);
+                            active = None;
+                            pending = None;
+                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        }
+                    }
+                }
+                Err(e) => warn!("Render/encode failed: {e:#}"),
             }
         }
 

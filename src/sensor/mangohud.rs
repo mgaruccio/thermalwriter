@@ -34,6 +34,21 @@ impl MangoHudProvider {
         Self { log_dir }
     }
 
+    /// Construct from a configured directory path.
+    /// Empty string uses the same auto-detect path as [`Self::new`].
+    pub fn from_configured_dir(configured: &str) -> Self {
+        if configured.is_empty() {
+            Self::new()
+        } else {
+            Self::with_log_dir(PathBuf::from(configured))
+        }
+    }
+
+    /// Returns the log directory this provider reads from.
+    pub fn log_dir(&self) -> &std::path::Path {
+        &self.log_dir
+    }
+
     /// Find the most recently modified .csv file in the log directory.
     fn find_latest_csv(&self) -> Option<PathBuf> {
         let entries = fs::read_dir(&self.log_dir).ok()?;
@@ -200,5 +215,23 @@ impl SensorProvider for MangoHudProvider {
                 unit: String::new(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_configured_dir_uses_explicit_path() {
+        let provider = MangoHudProvider::from_configured_dir("/tmp/mango");
+        assert_eq!(provider.log_dir(), PathBuf::from("/tmp/mango"));
+    }
+
+    #[test]
+    fn from_configured_dir_empty_uses_default_path_behavior() {
+        let configured = MangoHudProvider::from_configured_dir("");
+        let default = MangoHudProvider::new();
+        assert_eq!(configured.log_dir(), default.log_dir());
     }
 }

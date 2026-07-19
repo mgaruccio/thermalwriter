@@ -211,7 +211,9 @@ async fn main() -> Result<()> {
     sensor_hub.add_provider(Box::new(SysinfoProvider::new()));
     sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
     sensor_hub.add_provider(Box::new(NvidiaProvider::new()));
-    sensor_hub.add_provider(Box::new(MangoHudProvider::new()));
+    sensor_hub.add_provider(Box::new(MangoHudProvider::from_configured_dir(
+        &config.sensors.mangohud_log_dir,
+    )));
     sensor_hub.add_provider(Box::new(RaplProvider::new()));
 
     // Prime providers so they discover devices, then snapshot descriptors for
@@ -289,7 +291,10 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let theme_palette: ThemePalette = config.theme.manual.clone().unwrap_or_default();
+            let theme_palette: ThemePalette = config
+                .theme
+                .resolve_palette()
+                .map_err(|e| anyhow::anyhow!("invalid theme configuration: {e}"))?;
             let layout_vars = config
                 .layout_vars
                 .get(&resolved_layout)
@@ -375,7 +380,10 @@ async fn main() -> Result<()> {
 
     // Theme palette for the mode-change handler to use on layout reload.
     // Computed here (outside the if/else block) so it can be moved into the spawn closure.
-    let reload_theme: ThemePalette = config.theme.manual.clone().unwrap_or_default();
+    let reload_theme: ThemePalette = config
+        .theme
+        .resolve_palette()
+        .map_err(|e| anyhow::anyhow!("invalid theme configuration: {e}"))?;
 
     // Mode change listener: handles layout switches, xvfb mode, background changes,
     // and display-dimension changes after a reconnect.

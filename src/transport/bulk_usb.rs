@@ -5,6 +5,7 @@
 // 390b880abd4cf0ed2d6eae7151493432263eff39 (project version 9.8.6, four commits after the v9.8.6 tag),
 // path: src/trcc/adapters/device/bulk_lcd.py
 
+use super::usb_device::find_device;
 use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
@@ -267,16 +268,6 @@ impl BulkUsb {
             self.info = None;
         }
     }
-}
-
-fn find_device(bus: u8, address: u8) -> Result<rusb::Device<GlobalContext>> {
-    let list = rusb::devices().context("libusb device list failed")?;
-    for device in list.iter() {
-        if device.bus_number() == bus && device.address() == address {
-            return Ok(device);
-        }
-    }
-    bail!("no USB device at bus={bus} address={address}")
 }
 
 impl Transport for BulkUsb {

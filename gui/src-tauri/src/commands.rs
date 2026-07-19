@@ -191,7 +191,10 @@ pub fn render_preview(
     validate_vars(&frontmatter.variables, &vars)?;
 
     let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
-    let theme = config.theme.manual.unwrap_or_default();
+    let theme = config
+        .theme
+        .resolve_palette()
+        .map_err(|e| AppError::Config(e.to_string()))?;
 
     let mut cache = state.cache.lock().map_err(|_| AppError::StatePoisoned)?;
     let background_image = cached_preview_background(&state, &mut cache, background.as_deref())?;
@@ -820,17 +823,33 @@ fn import_background_impl(bg_dir: &Path, filename: &str, data: &[u8]) -> Result<
 
     std::fs::create_dir_all(bg_dir).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
 
-    let stored = dedupe_background_name(bg_dir, base);
-    let dest = bg_dir.join(&stored);
-    // Atomic write: temp sibling (hidden, .tmp suffix so list_backgrounds skips
-    // it) then rename into place.
-    let tmp = bg_dir.join(format!(".{stored}.tmp"));
-    std::fs::write(&tmp, data).map_err(|e| AppError::BackgroundIo(e.to_string()))?;
-    std::fs::rename(&tmp, &dest).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        AppError::BackgroundIo(e.to_string())
-    })?;
-    Ok(stored)
+    // Reserve the destination with create_new so concurrent imports cannot
+    // clobber an existing file via rename-replace. Retry under dedupe if a
+    // race loses the exclusive create.
+    for _ in 0..10_000 {
+        let stored = dedupe_background_name(bg_dir, base);
+        let dest = bg_dir.join(&stored);
+        match write_new_file(&dest, data) {
+            Ok(()) => return Ok(stored),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(AppError::BackgroundIo(e.to_string())),
+        }
+    }
+    Err(AppError::BackgroundIo(format!(
+        "could not reserve a unique name for {base}"
+    )))
+}
+
+/// Write `data` only if `path` does not already exist (`create_new`).
+fn write_new_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Resolve a non-clobbering filename within `bg_dir`. If `name` is free it is
@@ -1625,6 +1644,23 @@ mod tests {
         assert_eq!(second, "bg-1.png");
         assert!(bg_dir.join("bg.png").exists());
         assert!(bg_dir.join("bg-1.png").exists());
+    }
+
+    #[test]
+    fn import_background_create_new_does_not_clobber_existing() {
+        let tmp = TempDir::new().unwrap();
+        let bg_dir = tmp.path().join("backgrounds");
+        fs::create_dir_all(&bg_dir).unwrap();
+        let existing = tiny_png(4, 4);
+        fs::write(bg_dir.join("bg.png"), &existing).unwrap();
+
+        // Even if dedupe raced and returned "bg.png", create_new must refuse to
+        // replace the existing file and retry under a new name.
+        let stored = import_background_impl(&bg_dir, "bg.png", &tiny_png(8, 8)).unwrap();
+        assert_ne!(stored, "bg.png");
+        let kept = fs::read(bg_dir.join("bg.png")).unwrap();
+        assert_eq!(kept, existing, "original bg.png must not be overwritten");
+        assert!(bg_dir.join(&stored).exists());
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod encode;
 pub mod null;
 pub mod profile;
+pub mod usb_device;
 
 // Family implementations (added as they land).
 pub mod hid_lcd;
