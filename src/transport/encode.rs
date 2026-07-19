@@ -132,7 +132,12 @@ pub fn encode_frame(
     })
 }
 
-fn encode_jpeg_bytes(rgb: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+pub(crate) fn encode_jpeg_bytes(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>> {
     let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(width, height, rgb.to_vec())
         .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer for JPEG encode"))?;
     let mut buf = std::io::Cursor::new(Vec::new());

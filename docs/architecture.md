@@ -52,3 +52,14 @@ and the negotiated D-Bus resolution only after the main task has rebuilt a
 dimension-correct frame source and returned the matching generation result.
 Stale source builds cannot overwrite a newer connection. Supported shapes span
 portrait, square, landscape, wide, and ultrawide panels.
+
+Three dimension spaces matter across the daemon and D-Bus surface:
+
+1. **Native / negotiated** — `DeviceInfo` width/height from the handshake
+   profile. The D-Bus `resolution` property and status field report this native
+   panel size, not the oriented render canvas.
+2. **Oriented** — the rotation-aware authoring/render canvas
+   (`oriented_dimensions(native_w, native_h, rotation)`) used before wire-angle
+   encode.
+3. **Wire** — post-encode payload dimensions expected by the transport
+   (`wire_dimensions`).

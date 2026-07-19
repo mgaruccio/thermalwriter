@@ -57,12 +57,27 @@ impl SensorHub {
     }
 
     /// Poll all providers and return aggregated sensor data.
+    ///
+    /// Provider registration order is precedence: earlier providers win.
+    /// Later providers that return a colliding key are ignored, and each
+    /// colliding key is logged at `warn` at most once per poll.
     pub fn poll(&mut self) -> HashMap<String, String> {
         let mut data = HashMap::new();
+        let mut collided_keys = std::collections::HashSet::new();
         for provider in &mut self.providers {
             match provider.poll() {
                 Ok(readings) => {
                     for reading in readings {
+                        if data.contains_key(&reading.key) {
+                            if collided_keys.insert(reading.key.clone()) {
+                                log::warn!(
+                                    "Ignoring sensor key '{}' from provider '{}' (earlier provider already owns it)",
+                                    reading.key,
+                                    provider.name()
+                                );
+                            }
+                            continue;
+                        }
                         data.insert(reading.key, reading.value);
                     }
                 }

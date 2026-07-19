@@ -127,7 +127,7 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
         }
         CtlCommand::Reload => {
             proxy.reload().await.context("Failed to reload daemon")?;
-            println!("Daemon reload signal sent.");
+            println!("Daemon config reloaded.");
         }
         CtlCommand::Mirror { argv } => {
             let result = proxy

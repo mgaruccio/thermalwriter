@@ -1065,10 +1065,82 @@ impl DisplayInterface {
         info!("Shutdown requested via D-Bus");
     }
 
-    /// Trigger a config reload (reconnect transport, re-read layout).
-    async fn reload(&self) {
-        info!("Reload requested via D-Bus");
-        // Full reload handled by tick loop watching layout_change_tx
+    /// Re-read config.toml, refresh the in-memory mirror, and rebuild the active
+    /// layout when not streaming. Returns an error if config is invalid or the
+    /// layout rebuild fails — never reports success for a no-op.
+    async fn reload(&self) -> zbus::fdo::Result<()> {
+        let mode_lock = {
+            let state = self.state.lock().await;
+            state.mode_change_lock.clone()
+        };
+        let _mode_guard = mode_lock.lock().await;
+
+        let (config_path, active_layout, mode, tx, write_lock) = {
+            let state = self.state.lock().await;
+            (
+                state.config_path.clone(),
+                state.active_layout.clone(),
+                state.mode.clone(),
+                state.mode_change_tx.clone(),
+                state.config_write_lock.clone(),
+            )
+        };
+
+        let _write_guard = write_lock.lock().await;
+        let new_config = Config::load(&config_path)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to reload config: {e}")))?;
+        drop(_write_guard);
+
+        let vars = new_config
+            .layout_vars
+            .get(&active_layout)
+            .cloned()
+            .unwrap_or_default();
+        let new_tick = if mode == "xvfb" {
+            new_config.xvfb.tick_rate
+        } else {
+            new_config.display.tick_rate
+        };
+        let jpeg_quality = new_config.display.jpeg_quality;
+
+        {
+            let mut state = self.state.lock().await;
+            state.config = new_config;
+            state.jpeg_quality = jpeg_quality;
+            if mode != "xvfb" {
+                state.tick_rate = new_tick;
+                let _ = state.tick_rate_tx.send(new_tick);
+            }
+        }
+
+        info!(
+            "Reload requested via D-Bus (layout={}, mode={})",
+            active_layout, mode
+        );
+
+        if mode == "xvfb" {
+            return Ok(());
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        tx.send(ModeChange::Layout {
+            name: active_layout,
+            vars,
+            ack: ack_tx,
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to notify tick loop: {e}")))?;
+
+        ack_rx
+            .await
+            .map_err(|_| {
+                zbus::fdo::Error::Failed(
+                    "reload listener dropped ack channel without replying".to_string(),
+                )
+            })?
+            .map_err(|e| zbus::fdo::Error::Failed(format!("reload layout rebuild failed: {e}")))?;
+
+        Ok(())
     }
 
     // --- Properties ---
@@ -1086,7 +1158,10 @@ impl DisplayInterface {
     }
 
     #[zbus(property)]
-    /// Display resolution as (width, height).
+    /// Native negotiated panel size as (width, height).
+    ///
+    /// This is the handshake/`DeviceInfo` resolution, not the oriented render
+    /// canvas after user rotation.
     async fn resolution(&self) -> (u32, u32) {
         self.state.lock().await.resolution
     }
@@ -1945,6 +2020,84 @@ accent_color: color = "#ff0000" "Accent"
             "pre_stream_tick_rate must be None"
         );
         assert_eq!(s.mode, "svg", "mode must be svg after layout switch");
+    }
+
+    /// [#53]: reload re-reads config.toml, updates the in-memory mirror, and
+    /// rebuilds the active layout via an acknowledged ModeChange::Layout.
+    #[tokio::test]
+    async fn reload_rereads_config_and_rebuilds_layout() {
+        let (state, dir) = make_test_state(15, 2).await;
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[display]
+tick_rate = 7
+default_layout = "test.svg"
+jpeg_quality = 90
+rotation = 180
+mode = "svg"
+device = "auto"
+"#,
+        )
+        .unwrap();
+
+        let iface = DisplayInterface::new(state.clone());
+        iface.reload().await.expect("reload must succeed");
+
+        let s = state.lock().await;
+        assert_eq!(s.config.display.tick_rate, 7, "config mirror must refresh");
+        assert_eq!(s.tick_rate, 7, "live tick_rate must refresh");
+        assert_eq!(s.jpeg_quality, 90);
+        assert_eq!(s.mode, "svg");
+    }
+
+    /// [#53]: reload while streaming refreshes config but must not send Layout.
+    #[tokio::test]
+    async fn reload_while_streaming_skips_layout_rebuild() {
+        let (state, dir) = make_test_state(15, 2).await;
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[display]
+tick_rate = 3
+default_layout = "test.svg"
+jpeg_quality = 85
+rotation = 180
+mode = "svg"
+device = "auto"
+
+[xvfb]
+tick_rate = 15
+"#,
+        )
+        .unwrap();
+
+        let (spy_tx, mut spy_rx) = tokio::sync::mpsc::channel::<ModeChange>(4);
+        {
+            let mut s = state.lock().await;
+            s.mode = "xvfb".to_string();
+            s.tick_rate = 15;
+            s.pre_stream_tick_rate = Some(2);
+            s.mode_change_tx = spy_tx;
+        }
+
+        let iface = DisplayInterface::new(state.clone());
+        iface
+            .reload()
+            .await
+            .expect("reload must succeed while streaming");
+
+        assert!(
+            spy_rx.try_recv().is_err(),
+            "reload must not send ModeChange::Layout while streaming"
+        );
+        let s = state.lock().await;
+        assert_eq!(s.config.display.tick_rate, 3);
+        assert_eq!(
+            s.tick_rate, 15,
+            "streaming tick_rate must stay at xvfb rate"
+        );
+        assert_eq!(s.mode, "xvfb");
     }
 
     /// [Task 12 follow-up]: set_layout_vars while streaming must persist vars and

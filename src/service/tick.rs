@@ -59,13 +59,7 @@ pub struct BackgroundApply {
 /// Kept for xvfb frame-dump preview path and tests.
 pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u8>> {
     let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, rotation)?;
-    let img: image::ImageBuffer<image::Rgb<u8>, _> =
-        image::ImageBuffer::from_raw(out_w, out_h, rotated)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
-    let mut buf = std::io::Cursor::new(Vec::new());
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-    image::DynamicImage::ImageRgb8(img).write_with_encoder(encoder)?;
-    Ok(buf.into_inner())
+    crate::transport::encode::encode_jpeg_bytes(&rotated, out_w, out_h, quality)
 }
 
 struct PendingConnection {
@@ -529,5 +523,41 @@ pub fn encoded_jpeg(data: Vec<u8>, width: u32, height: u32) -> EncodedFrame {
         width,
         height,
         encoding: crate::transport::FrameEncoding::Jpeg,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_jpeg;
+    use crate::render::RawFrame;
+    use crate::transport::encode::encode_jpeg_bytes;
+
+    #[test]
+    fn encode_jpeg_delegates_to_encode_jpeg_bytes() {
+        // 2x2 RGB: distinct corners so rotation + encode stay deterministic.
+        let frame = RawFrame {
+            data: vec![
+                255, 0, 0, // (0,0) red
+                0, 255, 0, // (1,0) green
+                0, 0, 255, // (0,1) blue
+                255, 255, 0, // (1,1) yellow
+            ],
+            width: 2,
+            height: 2,
+        };
+        let quality = 90u8;
+
+        let via_tick = encode_jpeg(&frame, quality, 0).expect("tick encode");
+        let via_bytes = encode_jpeg_bytes(&frame.data, frame.width, frame.height, quality)
+            .expect("bytes encode");
+        assert_eq!(via_tick, via_bytes);
+
+        let via_tick_rot = encode_jpeg(&frame, quality, 90).expect("tick rotate encode");
+        let (rotated, w, h) =
+            crate::transport::encode::rotate_pixels(&frame.data, frame.width, frame.height, 90)
+                .expect("rotate");
+        let via_bytes_rot =
+            encode_jpeg_bytes(&rotated, w, h, quality).expect("bytes rotate encode");
+        assert_eq!(via_tick_rot, via_bytes_rot);
     }
 }

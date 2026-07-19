@@ -195,6 +195,65 @@ fn sensor_hub_continues_on_provider_failure() {
     assert!(data.is_empty());
 }
 
+#[test]
+fn sensor_hub_earlier_provider_wins_on_key_collision() {
+    use thermalwriter::sensor::{SensorDescriptor, SensorHub, SensorProvider, SensorReading};
+
+    struct StaticProvider {
+        name: &'static str,
+        readings: Vec<SensorReading>,
+    }
+
+    impl SensorProvider for StaticProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn poll(&mut self) -> anyhow::Result<Vec<SensorReading>> {
+            Ok(self.readings.clone())
+        }
+        fn available_sensors(&self) -> Vec<SensorDescriptor> {
+            self.readings
+                .iter()
+                .map(|r| SensorDescriptor {
+                    key: r.key.clone(),
+                    name: r.key.clone(),
+                    unit: r.unit.clone(),
+                })
+                .collect()
+        }
+    }
+
+    let mut hub = SensorHub::new();
+    hub.add_provider(Box::new(StaticProvider {
+        name: "first",
+        readings: vec![SensorReading {
+            key: "cpu_temp".into(),
+            value: "from_first".into(),
+            unit: "C".into(),
+        }],
+    }));
+    hub.add_provider(Box::new(StaticProvider {
+        name: "second",
+        readings: vec![
+            SensorReading {
+                key: "cpu_temp".into(),
+                value: "from_second".into(),
+                unit: "C".into(),
+            },
+            SensorReading {
+                key: "gpu_temp".into(),
+                value: "81".into(),
+                unit: "C".into(),
+            },
+        ],
+    }));
+
+    let data = hub.poll();
+    assert_eq!(data.get("cpu_temp").map(String::as_str), Some("from_first"));
+    assert_eq!(data.get("gpu_temp").map(String::as_str), Some("81"));
+    assert_eq!(data.len(), 2);
+}
+
 // ─── AmdGpuProvider tests ────────────────────────────────────────────────────
 
 /// Build a fake DRM sysfs tree for testing AmdGpuProvider.
