@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use zbus::zvariant::OwnedValue;
 use zbus::{Connection, proxy};
 
-use crate::render::background::BackgroundImage;
 use crate::config::MediaConfig;
+use crate::render::background::BackgroundImage;
 use crate::sensor::{SensorDescriptor, SensorProvider, SensorReading};
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
@@ -99,10 +99,7 @@ impl SensorProvider for MprisProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
-        let snap = self
-            .snapshot
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let snap = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
 
         let position_us = extrapolate_position(&snap);
         let progress = track_progress(position_us, snap.length_us);
@@ -203,7 +200,9 @@ pub fn track_progress(position_us: i64, length_us: i64) -> i64 {
     if length_us <= 0 {
         return 0;
     }
-    ((position_us.max(0) * 100) / length_us).clamp(0, 100)
+    let pos = position_us.max(0) as i128;
+    let len = length_us as i128;
+    ((pos * 100) / len).clamp(0, 100) as i64
 }
 
 #[derive(Debug, Clone, Default)]
@@ -229,10 +228,7 @@ pub fn parse_mpris_metadata(map: &HashMap<String, OwnedValue>) -> ParsedMetadata
         .get("xesam:album")
         .and_then(value_as_str)
         .unwrap_or_default();
-    let length_us = map
-        .get("mpris:length")
-        .and_then(value_as_i64)
-        .unwrap_or(0);
+    let length_us = map.get("mpris:length").and_then(value_as_i64).unwrap_or(0);
     let art_url = map
         .get("mpris:artUrl")
         .and_then(value_as_str)
@@ -338,7 +334,8 @@ fn art_url_to_path(url: &str) -> Option<PathBuf> {
         } else {
             rest.to_string()
         };
-        return Some(PathBuf::from(path));
+        let decoded = percent_encoding::percent_decode_str(&path).decode_utf8_lossy();
+        return Some(PathBuf::from(decoded.as_ref()));
     }
     if trimmed.starts_with('/') {
         return Some(PathBuf::from(trimmed));
@@ -350,12 +347,17 @@ fn art_url_to_path(url: &str) -> Option<PathBuf> {
     None
 }
 
-fn load_art_from_url(url: &str) -> Option<Arc<BackgroundImage>> {
+async fn load_art_from_url(url: &str) -> Option<Arc<BackgroundImage>> {
     let path = art_url_to_path(url)?;
-    match BackgroundImage::from_file(Path::new(&path)) {
-        Ok(img) => Some(Arc::new(img)),
+    let path_display = path.display().to_string();
+    match tokio::task::spawn_blocking(move || BackgroundImage::from_file(Path::new(&path))).await {
+        Ok(Ok(img)) => Some(Arc::new(img)),
+        Ok(Err(e)) => {
+            log::debug!("Failed to load album art from {}: {e:#}", path_display);
+            None
+        }
         Err(e) => {
-            log::debug!("Failed to load album art from {}: {e:#}", path.display());
+            log::warn!("Album art load task panicked: {e:#}");
             None
         }
     }
@@ -437,15 +439,6 @@ impl MediaWatcher {
         let mut last_loaded_art_url = String::new();
         let mut last_loaded_art: Option<Arc<BackgroundImage>> = None;
 
-        for name in dbus.list_names().await? {
-            if is_mpris_player(&name) {
-                recency += 1;
-                if let Some(state) = refresh_player(&connection, &name, recency).await {
-                    players.insert(name.clone(), state);
-                }
-            }
-        }
-
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -453,85 +446,130 @@ impl MediaWatcher {
             tokio::select! {
                 biased;
                 changed = config_rx.changed() => {
-                    match changed {
-                        Ok(()) => {
-                            let cfg = config_rx.borrow_and_update().clone().normalized();
-                            if !cfg.enabled || cfg.player != preferred_player {
-                                return Ok(PollExit::ConfigChanged);
-                            }
-                        }
-                        Err(_) => return Ok(PollExit::Closed),
+                    if let Some(exit) = Self::handle_config_change(config_rx, preferred_player, changed) {
+                        return Ok(exit);
                     }
                 }
                 _ = interval.tick() => {
-                    let mut seen = std::collections::HashSet::new();
-                    for name in dbus.list_names().await? {
-                        if !is_mpris_player(&name) {
-                            continue;
+                    let cycle = Self::poll_cycle(
+                        &connection,
+                        &dbus,
+                        &mut players,
+                        preferred_player,
+                        &mut recency,
+                        &mut last_loaded_art_url,
+                        &mut last_loaded_art,
+                        snapshot,
+                    );
+                    tokio::select! {
+                        biased;
+                        changed = config_rx.changed() => {
+                            if let Some(exit) = Self::handle_config_change(config_rx, preferred_player, changed) {
+                                return Ok(exit);
+                            }
                         }
-                        seen.insert(name.clone());
-                        recency += 1;
-                        if let Some(state) = refresh_player(&connection, &name, recency).await {
-                            players.insert(name, state);
-                        } else {
-                            players.remove(&name);
+                        result = cycle => {
+                            result?;
                         }
-                    }
-                    players.retain(|name, _| seen.contains(name));
-
-                    let candidates: Vec<PlayerCandidate> = players
-                        .values()
-                        .map(|p| PlayerCandidate {
-                            bus_name: p.bus_name.clone(),
-                            status: p.status.clone(),
-                            title: p.title.clone(),
-                            recency: p.recency,
-                        })
-                        .collect();
-
-                    let selected = select_player(&candidates, preferred_player);
-                    let mut next = MediaSnapshot::default();
-                    next.updated_at = Instant::now();
-
-                    if let Some(candidate) = selected {
-                        let state = players
-                            .get(&candidate.bus_name)
-                            .expect("selected player must exist");
-                        next.player_id = player_id_from_bus_name(&state.bus_name);
-                        next.status = state.status.clone();
-                        next.title = state.title.clone();
-                        next.artist = state.artist.clone();
-                        next.album = state.album.clone();
-                        next.position_us = state.position_us;
-                        next.length_us = state.length_us;
-                        next.art_url = state.art_url.clone();
-
-                        if next.art_url.is_empty() {
-                            last_loaded_art_url.clear();
-                            last_loaded_art = None;
-                            next.art = None;
-                        } else if next.art_url == last_loaded_art_url {
-                            next.art = last_loaded_art.clone();
-                        } else if let Some(art) = load_art_from_url(&next.art_url) {
-                            last_loaded_art_url = next.art_url.clone();
-                            last_loaded_art = Some(art.clone());
-                            next.art = Some(art);
-                        } else {
-                            last_loaded_art_url = next.art_url.clone();
-                            last_loaded_art = None;
-                            next.art = None;
-                        }
-                    } else {
-                        last_loaded_art_url.clear();
-                        last_loaded_art = None;
-                    }
-
-                    if let Ok(mut guard) = snapshot.write() {
-                        *guard = next;
                     }
                 }
             }
         }
+    }
+
+    fn handle_config_change(
+        config_rx: &mut watch::Receiver<MediaConfig>,
+        preferred_player: &str,
+        changed: Result<(), tokio::sync::watch::error::RecvError>,
+    ) -> Option<PollExit> {
+        match changed {
+            Ok(()) => {
+                let cfg = config_rx.borrow_and_update().clone().normalized();
+                if !cfg.enabled || cfg.player != preferred_player {
+                    Some(PollExit::ConfigChanged)
+                } else {
+                    None
+                }
+            }
+            Err(_) => Some(PollExit::Closed),
+        }
+    }
+
+    async fn poll_cycle(
+        connection: &Connection,
+        dbus: &DBusPeerProxy<'_>,
+        players: &mut HashMap<String, PlayerState>,
+        preferred_player: &str,
+        recency: &mut u64,
+        last_loaded_art_url: &mut String,
+        last_loaded_art: &mut Option<Arc<BackgroundImage>>,
+        snapshot: &Arc<RwLock<MediaSnapshot>>,
+    ) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for name in dbus.list_names().await? {
+            if !is_mpris_player(&name) {
+                continue;
+            }
+            seen.insert(name.clone());
+            *recency += 1;
+            if let Some(state) = refresh_player(connection, &name, *recency).await {
+                players.insert(name, state);
+            } else {
+                players.remove(&name);
+            }
+        }
+        players.retain(|name, _| seen.contains(name));
+
+        let candidates: Vec<PlayerCandidate> = players
+            .values()
+            .map(|p| PlayerCandidate {
+                bus_name: p.bus_name.clone(),
+                status: p.status.clone(),
+                title: p.title.clone(),
+                recency: p.recency,
+            })
+            .collect();
+
+        let selected = select_player(&candidates, preferred_player);
+        let mut next = MediaSnapshot::default();
+        next.updated_at = Instant::now();
+
+        if let Some(candidate) = selected {
+            let state = players
+                .get(&candidate.bus_name)
+                .expect("selected player must exist");
+            next.player_id = player_id_from_bus_name(&state.bus_name);
+            next.status = state.status.clone();
+            next.title = state.title.clone();
+            next.artist = state.artist.clone();
+            next.album = state.album.clone();
+            next.position_us = state.position_us;
+            next.length_us = state.length_us;
+            next.art_url = state.art_url.clone();
+
+            if next.art_url.is_empty() {
+                last_loaded_art_url.clear();
+                last_loaded_art.take();
+                next.art = None;
+            } else if next.art_url == *last_loaded_art_url {
+                next.art = last_loaded_art.clone();
+            } else if let Some(art) = load_art_from_url(&next.art_url).await {
+                last_loaded_art_url.clone_from(&next.art_url);
+                *last_loaded_art = Some(art.clone());
+                next.art = Some(art);
+            } else {
+                next.art = None;
+            }
+        } else {
+            last_loaded_art_url.clear();
+            last_loaded_art.take();
+        }
+
+        if let Ok(mut guard) = snapshot.write() {
+            *guard = next;
+        }
+
+        Ok(())
     }
 }
 
@@ -582,9 +620,7 @@ pub fn effective_background(
     if !media_config.enabled || !media_config.album_art_background {
         return user_background.clone();
     }
-    let snap = media_snapshot
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let snap = media_snapshot.read().unwrap_or_else(|e| e.into_inner());
     if snap.status == "Playing" || snap.status == "Paused" {
         if let Some(art) = &snap.art {
             return Some(art.clone());
@@ -694,10 +730,7 @@ mod tests {
         let snapshot = Arc::new(RwLock::new(MediaSnapshot::default()));
         let mut provider = MprisProvider::new(snapshot);
         let readings = provider.poll().unwrap();
-        let map: HashMap<_, _> = readings
-            .into_iter()
-            .map(|r| (r.key, r.value))
-            .collect();
+        let map: HashMap<_, _> = readings.into_iter().map(|r| (r.key, r.value)).collect();
         assert_eq!(map["track_title"], "");
         assert_eq!(map["track_position"], "0:00");
         assert_eq!(map["track_progress"], "0");
@@ -716,7 +749,11 @@ mod tests {
             ..Default::default()
         }));
 
-        let config = MediaConfig { enabled: true, album_art_background: true, ..Default::default() };
+        let config = MediaConfig {
+            enabled: true,
+            album_art_background: true,
+            ..Default::default()
+        };
         let effective = effective_background(&config, &snapshot, &Some(user));
         assert!(Arc::ptr_eq(effective.as_ref().unwrap(), &art));
     }
@@ -770,8 +807,25 @@ mod tests {
             ..Default::default()
         }));
 
-        let config = MediaConfig { enabled: true, album_art_background: true, ..Default::default() };
+        let config = MediaConfig {
+            enabled: true,
+            album_art_background: true,
+            ..Default::default()
+        };
         let effective = effective_background(&config, &snapshot, &Some(user.clone()));
         assert!(Arc::ptr_eq(effective.as_ref().unwrap(), &user));
+    }
+
+    #[test]
+    fn track_progress_does_not_overflow() {
+        assert_eq!(track_progress(i64::MAX, i64::MAX), 100);
+    }
+
+    #[test]
+    fn art_url_to_path_percent_decodes_file_uri() {
+        assert_eq!(
+            art_url_to_path("file:///tmp/Album%20Art.jpg"),
+            Some(PathBuf::from("/tmp/Album Art.jpg")),
+        );
     }
 }

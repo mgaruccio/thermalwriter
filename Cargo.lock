@@ -5969,6 +5969,7 @@ dependencies = [
  "memmap2",
  "notify",
  "peniko",
+ "percent-encoding",
  "png 0.17.16",
  "resvg",
  "rusb",

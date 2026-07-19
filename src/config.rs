@@ -157,7 +157,6 @@ impl Default for MediaConfig {
     }
 }
 
-
 impl MediaConfig {
     /// Trim the preferred-player filter; empty means auto-select.
     pub fn normalized(self) -> Self {
@@ -547,7 +546,6 @@ impl Config {
 
         Ok(())
     }
-
 }
 
 /// Built-in layout HTML content, embedded at compile time.

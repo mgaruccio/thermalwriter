@@ -283,8 +283,8 @@ Available when `[media].enabled = true` (default). Keys are always present (empt
 | `track_album` | String | Album name |
 | `track_status` | String | `Playing`, `Paused`, `Stopped`, or empty |
 | `track_player` | String | Player id (bus name suffix, e.g. `spotify`) |
-| `track_position` | `m:ss` | Elapsed time (extrapolated while playing) |
-| `track_duration` | `m:ss` | Track length |
+| `track_position` | `m:ss` or `h:mm:ss` | Elapsed time (extrapolated while playing) |
+| `track_duration` | `m:ss` or `h:mm:ss` | Track length |
 | `track_position_s` | Integer | Elapsed seconds |
 | `track_duration_s` | Integer | Duration seconds |
 | `track_progress` | Integer % | 0–100 progress |

@@ -92,6 +92,7 @@
     player: "",
     album_art_background: false,
   });
+  let mediaLoaded = $state(false);
   let mediaStatus = $state("");
   let mediaError = $state("");
   let theme = $state<ThemeId>(
@@ -143,6 +144,7 @@
       backgrounds = bgList;
       selectedBackground = activeBg;
       mediaDraft = { ...media };
+      mediaLoaded = true;
       const firstConfigurable = layouts.find((layout) => layout.configurable) ?? layouts[0];
       if (firstConfigurable) {
         await selectLayout(firstConfigurable.name);
@@ -299,6 +301,7 @@
   // preview, so the suggestion is visible immediately and adjustable before
   // Apply — nothing is persisted until the user applies/saves as usual.
   async function applyMedia() {
+    if (!mediaLoaded) return;
     applying = true;
     mediaStatus = "";
     mediaError = "";
@@ -549,7 +552,7 @@
                 type="button"
                 class="btn-apply"
                 onclick={applyMedia}
-                disabled={applying}
+                disabled={applying || !mediaLoaded}
               >
                 {applying ? "Applying…" : "Apply ↳"}
               </button>
@@ -567,6 +570,7 @@
                   type="checkbox"
                   class="media-checkbox"
                   checked={mediaDraft.enabled}
+                  disabled={!mediaLoaded}
                   onchange={(event) => {
                     mediaDraft = { ...mediaDraft, enabled: event.currentTarget.checked };
                   }}
@@ -584,7 +588,7 @@
                 class="media-text-input"
                 placeholder="Auto-select"
                 value={mediaDraft.player}
-                disabled={!mediaDraft.enabled}
+                disabled={!mediaLoaded || !mediaDraft.enabled}
                 oninput={(event) => {
                   mediaDraft = { ...mediaDraft, player: event.currentTarget.value };
                 }}
@@ -599,7 +603,7 @@
                   type="checkbox"
                   class="media-checkbox"
                   checked={mediaDraft.album_art_background}
-                  disabled={!mediaDraft.enabled}
+                  disabled={!mediaLoaded || !mediaDraft.enabled}
                   onchange={(event) => {
                     mediaDraft = {
                       ...mediaDraft,

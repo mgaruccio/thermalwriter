@@ -79,7 +79,7 @@ Now-playing metadata from MPRIS players on the session D-Bus.
   - Default: `""`
 
 - **`album_art_background`** (Boolean)
-  - Description: While a track is Playing or Paused and local album art is available, composite that art as the live SVG background without writing `[background].image`. Remote `https://` art URLs are skipped in v1; `file://` and absolute paths work. HTML/Xvfb modes ignore this override.
+  - Description: While a track is Playing or Paused and local album art is available, composite that art as the live SVG background without writing `[background].image`. Remote `https://` art URLs are skipped in v1; `file://` and absolute paths work, and `file://` URIs are percent-decoded (e.g. `file:///home/user/Album%20Art.jpg`). HTML/Xvfb modes ignore this override.
   - Default: `false`
 
 

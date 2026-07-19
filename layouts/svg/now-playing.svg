@@ -9,6 +9,7 @@ theme_background: color = "#08080f" "Background color"
   {% set progress = track_progress | default(value=0) | int %}
   {% set title_size = token_hero | default(value=40) %}
   {% if use_compact_typography %}{% set title_size = 32 %}{% endif %}
+  {% set title_long = (use_compact_typography and track_title | length > 22) or (not use_compact_typography and track_title | length > 11) %}
 
   {% if is_portrait %}
   <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
@@ -23,22 +24,22 @@ theme_background: color = "#08080f" "Background color"
 
   <!-- Status pill -->
   <text x="240" y="72" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}16{% else %}14{% endif %}" fill="{{ theme_text_dim }}">
-    {% if track_status and track_player %}{{ track_status }} · {{ track_player }}{% elif track_status %}{{ track_status }}{% elif track_player %}{{ track_player }}{% else %}&nbsp;{% endif %}
+    {% if track_status and track_player %}{{ track_status }} · {{ track_player }}{% elif track_status %}{{ track_status }}{% elif track_player %}{{ track_player }}{% else %}&#160;{% endif %}
   </text>
 
   <!-- Title -->
-  <text x="240" y="170" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ title_size }}" fill="{{ theme_text }}" font-weight="bold">
-    {{ track_title | default(value="Nothing playing") }}
+  <text x="240" y="170" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ title_size }}" fill="{{ theme_text }}" font-weight="bold"{% if title_long %} textLength="440" lengthAdjust="spacingAndGlyphs"{% endif %}>
+    {% if track_title %}{{ track_title }}{% else %}Nothing playing{% endif %}
   </text>
 
   <!-- Artist -->
-  <text x="240" y="220" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}22{% else %}26{% endif %}" fill="{{ theme_secondary }}">
+  <text x="240" y="220" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}22{% else %}26{% endif %}" fill="{{ theme_secondary }}"{% if track_artist | length > 24 %} textLength="400" lengthAdjust="spacingAndGlyphs"{% endif %}>
     {{ track_artist | default(value="") }}
   </text>
 
   <!-- Album -->
   {% if track_album %}
-  <text x="240" y="258" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}16{% else %}18{% endif %}" fill="{{ theme_text_dim }}">
+  <text x="240" y="258" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}16{% else %}18{% endif %}" fill="{{ theme_text_dim }}"{% if track_album | length > 28 %} textLength="360" lengthAdjust="spacingAndGlyphs"{% endif %}>
     {{ track_album }}
   </text>
   {% endif %}

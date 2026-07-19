@@ -157,11 +157,12 @@ async fn daemon_get_media_config() -> Result<(bool, String, bool), AppError> {
         return result.map_err(|msg| AppError::DaemonCall(msg));
     }
 
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonCall(format!("daemon proxy failed: {e}")))?;
@@ -181,16 +182,21 @@ async fn daemon_set_media_config(media: &MediaConfig) -> Result<(), AppError> {
         return result.map_err(|msg| AppError::DaemonCall(msg));
     }
 
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| AppError::DaemonUnavailable {
-            reason: format!("session bus unavailable: {e}"),
-        })?;
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
     let proxy = DisplayProxy::new(&connection)
         .await
         .map_err(|e| AppError::DaemonCall(format!("daemon proxy failed: {e}")))?;
     proxy
-        .set_media_config(media.enabled, media.player.clone(), media.album_art_background)
+        .set_media_config(
+            media.enabled,
+            media.player.clone(),
+            media.album_art_background,
+        )
         .await
         .map_err(|e| AppError::DaemonCall(format!("set_media_config failed: {e}")))
 }
@@ -1402,7 +1408,9 @@ mod tests {
         let err = get_media_settings_for(&state)
             .await
             .expect_err("daemon method failure must surface");
-        assert!(matches!(err, AppError::DaemonCall(msg) if msg.contains("get_media_config failed")));
+        assert!(
+            matches!(err, AppError::DaemonCall(msg) if msg.contains("get_media_config failed"))
+        );
 
         let config = Config::load(&state.config_path).unwrap();
         assert_eq!(config.media.player, "sentinel");
@@ -1463,7 +1471,9 @@ mod tests {
         )
         .await
         .expect_err("daemon method failure must surface");
-        assert!(matches!(err, AppError::DaemonCall(msg) if msg.contains("set_media_config failed")));
+        assert!(
+            matches!(err, AppError::DaemonCall(msg) if msg.contains("set_media_config failed"))
+        );
 
         let config = Config::load(&state.config_path).unwrap();
         assert!(config.media.enabled);

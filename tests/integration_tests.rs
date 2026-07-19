@@ -226,11 +226,11 @@ async fn run_mock_tick(
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
 ) {
+    use std::sync::{Arc, RwLock};
     use thermalwriter::config::MediaConfig;
     use thermalwriter::sensor::SensorHub;
     use thermalwriter::sensor::mpris::MediaSnapshot;
     use thermalwriter::service::tick::run_tick_loop;
-    use std::sync::{Arc, RwLock};
 
     let mut hub = SensorHub::new();
     let media_snapshot = Arc::new(RwLock::new(MediaSnapshot::default()));

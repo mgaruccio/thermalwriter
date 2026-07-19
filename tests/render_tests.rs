@@ -645,7 +645,6 @@ fn layout_switch_from_no_history_to_history_layout_renders_without_error() {
     );
 }
 
-
 #[test]
 fn track_title_substitution_escapes_xml() {
     let template = r#"{# canvas: responsive #}
@@ -653,12 +652,39 @@ fn track_title_substitution_escapes_xml() {
   <text>{{ track_title }}</text>
 </svg>"#;
     let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
-    let sensors = HashMap::from([(
-        "track_title".to_string(),
-        "Rock & Roll".to_string(),
-    )]);
+    let sensors = HashMap::from([("track_title".to_string(), "Rock & Roll".to_string())]);
     let context = renderer.build_context(&sensors);
     let rendered = renderer.render_template(&context).unwrap();
     assert!(rendered.contains("Rock &amp; Roll"));
     assert!(!rendered.contains("Rock & Roll"));
+}
+
+/// Regression: now-playing.svg must render with empty/idle media values.
+/// Catches XML-invalid `&nbsp;` and the idle-title default filter mismatch.
+#[test]
+fn now_playing_layout_renders_with_idle_media_values() {
+    let template = std::fs::read_to_string("layouts/svg/now-playing.svg").unwrap();
+    let mut renderer = SvgRenderer::new(&template, 480, 480).unwrap();
+    renderer.set_theme(ThemePalette::default());
+    let sensors = HashMap::from([
+        ("track_title".to_string(), "".to_string()),
+        ("track_artist".to_string(), "".to_string()),
+        ("track_album".to_string(), "".to_string()),
+        ("track_status".to_string(), "".to_string()),
+        ("track_player".to_string(), "".to_string()),
+        ("track_position".to_string(), "0:00".to_string()),
+        ("track_duration".to_string(), "0:00".to_string()),
+        ("track_progress".to_string(), "0".to_string()),
+    ]);
+    let context = renderer.build_context(&sensors);
+    let rendered = renderer.render_template(&context).unwrap();
+    assert!(
+        rendered.contains("Nothing playing"),
+        "idle title should render 'Nothing playing'"
+    );
+    assert!(
+        rendered.contains("&#160;"),
+        "idle status should use XML-safe numeric character reference"
+    );
+    let _frame = renderer.render(&sensors).unwrap();
 }

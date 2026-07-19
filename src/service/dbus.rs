@@ -1105,17 +1105,13 @@ impl DisplayInterface {
             Config::save_media_config(&config_path, &media).map_err(|e| {
                 zbus::fdo::Error::Failed(format!("Failed to persist media config: {e}"))
             })?;
-        }
 
-        {
-            let mut state = self.state.lock().await;
-            state.config.media = media.clone();
-        }
+            {
+                let mut state = self.state.lock().await;
+                state.config.media = media.clone();
+            }
 
-        if media_config_tx.send(media).is_err() {
-            return Err(zbus::fdo::Error::Failed(
-                "Media config channel closed".into(),
-            ));
+            let _ = media_config_tx.send_replace(media);
         }
 
         Ok(())
@@ -1142,7 +1138,6 @@ impl DisplayInterface {
         let _write_guard = write_lock.lock().await;
         let new_config = Config::load(&config_path)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to reload config: {e}")))?;
-        drop(_write_guard);
 
         let vars = new_config
             .layout_vars
@@ -1167,6 +1162,7 @@ impl DisplayInterface {
             }
             let _ = state.media_config_tx.send_replace(media_config);
         }
+        drop(_write_guard);
 
         info!(
             "Reload requested via D-Bus (layout={}, mode={})",

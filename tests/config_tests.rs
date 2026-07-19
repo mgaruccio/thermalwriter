@@ -619,7 +619,6 @@ fn config_load_accepts_valid_values() {
     );
 }
 
-
 #[test]
 fn save_media_config_round_trips_all_fields() {
     let dir = tempfile::tempdir().unwrap();
@@ -649,5 +648,8 @@ enabled = true
 
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("# user comment"), "comment must survive");
-    assert!(contents.contains("[display]"), "other sections must survive");
+    assert!(
+        contents.contains("[display]"),
+        "other sections must survive"
+    );
 }
