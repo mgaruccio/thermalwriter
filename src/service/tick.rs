@@ -250,6 +250,7 @@ pub async fn run_tick_loop(
                 &generation_tx,
                 &mut source_revision,
                 &mut next_reconnect_at,
+                &mut failed_effective_background,
             );
         }
 
@@ -517,6 +518,7 @@ fn handle_source_result(
     generation_tx: &tokio::sync::watch::Sender<u64>,
     current_source_revision: &mut u64,
     next_reconnect_at: &mut Option<Instant>,
+    failed_effective_background: &mut Option<Arc<BackgroundImage>>,
 ) {
     let generation = result.generation;
     let source_revision = result.source_revision;
@@ -576,6 +578,9 @@ fn handle_source_result(
             }
 
             *frame_source = source;
+            // A new renderer is being committed; allow a previously failed
+            // effective background one fresh attempt on the new source.
+            *failed_effective_background = None;
             if pending_match {
                 let connection = pending.take().expect("pending_match");
                 info!(
