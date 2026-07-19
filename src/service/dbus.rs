@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot, watch};
 use zbus::{interface, object_server::SignalEmitter};
 
-use crate::config::Config;
+use crate::config::{Config, MediaConfig};
 use crate::render::background::BackgroundImage;
 use crate::render::frontmatter::LayoutFrontmatter;
 use crate::validation::{PathContainmentError, validate_layout_vars, validate_path_within_dir};
@@ -134,6 +134,8 @@ pub struct ServiceState {
     /// Tick rate saved when entering xvfb mode so it can be restored when
     /// returning to layout mode. None when not in streaming mode.
     pub pre_stream_tick_rate: Option<u32>,
+    /// Live `[media]` updates for the tick loop and MPRIS watcher.
+    pub media_config_tx: tokio::sync::watch::Sender<MediaConfig>,
 }
 
 pub struct DisplayInterface {
@@ -1068,6 +1070,57 @@ impl DisplayInterface {
     /// Re-read config.toml, refresh the in-memory mirror, and rebuild the active
     /// layout when not streaming. Returns an error if config is invalid or the
     /// layout rebuild fails — never reports success for a no-op.
+    /// Return the in-memory `[media]` settings currently applied by the daemon.
+    async fn get_media_config(&self) -> zbus::fdo::Result<(bool, String, bool)> {
+        let state = self.state.lock().await;
+        let media = state.config.media.clone().normalized();
+        Ok((media.enabled, media.player, media.album_art_background))
+    }
+
+    /// Persist and apply `[media]` settings without restarting the daemon.
+    async fn set_media_config(
+        &self,
+        enabled: bool,
+        player: String,
+        album_art_background: bool,
+    ) -> zbus::fdo::Result<()> {
+        let (config_path, write_lock, media_config_tx) = {
+            let state = self.state.lock().await;
+            (
+                state.config_path.clone(),
+                state.config_write_lock.clone(),
+                state.media_config_tx.clone(),
+            )
+        };
+
+        let media = MediaConfig {
+            enabled,
+            player,
+            album_art_background,
+        }
+        .normalized();
+
+        {
+            let _write_guard = write_lock.lock().await;
+            Config::save_media_config(&config_path, &media).map_err(|e| {
+                zbus::fdo::Error::Failed(format!("Failed to persist media config: {e}"))
+            })?;
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            state.config.media = media.clone();
+        }
+
+        if media_config_tx.send(media).is_err() {
+            return Err(zbus::fdo::Error::Failed(
+                "Media config channel closed".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn reload(&self) -> zbus::fdo::Result<()> {
         let mode_lock = {
             let state = self.state.lock().await;
@@ -1103,6 +1156,7 @@ impl DisplayInterface {
         };
         let jpeg_quality = new_config.display.jpeg_quality;
 
+        let media_config = new_config.media.clone().normalized();
         {
             let mut state = self.state.lock().await;
             state.config = new_config;
@@ -1111,6 +1165,7 @@ impl DisplayInterface {
                 state.tick_rate = new_tick;
                 let _ = state.tick_rate_tx.send(new_tick);
             }
+            let _ = state.media_config_tx.send_replace(media_config);
         }
 
         info!(
@@ -1314,6 +1369,7 @@ accent_color: color = "#ff0000" "Accent"
             bg_change_lock: Arc::new(tokio::sync::Mutex::new(())),
             mode_change_lock: Arc::new(tokio::sync::Mutex::new(())),
             pre_stream_tick_rate: None,
+            media_config_tx: tokio::sync::watch::channel(MediaConfig::default()).0,
         }));
 
         (state, dir)

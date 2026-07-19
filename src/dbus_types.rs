@@ -45,6 +45,15 @@ pub trait Display {
     /// Missing binaries map to an empty string. Returns absolute paths so
     /// the GUI can bake them into preset argv without exec-time re-resolution.
     async fn resolve_binaries(&self, names: Vec<String>) -> zbus::Result<HashMap<String, String>>;
+    /// Read current `[media]` settings: (enabled, player, album_art_background).
+    async fn get_media_config(&self) -> zbus::Result<(bool, String, bool)>;
+    /// Persist and apply `[media]` settings live.
+    async fn set_media_config(
+        &self,
+        enabled: bool,
+        player: String,
+        album_art_background: bool,
+    ) -> zbus::Result<()>;
     /// Read the current tick rate (FPS).
     /// Note: zbus property accessors in proxy traits must be non-async.
     #[zbus(property)]

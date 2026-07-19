@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use log::{info, warn};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -18,6 +18,7 @@ use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::history::SensorHistory;
 use thermalwriter::sensor::hwmon::HwmonProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
+use thermalwriter::sensor::mpris::{MediaSnapshot, MediaWatcher, MprisProvider};
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
 use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
@@ -215,6 +216,11 @@ async fn main() -> Result<()> {
         &config.sensors.mangohud_log_dir,
     )));
     sensor_hub.add_provider(Box::new(RaplProvider::new()));
+    let media_snapshot = Arc::new(RwLock::new(MediaSnapshot::default()));
+    let (media_config_tx, media_config_rx) = watch::channel(config.media.clone().normalized());
+    let media_config_rx_tick = media_config_rx.clone();
+    sensor_hub.add_provider(Box::new(MprisProvider::new(media_snapshot.clone())));
+    let _media_watcher = MediaWatcher::spawn(media_snapshot.clone(), media_config_rx);
 
     // Prime providers so they discover devices, then snapshot descriptors for
     // the D-Bus list_sensors method. Must happen before the D-Bus service
@@ -350,6 +356,7 @@ async fn main() -> Result<()> {
         mode_change_lock: Arc::new(tokio::sync::Mutex::new(())),
         // No pre-stream tick rate yet (daemon starts in layout mode).
         pre_stream_tick_rate: None,
+        media_config_tx,
     }));
 
     {
@@ -809,6 +816,8 @@ async fn main() -> Result<()> {
             generation_tx,
             &mut source_revision_rx,
             tick_rate_rx,
+            media_snapshot.clone(),
+            media_config_rx_tick,
         ) => { res?; }
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT received, shutting down");

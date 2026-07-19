@@ -644,3 +644,21 @@ fn layout_switch_from_no_history_to_history_layout_renders_without_error() {
         result.unwrap_err()
     );
 }
+
+
+#[test]
+fn track_title_substitution_escapes_xml() {
+    let template = r#"{# canvas: responsive #}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
+  <text>{{ track_title }}</text>
+</svg>"#;
+    let mut renderer = SvgRenderer::new(template, 480, 480).unwrap();
+    let sensors = HashMap::from([(
+        "track_title".to_string(),
+        "Rock & Roll".to_string(),
+    )]);
+    let context = renderer.build_context(&sensors);
+    let rendered = renderer.render_template(&context).unwrap();
+    assert!(rendered.contains("Rock &amp; Roll"));
+    assert!(!rendered.contains("Rock & Roll"));
+}

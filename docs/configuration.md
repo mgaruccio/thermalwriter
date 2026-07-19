@@ -66,6 +66,25 @@ Xvfb virtual frame buffer capture options (only active when `display.mode = "xvf
 
 ---
 
+### `[media]`
+
+Now-playing metadata from MPRIS players on the session D-Bus.
+
+- **`enabled`** (Boolean)
+  - Description: Poll MPRIS players for track metadata and expose `track_*` sensor keys.
+  - Default: `true`
+
+- **`player`** (String)
+  - Description: Optional bus-name substring filter (e.g. `spotify`, `firefox`). Empty string selects any playing player automatically.
+  - Default: `""`
+
+- **`album_art_background`** (Boolean)
+  - Description: While a track is Playing or Paused and local album art is available, composite that art as the live SVG background without writing `[background].image`. Remote `https://` art URLs are skipped in v1; `file://` and absolute paths work. HTML/Xvfb modes ignore this override.
+  - Default: `false`
+
+
+---
+
 ### `[theme]`
 
 Custom palette colors available for layout files.

@@ -29,6 +29,7 @@ const SEEDED: &[&str] = &[
     "layouts/svg/arc-gauge.svg",
     "layouts/svg/cyber-grid.svg",
     "layouts/svg/neon-dash-v2.svg",
+    "layouts/svg/now-playing.svg",
 ];
 
 const CLASS_SIZES: &[(u32, u32)] = &[

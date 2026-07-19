@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use tempfile::{NamedTempFile, tempdir};
-use thermalwriter::config::Config;
+use thermalwriter::config::{Config, MediaConfig};
 use thermalwriter::render::{FrameSource, SensorData, TemplateRenderer};
 
 // ---------------------------------------------------------------------------
@@ -617,4 +617,37 @@ fn config_load_accepts_valid_values() {
         "valid config must load without error: {:?}",
         cfg.err()
     );
+}
+
+
+#[test]
+fn save_media_config_round_trips_all_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "# user comment
+[display]
+tick_rate = 5
+[media]
+enabled = true
+",
+    )
+    .unwrap();
+
+    let media = MediaConfig {
+        enabled: false,
+        player: "  spotify  ".into(),
+        album_art_background: true,
+    };
+    Config::save_media_config(&path, &media).unwrap();
+
+    let loaded = Config::load(&path).unwrap();
+    assert!(!loaded.media.enabled);
+    assert_eq!(loaded.media.player, "spotify");
+    assert!(loaded.media.album_art_background);
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("# user comment"), "comment must survive");
+    assert!(contents.contains("[display]"), "other sections must survive");
 }

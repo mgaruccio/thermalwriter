@@ -5,6 +5,7 @@ pub mod amdgpu;
 pub mod history;
 pub mod hwmon;
 pub mod mangohud;
+pub mod mpris;
 #[doc(hidden)]
 pub mod mock;
 pub mod nvidia;

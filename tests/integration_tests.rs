@@ -226,10 +226,15 @@ async fn run_mock_tick(
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
 ) {
+    use thermalwriter::config::MediaConfig;
     use thermalwriter::sensor::SensorHub;
+    use thermalwriter::sensor::mpris::MediaSnapshot;
     use thermalwriter::service::tick::run_tick_loop;
+    use std::sync::{Arc, RwLock};
 
     let mut hub = SensorHub::new();
+    let media_snapshot = Arc::new(RwLock::new(MediaSnapshot::default()));
+    let (_media_config_tx, media_config_rx) = tokio::sync::watch::channel(MediaConfig::default());
     let transport: Option<Box<dyn Transport>> = Some(Box::new(MockTransport {
         frames_sent,
         connected: true,
@@ -256,6 +261,8 @@ async fn run_mock_tick(
         generation_tx,
         &mut source_revision_rx,
         tick_rate_rx,
+        media_snapshot,
+        media_config_rx,
     )
     .await
     .unwrap();

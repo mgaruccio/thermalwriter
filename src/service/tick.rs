@@ -7,12 +7,14 @@
 use anyhow::Result;
 use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::render::background::BackgroundImage;
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
+use crate::config::MediaConfig;
+use crate::sensor::mpris::{self, MediaSnapshot};
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
@@ -106,6 +108,8 @@ pub async fn run_tick_loop(
     generation_tx: tokio::sync::watch::Sender<u64>,
     source_revision_rx: &mut tokio::sync::mpsc::Receiver<SourceRevisionApply>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
+    media_snapshot: Arc<RwLock<MediaSnapshot>>,
+    media_config_rx: tokio::sync::watch::Receiver<MediaConfig>,
 ) -> Result<()> {
     info!(
         "Tick loop started: {} FPS, JPEG quality={}, rotation={}°",
@@ -118,6 +122,11 @@ pub async fn run_tick_loop(
     let mut active: Option<ActiveConnection> = None;
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
     let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
+    let mut cached_effective_background = mpris::effective_background(
+        &media_config_rx.borrow(),
+        &media_snapshot,
+        &cached_background,
+    );
     let mut last_poll = Instant::now() - sensor_poll_interval;
     let mut next_reconnect_at: Option<Instant> = None;
 
@@ -129,7 +138,7 @@ pub async fn run_tick_loop(
             let _ = display_tx.send(RuntimeDisplayDimensions::new(info.width(), info.height()));
             let _ = connected_tx.send(true);
             let _ = generation_tx.send(generation);
-            if let Some(bg) = &cached_background {
+            if let Some(bg) = &cached_effective_background {
                 let _ = frame_source.set_background(Some(bg.clone()));
             }
             active = Some(ActiveConnection {
@@ -187,7 +196,7 @@ pub async fn run_tick_loop(
                 &mut pending,
                 &mut active,
                 &mut frame_source,
-                &cached_background,
+                &cached_effective_background,
                 &display_tx,
                 &connected_tx,
                 &generation_tx,
@@ -208,15 +217,22 @@ pub async fn run_tick_loop(
         // set_background succeeds; on failure keep prior cache/source state.
         while let Ok(apply) = background_apply_rx.try_recv() {
             let prior_cache = cached_background.clone();
-            match frame_source.set_background(apply.image.clone()) {
+            let prior_effective = cached_effective_background.clone();
+            cached_background = apply.image.clone();
+            let effective = mpris::effective_background(
+                &media_config_rx.borrow(),
+                &media_snapshot,
+                &cached_background,
+            );
+            match frame_source.set_background(effective.clone()) {
                 Ok(()) => {
-                    cached_background = apply.image;
+                    cached_effective_background = effective;
                     let _ = apply.ack.send(Ok(()));
                 }
                 Err(e) => {
-                    // Restore prior source background if possible.
-                    let _ = frame_source.set_background(prior_cache.clone());
                     cached_background = prior_cache;
+                    let _ = frame_source.set_background(prior_effective.clone());
+                    cached_effective_background = prior_effective;
                     // Pending connection must abort on background raster failure.
                     if pending.is_some() {
                         warn!(
@@ -233,10 +249,29 @@ pub async fn run_tick_loop(
         // when no oneshot is involved, e.g. startup).
         if background_rx.has_changed().unwrap_or(false) {
             let bg = background_rx.borrow_and_update().clone();
-            if let Err(e) = frame_source.set_background(bg.clone()) {
+            cached_background = bg;
+            let effective = mpris::effective_background(
+                &media_config_rx.borrow(),
+                &media_snapshot,
+                &cached_background,
+            );
+            if let Err(e) = frame_source.set_background(effective.clone()) {
                 warn!("Background watch apply failed: {e:#}");
             } else {
-                cached_background = bg;
+                cached_effective_background = effective;
+            }
+        }
+
+        let effective = mpris::effective_background(
+            &media_config_rx.borrow(),
+            &media_snapshot,
+            &cached_background,
+        );
+        if !mpris::backgrounds_equal(&cached_effective_background, &effective) {
+            if let Err(e) = frame_source.set_background(effective.clone()) {
+                warn!("Effective background apply failed: {e:#}");
+            } else {
+                cached_effective_background = effective;
             }
         }
 
