@@ -158,26 +158,30 @@ pub async fn run_tick_loop(
         let tick_duration = Duration::from_secs_f64(1.0 / f64::from(current_fps));
 
         while let Ok(apply) = source_revision_rx.try_recv() {
-            if apply.revision >= source_revision {
-                source_revision = apply.revision;
-                if apply.reset_connection {
-                    if let Some(mut connection) = pending.take() {
-                        connection.transport.close();
-                    }
-                    if let Some(mut connection) = active.take() {
-                        connection.transport.close();
-                    }
-                    let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                    let _ = connected_tx.send(false);
-                    let _ = generation_tx.send(0);
-                    next_reconnect_at = Some(Instant::now());
-                } else if let Some(mut connection) = pending.take() {
-                    debug!(
-                        "Invalidating pending source build at source revision {source_revision}"
-                    );
+            if apply.revision < source_revision {
+                let _ = apply.ack.send(Err(format!(
+                    "stale source revision {} ignored (current {})",
+                    apply.revision, source_revision
+                )));
+                continue;
+            }
+
+            source_revision = apply.revision;
+            if apply.reset_connection {
+                if let Some(mut connection) = pending.take() {
                     connection.transport.close();
-                    next_reconnect_at = Some(Instant::now());
                 }
+                if let Some(mut connection) = active.take() {
+                    connection.transport.close();
+                }
+                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                let _ = connected_tx.send(false);
+                let _ = generation_tx.send(0);
+                next_reconnect_at = Some(Instant::now());
+            } else if let Some(mut connection) = pending.take() {
+                debug!("Invalidating pending source build at source revision {source_revision}");
+                connection.transport.close();
+                next_reconnect_at = Some(Instant::now());
             }
             let _ = apply.ack.send(Ok(()));
         }

@@ -713,6 +713,91 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tick_loop_acks_stale_source_revision_apply_as_failure() {
+    let frames_sent = Arc::new(AtomicU32::new(0));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _guard = ShutdownOnDrop(shutdown_tx.clone());
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+    let (_bg_tx, bg_rx) = tokio::sync::watch::channel(None);
+    let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
+    let (connected_tx, _) = tokio::sync::watch::channel(true);
+    let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (generation_tx, _generation_rx) = tokio::sync::watch::channel(0u64);
+    let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
+    let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
+    let (source_result_tx, source_result_rx) = tokio::sync::mpsc::channel(4);
+    let (source_revision_tx, source_revision_rx) = tokio::sync::mpsc::channel(4);
+    let helper = tokio::spawn(source_build_helper(
+        source_build_rx,
+        source_result_tx.clone(),
+    ));
+
+    // Establish current revision = 5 before the stale apply is processed.
+    let (fresh_ack_tx, fresh_ack_rx) = tokio::sync::oneshot::channel();
+    source_revision_tx
+        .send(SourceRevisionApply {
+            revision: 5,
+            reset_connection: false,
+            ack: fresh_ack_tx,
+        })
+        .await
+        .expect("send fresh source revision apply");
+
+    let (stale_ack_tx, stale_ack_rx) = tokio::sync::oneshot::channel();
+    source_revision_tx
+        .send(SourceRevisionApply {
+            revision: 3,
+            reset_connection: false,
+            ack: stale_ack_tx,
+        })
+        .await
+        .expect("send stale source revision apply");
+
+    let handle = spawn_tick_with_source_revision(
+        frames_sent,
+        source_build_tx,
+        source_result_rx,
+        template_rx,
+        bg_rx,
+        bg_apply_rx,
+        shutdown_rx,
+        connected_tx,
+        display_tx,
+        generation_tx,
+        source_revision_rx,
+        tick_rate_rx,
+        20,
+    );
+
+    let fresh_ack = tokio::time::timeout(std::time::Duration::from_secs(2), fresh_ack_rx)
+        .await
+        .expect("fresh source revision acknowledgement timed out")
+        .expect("fresh source revision acknowledgement channel closed");
+    assert_eq!(fresh_ack, Ok(()));
+
+    let stale_ack = tokio::time::timeout(std::time::Duration::from_secs(2), stale_ack_rx)
+        .await
+        .expect("stale source revision acknowledgement timed out")
+        .expect("stale source revision acknowledgement channel closed");
+    assert!(
+        stale_ack.is_err(),
+        "stale SourceRevisionApply must ack Err, got: {stale_ack:?}"
+    );
+    let err = stale_ack.unwrap_err();
+    assert!(
+        err.contains("stale source revision 3"),
+        "unexpected stale ack error: {err}"
+    );
+
+    let _ = shutdown_tx.send(true);
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("tick loop shutdown timed out")
+        .expect("tick loop task failed");
+    helper.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
     use thermalwriter::service::frame_dump;
