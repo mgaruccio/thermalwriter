@@ -32,6 +32,8 @@
     key: string;
     name: string;
     unit: string;
+    /** Last measured poll cost in microseconds. */
+    cost_us: number;
   };
 
   type DaemonStatus = {
@@ -308,6 +310,17 @@
     return "kind-svg";
   }
 
+  function formatSensorCost(costUs: number): string {
+    if (!costUs || costUs <= 0) return "~0 µs";
+    if (costUs < 1000) return `${Math.round(costUs)} µs`;
+    return `${(costUs / 1000).toFixed(2)} ms`;
+  }
+
+  function sensorOptionLabel(sensor: SensorDescriptor): string {
+    const unit = sensor.unit ? ` (${sensor.unit})` : "";
+    return `${sensor.name}${unit} · ${formatSensorCost(sensor.cost_us)}`;
+  }
+
   function daemonLabel(): string {
     switch (daemonState) {
       case "ok":
@@ -568,9 +581,14 @@
                         onchange={(event) => setValue(variable.name, event.currentTarget.value)}
                       >
                         {#each sensors as sensor}
-                          <option value={sensor.key}>{sensor.name} ({sensor.unit})</option>
+                          <option value={sensor.key}>{sensorOptionLabel(sensor)}</option>
                         {/each}
                       </select>
+                      {#if sensors.some((s) => s.cost_us > 0)}
+                        <span class="var-help">
+                          Poll cost is live-measured on this machine. Prefer low-µs keys for cooler layouts.
+                        </span>
+                      {/if}
                     {:else}
                       <input
                         type="text"

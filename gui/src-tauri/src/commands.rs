@@ -89,6 +89,8 @@ pub struct SensorDescriptor {
     pub key: String,
     pub name: String,
     pub unit: String,
+    /// Last measured poll cost attributed to this key (microseconds).
+    pub cost_us: u64,
 }
 
 #[tauri::command]
@@ -160,22 +162,57 @@ pub fn get_saved_vars(
     let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
     Ok(config.layout_vars.get(&layout).cloned().unwrap_or_default())
 }
-
 #[tauri::command]
 pub async fn list_sensors() -> Result<Vec<SensorDescriptor>, AppError> {
-    match zbus::Connection::session().await {
-        Ok(connection) => match DisplayProxy::new(&connection).await {
-            Ok(proxy) => match proxy.list_sensors().await {
-                Ok(sensors) if !sensors.is_empty() => Ok(sensors
-                    .into_iter()
-                    .map(|(key, name, unit)| SensorDescriptor { key, name, unit })
-                    .collect()),
-                _ => Ok(fallback_sensors()),
-            },
-            Err(_) => Ok(fallback_sensors()),
-        },
-        Err(_) => Ok(fallback_sensors()),
+    // Always measure live on the GUI side so setup sees real poll cost even
+    // when the daemon catalog is stale or offline. Two polls: first warms
+    // providers / discovery window; second carries attributed costs.
+    let measured = tokio::task::spawn_blocking(|| {
+        let mut hub = thermalwriter::sensor::SensorHub::with_default_providers("");
+        let _ = hub.poll();
+        let _ = hub.poll();
+        hub.available_sensors()
+    })
+    .await
+    .map_err(|e| AppError::Render(format!("sensor measure task failed: {e}")))?;
+
+    let mut out: Vec<SensorDescriptor> = measured
+        .into_iter()
+        .map(|d| SensorDescriptor {
+            key: d.key,
+            name: d.name,
+            unit: d.unit,
+            cost_us: d.cost_us,
+        })
+        .collect();
+
+    // Prefer non-empty local measure; if somehow empty, fall back to daemon
+    // catalog (without relying on it for costs).
+    if out.is_empty() {
+        if let Ok(connection) = zbus::Connection::session().await
+            && let Ok(proxy) = DisplayProxy::new(&connection).await
+            && let Ok(sensors) = proxy.list_sensors().await
+            && !sensors.is_empty()
+        {
+            out = sensors
+                .into_iter()
+                .map(|(key, name, unit, cost_us)| SensorDescriptor {
+                    key,
+                    name,
+                    unit,
+                    cost_us,
+                })
+                .collect();
+        }
     }
+
+    if out.is_empty() {
+        out = fallback_sensors();
+    }
+
+    // Sort by cost descending so expensive sensors surface first in the picker.
+    out.sort_by(|a, b| b.cost_us.cmp(&a.cost_us).then_with(|| a.key.cmp(&b.key)));
+    Ok(out)
 }
 
 #[tauri::command]
@@ -992,46 +1029,55 @@ fn fallback_sensors() -> Vec<SensorDescriptor> {
             key: "cpu_temp".into(),
             name: "CPU Temperature".into(),
             unit: "°C".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "cpu_util".into(),
             name: "CPU Utilization".into(),
             unit: "%".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "cpu_power".into(),
             name: "CPU Power".into(),
             unit: "W".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "gpu_temp".into(),
             name: "GPU Temperature".into(),
             unit: "°C".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "gpu_util".into(),
             name: "GPU Utilization".into(),
             unit: "%".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "gpu_power".into(),
             name: "GPU Power".into(),
             unit: "W".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "ram_used".into(),
             name: "RAM Used".into(),
             unit: "GB".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "vram_used".into(),
             name: "VRAM Used".into(),
             unit: "GB".into(),
+            cost_us: 0,
         },
         SensorDescriptor {
             key: "fps".into(),
             name: "FPS".into(),
             unit: "fps".into(),
+            cost_us: 0,
         },
     ]
 }

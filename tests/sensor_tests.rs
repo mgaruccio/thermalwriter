@@ -218,6 +218,7 @@ fn sensor_hub_earlier_provider_wins_on_key_collision() {
                     key: r.key.clone(),
                     name: r.key.clone(),
                     unit: r.unit.clone(),
+                    cost_us: 0,
                 })
                 .collect()
         }
@@ -252,6 +253,93 @@ fn sensor_hub_earlier_provider_wins_on_key_collision() {
     assert_eq!(data.get("cpu_temp").map(String::as_str), Some("from_first"));
     assert_eq!(data.get("gpu_temp").map(String::as_str), Some("81"));
     assert_eq!(data.len(), 2);
+}
+
+#[test]
+fn sensor_hub_records_poll_costs() {
+    use thermalwriter::sensor::{SensorHub, SensorProvider, SensorReading};
+
+    struct SlowProvider;
+    impl SensorProvider for SlowProvider {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn poll(&mut self) -> anyhow::Result<Vec<SensorReading>> {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            Ok(vec![SensorReading {
+                key: "slow_metric".into(),
+                value: "1".into(),
+                unit: "".into(),
+            }])
+        }
+        fn available_sensors(&self) -> Vec<thermalwriter::sensor::SensorDescriptor> {
+            vec![thermalwriter::sensor::SensorDescriptor::new(
+                "slow_metric",
+                "Slow",
+                "",
+            )]
+        }
+    }
+
+    let mut hub = SensorHub::new();
+    hub.add_provider(Box::new(SlowProvider));
+    let _ = hub.poll();
+    let stats = hub.last_poll_stats();
+    assert!(
+        stats.total >= std::time::Duration::from_millis(2),
+        "total should include provider sleep, got {:?}",
+        stats.total
+    );
+    assert!(
+        stats.key_cost_us.get("slow_metric").copied().unwrap_or(0) >= 1000,
+        "key cost should be attributed, got {:?}",
+        stats.key_cost_us
+    );
+}
+
+#[test]
+fn hwmon_adaptive_skips_expensive_unneeded_chips() {
+    let tmp = TempDir::new().unwrap();
+
+    // Cheap CPU chip
+    let cpu = tmp.path().join("hwmon0");
+    fs::create_dir_all(&cpu).unwrap();
+    fs::write(cpu.join("name"), "k10temp\n").unwrap();
+    fs::write(cpu.join("temp1_input"), "72000\n").unwrap();
+    fs::write(cpu.join("temp1_label"), "Tctl\n").unwrap();
+
+    // "Expensive" optional chip: simulate with a slow-to-read path using a
+    // named pipe would hang; instead we plant a normal chip and force EMA high
+    // via multiple polls after setting needed keys that exclude it.
+    let nvme = tmp.path().join("hwmon1");
+    fs::create_dir_all(&nvme).unwrap();
+    fs::write(nvme.join("name"), "nvme\n").unwrap();
+    fs::write(nvme.join("temp1_input"), "45000\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+
+    // Discovery polls measure both chips.
+    let first = provider.poll().unwrap();
+    assert!(first.iter().any(|r| r.key == "cpu_temp"));
+    assert!(first.iter().any(|r| r.key.contains("nvme")));
+    let _ = provider.poll().unwrap();
+
+    // Only need cpu_temp — nvme should be pruned after discovery window.
+    let mut needed = std::collections::HashSet::new();
+    needed.insert("cpu_temp".to_string());
+    provider.set_needed_keys(Some(&needed));
+
+    let pruned = provider.poll().unwrap();
+    assert!(
+        pruned.iter().any(|r| r.key == "cpu_temp"),
+        "cpu_temp must remain: {:?}",
+        pruned
+    );
+    assert!(
+        !pruned.iter().any(|r| r.key.contains("nvme")),
+        "unneeded nvme chip must be pruned after discovery: {:?}",
+        pruned
+    );
 }
 
 // ─── AmdGpuProvider tests ────────────────────────────────────────────────────

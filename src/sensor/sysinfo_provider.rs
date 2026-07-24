@@ -140,26 +140,31 @@ impl SensorProvider for SysinfoProvider {
                 key: "ram_used".to_string(),
                 name: "RAM Used".to_string(),
                 unit: "GB".to_string(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "ram_total".to_string(),
                 name: "RAM Total".to_string(),
                 unit: "GB".to_string(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "cpu_util".to_string(),
                 name: "CPU Utilization".to_string(),
                 unit: "%".to_string(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "net_rx".to_string(),
                 name: "Network RX".to_string(),
                 unit: "B/s".to_string(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "net_tx".to_string(),
                 name: "Network TX".to_string(),
                 unit: "B/s".to_string(),
+                cost_us: 0,
             },
         ];
 
@@ -169,11 +174,13 @@ impl SensorProvider for SysinfoProvider {
                 key: format!("cpu_c{}_util", i),
                 name: format!("CPU Core {} Utilization", i),
                 unit: "%".to_string(),
+                cost_us: 0,
             });
             sensors.push(SensorDescriptor {
                 key: format!("cpu_c{}_freq", i),
                 name: format!("CPU Core {} Frequency", i),
                 unit: "MHz".to_string(),
+                cost_us: 0,
             });
         }
 

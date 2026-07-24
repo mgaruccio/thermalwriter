@@ -113,11 +113,12 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
                 .list_sensors()
                 .await
                 .context("Failed to list sensors")?;
-            for (key, name, unit) in sensors {
+            for (key, name, unit, cost_us) in sensors {
+                let cost = format_sensor_cost(cost_us);
                 if unit.is_empty() {
-                    println!("{}  {}", key, name);
+                    println!("{}  {}  [{}]", key, name, cost);
                 } else {
-                    println!("{}  {} ({})", key, name, unit);
+                    println!("{}  {} ({})  [{}]", key, name, unit, cost);
                 }
             }
         }
@@ -146,6 +147,17 @@ pub async fn run_ctl(cmd: CtlCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn format_sensor_cost(cost_us: u64) -> String {
+    if cost_us == 0 {
+        return "~0 µs".into();
+    }
+    if cost_us < 1000 {
+        format!("{cost_us} µs")
+    } else {
+        format!("{:.2} ms", cost_us as f64 / 1000.0)
+    }
 }
 
 /// Run the USB throughput benchmark.

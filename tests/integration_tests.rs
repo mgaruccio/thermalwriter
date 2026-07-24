@@ -285,6 +285,7 @@ async fn run_mock_tick(
         shutdown_rx,
         None,
         std::time::Duration::from_millis(500),
+        None,
         connected_tx,
         display_tx,
         generation_tx,
@@ -1112,6 +1113,7 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
             shutdown_rx,
             None,
             std::time::Duration::from_secs(60), // never re-poll empty sensors
+            None,
             connected_tx,
             display_tx,
             generation_tx,

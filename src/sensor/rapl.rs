@@ -136,6 +136,7 @@ impl SensorProvider for RaplProvider {
                 key: "cpu_power".to_string(),
                 name: "CPU Package Power".to_string(),
                 unit: "W".to_string(),
+                cost_us: 0,
             }]
         } else {
             Vec::new()
