@@ -38,7 +38,7 @@ jobs:
           mkdir -p "$STAGED_DIR/skills/designing-layouts"
           cp target/release/thermalwriter "$STAGED_DIR/bin/"
           cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md "$STAGED_DIR/"
-          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md "$STAGED_DIR/docs/"
+          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md "$STAGED_DIR/docs/"
           cp -r docs/assets/. "$STAGED_DIR/docs/assets/"
           cp skills/designing-layouts/SKILL.md "$STAGED_DIR/skills/designing-layouts/"
           cp packaging/install.sh packaging/uninstall.sh "$STAGED_DIR/packaging/"
@@ -64,8 +64,12 @@ jobs:
         run: |
           mkdir -p release_dist
           cp thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz release_dist/
-          cp target/release/bundle/appimage/*.AppImage release_dist/
-          cp target/release/bundle/deb/*.deb release_dist/
+          # Space-free asset names: GitHub rewrites spaces to dots on upload,
+          # which would break SHA256SUMS verification and README install globs.
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          cp target/release/bundle/appimage/*.AppImage "release_dist/Thermalwriter-Config_${VERSION}_amd64.AppImage"
+          cp target/release/bundle/deb/*.deb "release_dist/thermalwriter-config_${VERSION}_amd64.deb"
           cd release_dist
           sha256sum * > SHA256SUMS
 
