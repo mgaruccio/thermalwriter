@@ -617,14 +617,15 @@ impl FrameSource for SvgRenderer<'static> {
             v.hash(&mut hasher);
         }
 
-        if let Some(theme) = &self.theme {
-            theme.hash(&mut hasher);
+        let mut overrides: Vec<_> = self.variable_overrides.iter().collect();
+        overrides.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in overrides {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
         }
 
         if let Some(theme) = &self.theme {
-            // ThemePalette is Eq+Debug; Debug string is a stable stand-in so
-            // palette swaps bust the cache without a custom Hash impl.
-            format!("{theme:?}").hash(&mut hasher);
+            theme.hash(&mut hasher);
         }
 
         // Background identity (pointer is stable for a given Arc payload).
@@ -1089,6 +1090,27 @@ token_hero: number = "1" "reserved collision"
         assert!(
             Arc::ptr_eq(&renderer.options().fontdb, &full_fontdb()),
             "replacement template with Arial should use full fontdb"
+        );
+    }
+
+    #[test]
+    fn content_fingerprint_includes_layout_overrides() {
+        let template = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#;
+        let mut renderer = SvgRenderer::new(template, 480, 480).expect("valid SVG");
+        let sensors = SensorData::new();
+        let before = renderer
+            .content_fingerprint(&sensors)
+            .expect("svg sources fingerprint");
+        renderer.set_layout_vars(HashMap::from([(
+            "theme_primary".to_string(),
+            "#112233".to_string(),
+        )]));
+        let after = renderer
+            .content_fingerprint(&sensors)
+            .expect("svg sources fingerprint");
+        assert_ne!(
+            before, after,
+            "layout var overrides must bust the dirty-frame fingerprint"
         );
     }
 }

@@ -6,10 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Performance
 - Tick loop skips render/encode/USB send when the active layout's resolved inputs are unchanged (`FrameSource::content_fingerprint`). Streaming (Xvfb) sources still render every tick.
-- NVIDIA GPU sensors prefer in-process NVML over forking `nvidia-smi` every poll; smi remains a fallback, with backoff when neither path is available (#80, #91).
+- NVIDIA GPU sensors prefer in-process NVML over forking `nvidia-smi` every poll; smi remains a fallback, with backoff when neither path is available. NVML `device_by_index` failures demote to smi (not silent empty). (#80, #91)
 - Hybrid AMD+NVIDIA machines register Nvidia before AmdGpu so the discrete GPU owns `gpu_*` / `vram_*` keys.
 - SensorHub collision warnings log once per key for the life of the hub (no per-poll journal spam).
-- Steady-state daemon CPU on the comparison machine dropped from 2.52% → **0.86%** of one core at default 2 fps (below TRCC-Linux's 1.06% default).
+- hwmon skips high-latency JEDEC `spd5118` DIMM sensors (~8 ms/poll on typical boards) that no stock layout displays.
+- Steady-state daemon CPU on the comparison machine dropped from 2.52% → **0.73%** of one core at default 2 fps (below TRCC-Linux's 1.06% default).
 
 ### Added
 - Initial daemon implementation for controlling Thermalright LCD coolers.

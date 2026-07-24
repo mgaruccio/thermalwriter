@@ -23,10 +23,15 @@ const WIRELESS_CHIP_PREFIXES: &[&str] = &[
     "ath10k", "ath11k", "ath12k", "iwlwifi", "mt76", "mt79", "rtw88", "rtw89", "brcmfmac",
 ];
 
+/// High-latency, low-value chips for a cooler LCD. JEDEC SPD5118 DIMM thermal
+/// sensors take ~2 ms each via I2C and a typical board has four of them —
+/// ~8 ms/poll for keys no stock layout displays. Skip by name.
+const SKIP_CHIP_NAMES: &[&str] = &["spd5118"];
+
 /// Any chip whose full read takes longer than this is quarantined for the
 /// rest of the provider's lifetime. Normal sysfs sensor reads are microseconds;
 /// crossing this means the read is blocking in a driver.
-const SLOW_CHIP_THRESHOLD: Duration = Duration::from_millis(250);
+const SLOW_CHIP_THRESHOLD: Duration = Duration::from_millis(50);
 
 pub struct HwmonProvider {
     base_path: PathBuf,
@@ -84,6 +89,7 @@ impl SensorProvider for HwmonProvider {
             if WIRELESS_CHIP_PREFIXES
                 .iter()
                 .any(|p| chip_name.starts_with(p))
+                || SKIP_CHIP_NAMES.contains(&chip_name.as_str())
                 || self.slow_chips.contains(&chip_name)
             {
                 continue;
