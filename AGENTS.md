@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`thermalwriter` is a Rust 2024 daemon for Thermalright LCD coolers. Core source lives in `src/`: `main.rs` and `cli.rs` wire the binary, `config.rs` handles user config, `transport/` owns USB bulk transfer, `render/` contains SVG/HTML/Xvfb frame sources, `sensor/` contains metric providers, and `service/` contains daemon tick, D-Bus, and Xvfb code. Integration tests live in `tests/`. Development utilities live in `examples/`. Built-in layouts are under `layouts/`, with fonts and assets in `assets/`. Deployment files are in `packaging/` and `systemd/`. Plans are in `docs/plans/`; layout guidance is in `skills/designing-layouts/`.
+`thermalwriter` is a Rust 2024 daemon for Thermalright LCD coolers. Core source lives in `src/`: `main.rs` and `cli.rs` wire the binary, `config.rs` handles user config, `transport/` owns USB bulk transfer, `render/` contains SVG/HTML/Xvfb frame sources, `sensor/` contains metric providers, and `service/` contains daemon tick, D-Bus, and Xvfb code. Integration tests live in `tests/`. Development utilities live in `examples/`. Built-in layouts are under `layouts/`, with fonts and assets in `assets/`. Deployment files are in `packaging/` and `systemd/`. Layout guidance is in `skills/designing-layouts/`.
 
 ## Build, Test, and Development Commands
 
