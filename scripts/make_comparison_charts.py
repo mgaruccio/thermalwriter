@@ -39,7 +39,7 @@ CPU = {
     "unit": "%",
     "rows": [
         ("thermalright-lcd-control GUI", 0.42, False),
-        ("thermalwriter daemon · 2 fps", 0.73, True),
+        ("thermalwriter daemon · 2 fps", 0.74, True),
         ("TRCC-Linux daemon · 0.5 fps", 1.06, False),
         ("TRCC-Linux GUI · 0.5 fps", 1.26, False),
     ],

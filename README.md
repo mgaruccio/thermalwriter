@@ -12,7 +12,7 @@ Current status: Public Beta (`v0.1.0`).
 
 A cooler screen is a background accessory — the software driving it should cost almost nothing. thermalwriter is built to sit quietly in the background of a gaming PC:
 
-- **Lightweight, and measured**: ~69 MB PSS and **0.73% of one core** at the default 2 FPS (stock neon-dash layout, NVML GPU sensors, dirty-frame skip) — full protocol in the [comparison methodology](docs/comparison-methodology.md); frame-path microbenchmarks in [profiling baselines](docs/profiling-baselines.md).
+- **Lightweight, and measured**: ~69 MB PSS and **0.74% of one core** at the default 2 FPS (stock neon-dash layout, NVML GPU sensors, dirty-frame skip) — full protocol in the [comparison methodology](docs/comparison-methodology.md); frame-path microbenchmarks in [profiling baselines](docs/profiling-baselines.md).
 - **A real Linux daemon**: systemd user service, D-Bus control interface, unprivileged USB access via udev, clean SIGTERM shutdown, automatic USB reconnect.
 - **Designed layouts**: SVG templates with live sensors, per-layout variables surfaced as GUI controls, global background images, and an optional Tauri configuration GUI.
 - **Streams any X11 app**: conky, cava, btop — anything — captured from a hidden Xvfb framebuffer straight to the LCD.
@@ -30,7 +30,7 @@ Measured on one machine, same day, same protocol, each tool driving the same 480
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/cpu-dark.svg">
-  <img alt="CPU while keeping the LCD live (% of one core): thermalright-lcd-control GUI 0.42, thermalwriter daemon 0.73, TRCC-Linux daemon 1.06, TRCC-Linux GUI 1.26" src="docs/assets/comparison/cpu-light.svg">
+  <img alt="CPU while keeping the LCD live (% of one core): thermalright-lcd-control GUI 0.42, thermalwriter daemon 0.74, TRCC-Linux daemon 1.06, TRCC-Linux GUI 1.26" src="docs/assets/comparison/cpu-light.svg">
 </picture>
 
 <picture>

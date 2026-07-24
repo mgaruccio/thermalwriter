@@ -89,14 +89,14 @@ reproduced at the bottom.
 
 | Configuration | CPU (% of one core) | avg RSS (MB) | peak RSS (MB) | avg PSS (MB) | peak PSS (MB) |
 |---|---|---|---|---|---|
-| thermalwriter daemon · 2 fps | **0.73** | 71.6 | 71.6 | 68.9 | 68.9 |
+| thermalwriter daemon · 2 fps | **0.74** | 71.6 | 71.6 | 68.9 | 68.9 |
 | TRCC-Linux daemon (headless) · 0.5 fps | 1.06 | 118.8 | 118.9 | 106.9 | 107.5 |
 | TRCC-Linux GUI · 0.5 fps | 1.26 | 301.4 | 301.4 | 284.2 | 284.2 |
 | thermalright-lcd-control GUI | 0.42 | 295.9 | 298.5 | 278.0 | 281.5 |
 
 thermalwriter remeasure after #91 (dirty-frame skip + NVML + skip spd5118
 DIMM sensors). Binary SHA-256
-`6952a0c80376d726b3f75ee97129ccd5a85cea8090efe5909436471f8bb9f699`, sampled
+`a16b100257a2166321a9406a53e1469dbf3426590a037bfa68a6f7ef6c444702`, sampled
 via `scripts/footprint_sampler.sh thermalwriter.service 60 60` against the
 user unit `ExecStart=%h/.cargo/bin/thermalwriter daemon` immediately after
 `cp target/release/thermalwriter ~/.cargo/bin/ && systemctl --user restart`.
