@@ -41,17 +41,20 @@ enum WorkerReady {
     Ready,
     Failed(String),
 }
-
 impl NvmlWorker {
     /// Spawn the worker and wait up to [`NVIDIA_POLL_BUDGET`] for init +
-    /// device_count to succeed. On timeout/failure returns `None` and abandons
-    /// the worker thread (it may still be stuck inside a wedged driver call).
-    fn spawn() -> Option<Self> {
+    /// device_count to succeed.
+    ///
+    /// - `Ready`: worker is live and NVML has ≥1 device
+    /// - `Failed`: clean init/device_count failure (safe to retry later)
+    /// - `TimedOut`: abandoned a possibly-stuck thread — caller must never
+    ///   spawn another NVML worker for this provider lifetime
+    fn spawn() -> SpawnResult {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<WorkerReady>(1);
         let (req_tx, req_rx) = mpsc::sync_channel::<()>(0); // rendezvous
         let (resp_tx, resp_rx) = mpsc::sync_channel::<NvmlPollOutcome>(1);
 
-        thread::Builder::new()
+        if thread::Builder::new()
             .name("tw-nvml".into())
             .spawn(move || {
                 let nvml = match Nvml::init() {
@@ -83,31 +86,35 @@ impl NvmlWorker {
                 }
                 nvml_worker_loop(nvml, req_rx, resp_tx);
             })
-            .ok()?;
+            .is_err()
+        {
+            return SpawnResult::Failed("failed to spawn tw-nvml thread".into());
+        }
 
         match ready_rx.recv_timeout(NVIDIA_POLL_BUDGET) {
-            Ok(WorkerReady::Ready) => Some(Self { req_tx, resp_rx }),
+            Ok(WorkerReady::Ready) => SpawnResult::Ready(Self { req_tx, resp_rx }),
             Ok(WorkerReady::Failed(reason)) => {
                 log::debug!("NVML worker startup failed: {reason}");
-                None
+                SpawnResult::Failed(reason)
             }
             Err(RecvTimeoutError::Timeout) => {
                 log::warn!(
                     "NVML worker startup timed out after {NVIDIA_POLL_BUDGET:?}; abandoning worker"
                 );
-                // Dropping req_tx/resp_rx: if the worker later finishes init it
-                // will see ready_tx already consumed or req channel closed and exit.
-                None
+                // req_tx/resp_rx dropped with the failed spawn path below —
+                // parent must not spawn another worker while this one may be stuck.
+                SpawnResult::TimedOut
             }
             Err(RecvTimeoutError::Disconnected) => {
                 log::debug!("NVML worker exited during startup");
-                None
+                SpawnResult::Failed("NVML worker exited during startup".into())
             }
         }
     }
 
     /// Poll with a hard wall-clock timeout. On timeout the worker may still be
-    /// inside a wedged NVML call; the caller must drop this worker (demote).
+    /// inside a wedged NVML call; the caller must drop this worker and never
+    /// spawn another for this provider lifetime.
     fn poll_timed(&self) -> NvmlPollOutcome {
         // Drop any stale reply from a previous timed-out request.
         while self.resp_rx.try_recv().is_ok() {}
@@ -123,6 +130,14 @@ impl NvmlWorker {
             }
         }
     }
+}
+
+enum SpawnResult {
+    Ready(NvmlWorker),
+    Failed(String),
+    /// Abandoned a worker that may be stuck in uncancellable NVML — do not
+    /// spawn another NVML worker for this provider's lifetime.
+    TimedOut,
 }
 
 fn nvml_worker_loop(nvml: Nvml, req_rx: Receiver<()>, resp_tx: SyncSender<NvmlPollOutcome>) {
@@ -149,6 +164,10 @@ enum Backend {
 pub struct NvidiaProvider {
     backend: Backend,
     smi_path: PathBuf,
+    /// Set when we abandon a worker stuck in uncancellable NVML (startup or
+    /// query timeout). Suppresses all further NVML spawns for this lifetime so
+    /// a permanent driver wedge cannot accumulate one `tw-nvml` thread/minute.
+    nvml_wedged: bool,
 }
 
 impl Default for NvidiaProvider {
@@ -163,10 +182,15 @@ impl NvidiaProvider {
     }
 
     pub fn with_smi_path(smi_path: PathBuf) -> Self {
-        Self {
-            backend: probe_backend(&smi_path),
+        let mut provider = Self {
+            backend: Backend::Unavailable {
+                retry_at: Instant::now(), // force immediate probe below
+            },
             smi_path,
-        }
+            nvml_wedged: false,
+        };
+        provider.backend = provider.probe_backend();
+        provider
     }
 
     /// Force the nvidia-smi backend (skip NVML). Used by tests that inject a
@@ -178,12 +202,18 @@ impl NvidiaProvider {
                 empty_streak: 0,
             },
             smi_path,
+            nvml_wedged: false,
         }
     }
 
     fn enter_smi(&mut self) {
         self.backend = Backend::Smi {
-            reprobe_at: Instant::now() + REPROBE_BACKOFF,
+            // When wedged, never schedule an NVML upgrade attempt.
+            reprobe_at: if self.nvml_wedged {
+                Instant::now() + Duration::from_secs(3600 * 24 * 365)
+            } else {
+                Instant::now() + REPROBE_BACKOFF
+            },
             empty_streak: 0,
         };
     }
@@ -194,11 +224,9 @@ impl NvidiaProvider {
         };
     }
 
-    fn demote_nvml(&mut self, reason: &str) {
+    /// Demote after a clean NVML failure (device gone, etc.). May re-probe later.
+    fn demote_nvml_clean(&mut self, reason: &str) {
         log::warn!("{reason}; falling back from NVML");
-        // Dropping NvmlWorker closes req_tx; the worker exits when it next
-        // notices (or stays stuck inside a wedged NVML call until the driver
-        // recovers — the tick loop is already free).
         if smi_present(&self.smi_path) {
             self.enter_smi();
         } else {
@@ -206,17 +234,71 @@ impl NvidiaProvider {
         }
     }
 
+    /// Demote after abandoning a possibly-stuck worker. Disables NVML forever.
+    fn demote_nvml_wedged(&mut self, reason: &str) {
+        log::warn!("{reason}; abandoning NVML for this process lifetime");
+        self.nvml_wedged = true;
+        if smi_present(&self.smi_path) {
+            self.enter_smi();
+        } else {
+            self.enter_unavailable();
+        }
+    }
+
+    fn try_spawn_nvml(&mut self) -> Option<NvmlWorker> {
+        if self.nvml_wedged {
+            return None;
+        }
+        match NvmlWorker::spawn() {
+            SpawnResult::Ready(worker) => Some(worker),
+            SpawnResult::Failed(reason) => {
+                log::debug!("NVML spawn failed: {reason}");
+                None
+            }
+            SpawnResult::TimedOut => {
+                self.nvml_wedged = true;
+                None
+            }
+        }
+    }
+    fn probe_backend(&mut self) -> Backend {
+        if let Some(worker) = self.try_spawn_nvml() {
+            Backend::Nvml(worker)
+        } else if smi_present(&self.smi_path) {
+            Backend::Smi {
+                reprobe_at: if self.nvml_wedged {
+                    Instant::now() + Duration::from_secs(3600 * 24 * 365)
+                } else {
+                    Instant::now() + REPROBE_BACKOFF
+                },
+                empty_streak: 0,
+            }
+        } else {
+            Backend::Unavailable {
+                retry_at: Instant::now() + REPROBE_BACKOFF,
+            }
+        }
+    }
+
     fn maybe_reprobe(&mut self) {
         match &self.backend {
             Backend::Unavailable { retry_at } if Instant::now() >= *retry_at => {
-                self.backend = probe_backend(&self.smi_path);
+                // Still respect wedge: probe_backend will skip NVML if wedged.
+                self.backend = self.probe_backend();
             }
-            Backend::Smi { reprobe_at, .. } if Instant::now() >= *reprobe_at => {
-                if let Some(worker) = NvmlWorker::spawn() {
+            Backend::Smi { reprobe_at, .. }
+                if Instant::now() >= *reprobe_at && !self.nvml_wedged =>
+            {
+                if let Some(worker) = self.try_spawn_nvml() {
                     log::info!("NVML became available; leaving nvidia-smi fallback");
                     self.backend = Backend::Nvml(worker);
                 } else if let Backend::Smi { reprobe_at, .. } = &mut self.backend {
-                    *reprobe_at = Instant::now() + REPROBE_BACKOFF;
+                    // Failed cleanly or just became wedged — push deadline out.
+                    *reprobe_at = if self.nvml_wedged {
+                        Instant::now() + Duration::from_secs(3600 * 24 * 365)
+                    } else {
+                        Instant::now() + REPROBE_BACKOFF
+                    };
                 }
             }
             _ => {}
@@ -229,21 +311,6 @@ fn smi_present(smi_path: &Path) -> bool {
         smi_path.is_file()
     } else {
         which_in_path(smi_path)
-    }
-}
-
-fn probe_backend(smi_path: &Path) -> Backend {
-    if let Some(worker) = NvmlWorker::spawn() {
-        Backend::Nvml(worker)
-    } else if smi_present(smi_path) {
-        Backend::Smi {
-            reprobe_at: Instant::now() + REPROBE_BACKOFF,
-            empty_streak: 0,
-        }
-    } else {
-        Backend::Unavailable {
-            retry_at: Instant::now() + REPROBE_BACKOFF,
-        }
     }
 }
 
@@ -459,11 +526,15 @@ impl SensorProvider for NvidiaProvider {
                 NvmlPollOutcome::Ok(readings) => Ok(readings),
                 NvmlPollOutcome::Empty => Ok(Vec::new()),
                 NvmlPollOutcome::Fatal(reason) => {
-                    self.demote_nvml(&reason);
+                    // Clean library/device failure — may re-probe later.
+                    self.demote_nvml_clean(&reason);
                     self.poll_via_smi_backend()
                 }
                 NvmlPollOutcome::TimedOut => {
-                    self.demote_nvml(&format!("NVML poll timed out after {NVIDIA_POLL_BUDGET:?}"));
+                    // Abandoned a possibly-stuck worker — never spawn again.
+                    self.demote_nvml_wedged(&format!(
+                        "NVML poll timed out after {NVIDIA_POLL_BUDGET:?}"
+                    ));
                     self.poll_via_smi_backend()
                 }
             };
@@ -553,6 +624,7 @@ mod tests {
                 retry_at: Instant::now() + Duration::from_secs(3600),
             },
             smi_path: missing,
+            nvml_wedged: false,
         };
         for _ in 0..5 {
             assert!(provider.poll().unwrap().is_empty());
@@ -623,8 +695,9 @@ mod tests {
 
     #[test]
     fn nvml_worker_polls_within_budget_on_healthy_gpu() {
-        let Some(worker) = NvmlWorker::spawn() else {
-            return;
+        let worker = match NvmlWorker::spawn() {
+            SpawnResult::Ready(w) => w,
+            SpawnResult::Failed(_) | SpawnResult::TimedOut => return,
         };
         let started = Instant::now();
         match worker.poll_timed() {
@@ -649,7 +722,7 @@ mod tests {
         // Init + device_count run on the worker; spawn() itself must never
         // block longer than NVIDIA_POLL_BUDGET even if the driver wedges.
         let started = Instant::now();
-        let _ = NvmlWorker::spawn(); // Some or None both fine
+        let _ = NvmlWorker::spawn();
         assert!(
             started.elapsed() < NVIDIA_POLL_BUDGET + Duration::from_millis(100),
             "spawn handshake must be recv_timeout-bounded, took {:?}",
@@ -658,19 +731,29 @@ mod tests {
     }
 
     #[test]
-    fn nvml_worker_timeout_path_is_wired() {
-        // We cannot wedge libnvidia-ml in unit tests. Assert the provider demotes
-        // when poll_timed returns TimedOut by driving smi_only (no NVML) is not
-        // enough — instead verify TimedOut is handled in the match via a private
-        // unit that constructs the outcome.
+    fn nvml_timeout_disables_further_spawns() {
         let mut provider = NvidiaProvider::smi_only(PathBuf::from(
             "/tmp/thermalwriter-definitely-missing-nvidia-smi",
         ));
-        // Simulate demotion entry points used by the TimedOut arm.
-        provider.demote_nvml("NVML poll timed out after 500ms");
+        provider.demote_nvml_wedged("NVML poll timed out after 500ms");
+        assert!(provider.nvml_wedged);
         assert!(
             matches!(provider.backend, Backend::Unavailable { .. }),
             "demote with missing smi must enter Unavailable"
+        );
+        // Force a re-probe deadline into the past; must NOT clear the wedge or
+        // attempt another NVML spawn.
+        if let Backend::Unavailable { retry_at } = &mut provider.backend {
+            *retry_at = Instant::now() - Duration::from_secs(1);
+        }
+        let _ = provider.poll();
+        assert!(
+            provider.nvml_wedged,
+            "wedge flag must survive Unavailable re-probe"
+        );
+        assert!(
+            provider.try_spawn_nvml().is_none(),
+            "wedged provider must refuse NVML spawns"
         );
     }
 }
