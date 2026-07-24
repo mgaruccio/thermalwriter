@@ -12,6 +12,7 @@ pub fn mock_sensors() -> SensorData {
     HashMap::from([
         ("cpu_temp".into(), "67".into()),
         ("cpu_util".into(), "42".into()),
+        ("cpu_power".into(), "118".into()),
         ("gpu_temp".into(), "71".into()),
         ("gpu_util".into(), "87".into()),
         ("gpu_power".into(), "285".into()),
@@ -21,6 +22,8 @@ pub fn mock_sensors() -> SensorData {
         ("vram_total".into(), "15.9".into()),
         ("fps".into(), "144".into()),
         ("frametime".into(), "6.9".into()),
+        ("net_rx".into(), "125".into()),
+        ("net_tx".into(), "42".into()),
     ])
 }
 
