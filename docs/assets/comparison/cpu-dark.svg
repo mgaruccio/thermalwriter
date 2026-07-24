@@ -15,8 +15,8 @@
 <path d="M 278.0 88.0 h 142.7 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -142.7 z" fill="#565f89"/>
 <text x="433.72" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#c0caf5">0.4</text>
 <text x="266" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#c0caf5" text-anchor="end">thermalwriter daemon · 2 fps</text>
-<path d="M 278.0 132.0 h 251.0 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -251.0 z" fill="#6a8fe0"/>
-<text x="542.0133333333333" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#c0caf5">0.7</text>
+<path d="M 278.0 132.0 h 254.5 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -254.5 z" fill="#6a8fe0"/>
+<text x="545.5066666666667" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#c0caf5">0.7</text>
 <text x="266" y="190.5" font-family="system-ui, sans-serif" font-size="13" font-weight="400" fill="#9aa5ce" text-anchor="end">TRCC-Linux daemon · 0.5 fps</text>
 <path d="M 278.0 176.0 h 366.3 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -366.3 z" fill="#565f89"/>
 <text x="657.2933333333333" y="190.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#c0caf5">1.1</text>
