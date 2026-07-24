@@ -209,8 +209,11 @@ async fn main() -> Result<()> {
     let mut sensor_hub = SensorHub::new();
     sensor_hub.add_provider(Box::new(HwmonProvider::new()));
     sensor_hub.add_provider(Box::new(SysinfoProvider::new()));
-    sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
+    // Nvidia before AmdGpu so a hybrid (AMD iGPU + NVIDIA dGPU) machine reports
+    // the discrete GPU that users care about on the cooler LCD. On pure-AMD
+    // systems Nvidia returns empty and AmdGpu still owns the keys.
     sensor_hub.add_provider(Box::new(NvidiaProvider::new()));
+    sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
     sensor_hub.add_provider(Box::new(MangoHudProvider::from_configured_dir(
         &config.sensors.mangohud_log_dir,
     )));

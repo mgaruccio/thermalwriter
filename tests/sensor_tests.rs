@@ -931,7 +931,7 @@ fn nvidia_poll_times_out_on_hung_subprocess() {
         std::env::set_var("PATH", &new_path);
     }
 
-    let mut provider = NvidiaProvider::new();
+    let mut provider = NvidiaProvider::smi_only(shim.clone());
     let start = Instant::now();
     let result = provider.poll().unwrap();
     let elapsed = start.elapsed();
@@ -950,6 +950,41 @@ fn nvidia_poll_times_out_on_hung_subprocess() {
         "poll should return empty on timeout, got {:?}",
         result
     );
+}
+
+#[test]
+fn nvidia_unavailable_backend_does_not_spawn_repeatedly() {
+    // Construct a provider already in the Unavailable state with a long backoff
+    // and a missing binary path. Repeated polls must stay empty without panicking.
+    let missing = std::path::PathBuf::from("/tmp/thermalwriter-no-such-nvidia-smi");
+    let mut provider = NvidiaProvider::smi_only(missing);
+    // First poll with a missing absolute path demotes to Unavailable.
+    let _ = provider.poll().unwrap();
+    for _ in 0..10 {
+        assert!(provider.poll().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn nvidia_nvml_or_smi_returns_gpu_temp_on_this_machine() {
+    // Best-effort smoke: on the developer workstation with an NVIDIA GPU this
+    // must produce at least gpu_temp. On machines without NVIDIA hardware the
+    // provider returns empty — that is also success (no panic / no hang).
+    let mut provider = NvidiaProvider::new();
+    let start = std::time::Instant::now();
+    let readings = provider.poll().unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(1500),
+        "nvidia poll took {:?}, expected < 1.5s",
+        start.elapsed()
+    );
+    if !readings.is_empty() {
+        assert!(
+            readings.iter().any(|r| r.key == "gpu_temp"),
+            "non-empty nvidia poll must include gpu_temp: {:?}",
+            readings
+        );
+    }
 }
 
 // --- Slow/wireless hwmon chip protection ---

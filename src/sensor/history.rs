@@ -100,6 +100,28 @@ impl SensorHistory {
         self.configs.keys().cloned().collect()
     }
 
+    /// Stable fingerprint of the values that history graphs currently display.
+    ///
+    /// Used by the tick loop to skip render/encode/send when neither live sensor
+    /// strings nor the downsampled history series have changed. Values only —
+    /// sample timestamps are intentionally excluded so a no-op prune does not
+    /// force a redraw.
+    pub fn content_fingerprint(&self, sample_count: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut keys: Vec<&String> = self.configs.keys().collect();
+        keys.sort();
+        for key in keys {
+            key.hash(&mut hasher);
+            let values = self.query(key, sample_count);
+            values.len().hash(&mut hasher);
+            for v in values {
+                v.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Inject history arrays into a Tera context.
     /// For each configured metric "foo", adds "foo_history" as a JSON array of floats.
     pub fn inject_into_context(&self, context: &mut tera::Context, sample_count: usize) {

@@ -37,6 +37,10 @@ pub trait SensorProvider: Send {
 /// Aggregates all sensor providers and exposes a flat key→value map.
 pub struct SensorHub {
     providers: Vec<Box<dyn SensorProvider>>,
+    /// Keys that have already produced a collision warning. Cleared never —
+    /// one warn per key for the life of the hub keeps hybrid-GPU / multi-chip
+    /// machines from flooding the journal every poll.
+    collision_warned: std::collections::HashSet<String>,
 }
 
 impl Default for SensorHub {
@@ -49,6 +53,7 @@ impl SensorHub {
     pub fn new() -> Self {
         Self {
             providers: Vec::new(),
+            collision_warned: std::collections::HashSet::new(),
         }
     }
 
@@ -60,16 +65,15 @@ impl SensorHub {
     ///
     /// Provider registration order is precedence: earlier providers win.
     /// Later providers that return a colliding key are ignored, and each
-    /// colliding key is logged at `warn` at most once per poll.
+    /// colliding key is logged at `warn` at most once for the life of the hub.
     pub fn poll(&mut self) -> HashMap<String, String> {
         let mut data = HashMap::new();
-        let mut collided_keys = std::collections::HashSet::new();
         for provider in &mut self.providers {
             match provider.poll() {
                 Ok(readings) => {
                     for reading in readings {
                         if data.contains_key(&reading.key) {
-                            if collided_keys.insert(reading.key.clone()) {
+                            if self.collision_warned.insert(reading.key.clone()) {
                                 log::warn!(
                                     "Ignoring sensor key '{}' from provider '{}' (earlier provider already owns it)",
                                     reading.key,

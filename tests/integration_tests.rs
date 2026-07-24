@@ -171,6 +171,40 @@ impl FrameSource for SizedMockSource {
     }
 }
 
+/// Counts renders and exposes a controllable content fingerprint so the tick
+/// loop's dirty-frame skip can be observed without real sensor data.
+struct CountingFrameSource {
+    renders: Arc<AtomicU32>,
+    /// When Some, returned as the content fingerprint. Tests mutate via interior
+    /// Arc to force a dirty frame mid-run.
+    fingerprint: Arc<std::sync::atomic::AtomicU64>,
+    /// When true, content_fingerprint returns None (always dirty).
+    always_dirty: bool,
+}
+
+impl FrameSource for CountingFrameSource {
+    fn render(&mut self, _sensors: &SensorData) -> Result<RawFrame> {
+        self.renders.fetch_add(1, Ordering::Relaxed);
+        Ok(RawFrame {
+            data: vec![0u8; 480 * 480 * 3],
+            width: 480,
+            height: 480,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "counting"
+    }
+
+    fn content_fingerprint(&self, _sensors: &SensorData) -> Option<u64> {
+        if self.always_dirty {
+            None
+        } else {
+            Some(self.fingerprint.load(Ordering::Relaxed))
+        }
+    }
+}
+
 fn test_connector() -> TransportConnector {
     TransportConnector::from_config_device("auto").expect("auto selector")
 }
@@ -1022,5 +1056,100 @@ async fn tick_loop_accepts_background_updates() {
         .await
         .expect("tick loop shutdown timed out")
         .expect("tick loop task failed");
+    helper.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
+    use std::sync::atomic::AtomicU64;
+    use thermalwriter::sensor::SensorHub;
+    use thermalwriter::service::tick::run_tick_loop;
+
+    let frames_sent = Arc::new(AtomicU32::new(0));
+    let renders = Arc::new(AtomicU32::new(0));
+    let fingerprint = Arc::new(AtomicU64::new(0xA11CE));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _guard = ShutdownOnDrop(shutdown_tx.clone());
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+    let (_bg_tx, bg_rx) = tokio::sync::watch::channel(None);
+    let (_bg_apply_tx, mut bg_apply_rx) = tokio::sync::mpsc::channel(4);
+    let (connected_tx, _) = tokio::sync::watch::channel(true);
+    let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (generation_tx, _) = tokio::sync::watch::channel(0u64);
+    let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(30u32);
+    let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
+    let (source_result_tx, mut source_result_rx) = tokio::sync::mpsc::channel(4);
+    let (_source_revision_tx, mut source_revision_rx) = tokio::sync::mpsc::channel(4);
+    let helper = tokio::spawn(source_build_helper(source_build_rx, source_result_tx));
+
+    let source = CountingFrameSource {
+        renders: Arc::clone(&renders),
+        fingerprint: Arc::clone(&fingerprint),
+        always_dirty: false,
+    };
+
+    let frames_for_loop = Arc::clone(&frames_sent);
+    let handle = tokio::spawn(async move {
+        let mut hub = SensorHub::new();
+        let transport: Option<Box<dyn Transport>> = Some(Box::new(MockTransport {
+            frames_sent: frames_for_loop,
+            connected: true,
+        }));
+        run_tick_loop(
+            transport,
+            Some(bulk_info()),
+            test_connector(),
+            Box::new(source),
+            source_build_tx,
+            &mut source_result_rx,
+            &mut hub,
+            30,
+            85,
+            0,
+            template_rx,
+            bg_rx,
+            &mut bg_apply_rx,
+            shutdown_rx,
+            None,
+            std::time::Duration::from_secs(60), // never re-poll empty sensors
+            connected_tx,
+            display_tx,
+            generation_tx,
+            &mut source_revision_rx,
+            tick_rate_rx,
+        )
+        .await
+        .unwrap();
+    });
+
+    // Let ~200ms of 30fps ticks elapse (~6 ticks). Only the first should render.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let renders_before = renders.load(Ordering::Relaxed);
+    let sent_before = frames_sent.load(Ordering::Relaxed);
+    assert_eq!(
+        renders_before, 1,
+        "unchanged fingerprint must render exactly once, got {renders_before}"
+    );
+    assert_eq!(
+        sent_before, 1,
+        "unchanged fingerprint must send exactly once, got {sent_before}"
+    );
+
+    // Bust the fingerprint; the next tick must render+send again.
+    fingerprint.store(0xBEEF, Ordering::Relaxed);
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let renders_after = renders.load(Ordering::Relaxed);
+    let sent_after = frames_sent.load(Ordering::Relaxed);
+    assert!(
+        renders_after >= 2,
+        "fingerprint change must force a re-render, got {renders_after}"
+    );
+    assert_eq!(
+        sent_after, renders_after,
+        "every render must still send; sent={sent_after} renders={renders_after}"
+    );
+
+    let _ = shutdown_tx.send(true);
+    handle.await.unwrap();
     helper.abort();
 }
