@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [0.1.0] - 2026-07-24
 
+### Performance
+- Tick loop skips render/encode/USB send when the active layout's resolved inputs are unchanged (`FrameSource::content_fingerprint`). Streaming (Xvfb) sources still render every tick.
+- NVIDIA GPU sensors prefer in-process NVML over forking `nvidia-smi` every poll; smi remains a fallback, with backoff when neither path is available (#80, #91).
+- Hybrid AMD+NVIDIA machines register Nvidia before AmdGpu so the discrete GPU owns `gpu_*` / `vram_*` keys.
+- SensorHub collision warnings log once per key for the life of the hub (no per-poll journal spam).
+- Steady-state daemon CPU on the comparison machine dropped from 2.52% → **0.86%** of one core at default 2 fps (below TRCC-Linux's 1.06% default).
+
 ### Added
 - Initial daemon implementation for controlling Thermalright LCD coolers.
 - Multi-transport device support: raw bulk, SCSI, HID Type 2/3, and LY bulk protocols across nine USB IDs, with automatic discovery and config-overridable `VID:PID` selection. `87ad:70db` (Peerless Vision / GrandVision 360 AIO) is verified on physical hardware; the remaining IDs are implemented against protocol fixtures — testers wanted.

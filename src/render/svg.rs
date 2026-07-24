@@ -202,6 +202,13 @@ fn xml_escape(value: &str) -> String {
 }
 
 /// Number of history samples to inject per metric (60 ≈ 30s at 2FPS).
+fn hash_template_source(template: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    template.hash(&mut hasher);
+    hasher.finish()
+}
+
 const DEFAULT_HISTORY_SAMPLE_COUNT: usize = 60;
 const DEFAULT_THEME_BACKGROUND: &str = "#08080f";
 
@@ -209,6 +216,9 @@ const DEFAULT_THEME_BACKGROUND: &str = "#08080f";
 pub struct SvgRenderer<'a> {
     tera: Tera,
     template_name: String,
+    /// Hash of the raw template source. `template_name` is fixed ("layout");
+    /// this tracks real content swaps for dirty-frame skipping.
+    template_hash: u64,
     width: u32,
     height: u32,
     logical_width: u32,
@@ -256,6 +266,7 @@ impl<'a> SvgRenderer<'a> {
         Ok(Self {
             tera,
             template_name: "layout".to_string(),
+            template_hash: hash_template_source(template),
             width,
             height,
             logical_width,
@@ -574,6 +585,7 @@ impl FrameSource for SvgRenderer<'static> {
         }
 
         self.options = options_for_template(template);
+        self.template_hash = hash_template_source(template);
         let frontmatter = LayoutFrontmatter::parse(template);
         (self.logical_width, self.logical_height) =
             logical_canvas_dimensions(&frontmatter, self.width, self.height);
@@ -586,6 +598,66 @@ impl FrameSource for SvgRenderer<'static> {
 
     fn set_background(&mut self, bg: Option<Arc<BackgroundImage>>) -> anyhow::Result<()> {
         SvgRenderer::set_background(self, bg)
+    }
+
+    fn content_fingerprint(&self, sensors: &SensorData) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "svg".hash(&mut hasher);
+        self.width.hash(&mut hasher);
+        self.height.hash(&mut hasher);
+        self.logical_width.hash(&mut hasher);
+        self.logical_height.hash(&mut hasher);
+        self.template_hash.hash(&mut hasher);
+
+        let mut defaults: Vec<_> = self.variable_defaults.iter().collect();
+        defaults.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in defaults {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+
+        if let Some(theme) = &self.theme {
+            theme.hash(&mut hasher);
+        }
+
+        if let Some(theme) = &self.theme {
+            // ThemePalette is Eq+Debug; Debug string is a stable stand-in so
+            // palette swaps bust the cache without a custom Hash impl.
+            format!("{theme:?}").hash(&mut hasher);
+        }
+
+        // Background identity (pointer is stable for a given Arc payload).
+        match &self.background_source {
+            Some(bg) => {
+                1u8.hash(&mut hasher);
+                Arc::as_ptr(bg).hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+
+        if let Some(history) = &self.history {
+            match history.lock() {
+                Ok(hist) => hist
+                    .content_fingerprint(DEFAULT_HISTORY_SAMPLE_COUNT)
+                    .hash(&mut hasher),
+                Err(_) => {
+                    // Poisoned lock — force a re-render rather than skip.
+                    return None;
+                }
+            }
+        } else {
+            0u64.hash(&mut hasher);
+        }
+
+        let mut sensor_pairs: Vec<_> = sensors.iter().collect();
+        sensor_pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sensor_pairs {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+
+        Some(hasher.finish())
     }
 }
 

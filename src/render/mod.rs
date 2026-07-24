@@ -85,6 +85,15 @@ pub trait FrameSource: Send {
     fn is_streaming(&self) -> bool {
         false
     }
+    /// Fingerprint of every input that can change the next rendered frame.
+    ///
+    /// The tick loop compares this across ticks and skips render/encode/send
+    /// when it is unchanged. Sources that cannot cheaply prove stability (or
+    /// that are time-animated / streaming) must return `None` so every tick
+    /// still renders. Default: `None`.
+    fn content_fingerprint(&self, _sensors: &SensorData) -> Option<u64> {
+        None
+    }
 }
 
 /// Renders HTML/CSS templates with sensor data substitution.
@@ -232,6 +241,40 @@ impl FrameSource for TemplateRenderer {
             contain_pixmap(&pixmap, self.width, self.height)?
         };
         Ok(RawFrame::from_pixmap(&output))
+    }
+
+    fn content_fingerprint(&self, sensors: &SensorData) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "template".hash(&mut hasher);
+        self.template.hash(&mut hasher);
+        self.width.hash(&mut hasher);
+        self.height.hash(&mut hasher);
+        self.render_width.hash(&mut hasher);
+        self.render_height.hash(&mut hasher);
+
+        let mut defaults: Vec<_> = self.variable_defaults.iter().collect();
+        defaults.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in defaults {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+
+        let mut overrides: Vec<_> = self.variable_overrides.iter().collect();
+        overrides.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in overrides {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+
+        let mut sensor_pairs: Vec<_> = sensors.iter().collect();
+        sensor_pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sensor_pairs {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+
+        Some(hasher.finish())
     }
 
     fn name(&self) -> &str {

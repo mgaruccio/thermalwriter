@@ -89,19 +89,26 @@ reproduced at the bottom.
 
 | Configuration | CPU (% of one core) | avg RSS (MB) | peak RSS (MB) | avg PSS (MB) | peak PSS (MB) |
 |---|---|---|---|---|---|
-| thermalwriter daemon · 2 fps | 2.52 | 44.3 | 71.9 | 41.7 | 67.3 |
+| thermalwriter daemon · 2 fps | **0.86** | 71.8 | 71.8 | 69.0 | 69.0 |
 | TRCC-Linux daemon (headless) · 0.5 fps | 1.06 | 118.8 | 118.9 | 106.9 | 107.5 |
 | TRCC-Linux GUI · 0.5 fps | 1.26 | 301.4 | 301.4 | 284.2 | 284.2 |
 | thermalright-lcd-control GUI | 0.42 | 295.9 | 298.5 | 278.0 | 281.5 |
 
+thermalwriter memory is higher than the first 2026-07-24 snapshot (41.7 MB
+PSS) because this remeasure loads NVML (`libnvidia-ml`) and settles with the
+full sensor + background path; it is still well below the Python daemons.
+
 ### Matched update cadence (1 s), where supported
 
 thermalwriter's tick rate and TRCC-Linux's refresh interval can both be set
-to 1 s (thermalright-lcd-control's cadence is fixed by its theme):
+to 1 s (thermalright-lcd-control's cadence is fixed by its theme). The
+thermalwriter 1 fps row below is the pre-#91 figure; after dirty-frame skip +
+NVML the default 2 fps path already undercuts TRCC's default, so the matched
+cadence row was not re-swept:
 
 | Configuration | CPU (% of one core) | avg PSS (MB) |
 |---|---|---|
-| thermalwriter daemon · 1 fps | 2.40 | 41.2 |
+| thermalwriter daemon · 1 fps (pre-#91) | 2.40 | 41.2 |
 | TRCC-Linux daemon · 1 s refresh | 0.68 | 105.9 |
 
 ### Installed size
@@ -121,26 +128,26 @@ run the daemon; the Python tools bundle their GUIs in the single install.
 
 ## Reading the CPU numbers
 
-**Do not read the CPU column as a per-frame efficiency ranking.** The three
-tools deliberately do different work per tick:
+**Do not read the CPU column as a pure per-frame efficiency ranking.** The
+tools still do different work per tick, but the gap is much smaller after
+[#91](https://github.com/mgaruccio/thermalwriter/issues/91):
 
-- thermalwriter re-renders and re-sends a full frame every tick,
-  unconditionally — its stock layout animates history graphs, so every frame
-  is genuinely different.
+- thermalwriter fingerprints the resolved template inputs (sensor strings,
+  history series, layout vars, theme, background) each tick and **skips
+  render/encode/send** when nothing displayed changed. The stock layout's
+  history graphs still force a real redraw at the sensor poll rate (1 Hz
+  default). GPU metrics come from **NVML** (in-process); `nvidia-smi` is only
+  a fallback when NVML is unavailable.
 - TRCC-Linux polls sensors every tick but skips the render on a cache hit
   when nothing displayed changed (its stock theme shows integer °C readouts,
   which change rarely).
 - thermalright-lcd-control pre-encodes frames and re-encodes only when a
   displayed value changes; most ticks send a cached frame.
 
-Consequently thermalwriter's CPU is dominated by fixed sensor-polling
-overhead plus real per-frame rendering, and barely changes between 1 fps
-(2.40%) and 2 fps (2.52%); a known chunk is the once-per-second `nvidia-smi`
-fork ([#80](https://github.com/mgaruccio/thermalwriter/issues/80)). The
-honest headline is that **every tool here is cheap on CPU — all under 3% of
-one core**. Where the tools genuinely differ at steady state is memory
-(41.7 MB vs 106.9 MB PSS for the daemon-vs-daemon comparison; ~280 MB for
-the GUI-resident tools) and installed size.
+The honest headline is that **every tool here is cheap on CPU — all under
+~1.3% of one core at their defaults**, and thermalwriter is now the lightest
+headless daemon on CPU while staying the lightest on memory and install size
+by a wide margin.
 
 ![CPU comparison](assets/comparison/cpu-dark.svg)
 

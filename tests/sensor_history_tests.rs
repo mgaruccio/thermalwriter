@@ -141,3 +141,23 @@ fn history_inject_into_context_adds_arrays() {
     assert_eq!(arr.len(), 1);
     assert!((arr[0].as_f64().unwrap() - 65.0).abs() < 0.01);
 }
+
+#[test]
+fn history_content_fingerprint_stable_for_same_values() {
+    let mut history = SensorHistory::new();
+    history.configure_metric("cpu_temp", Duration::from_secs(60));
+
+    let mut data = HashMap::new();
+    data.insert("cpu_temp".to_string(), "42".to_string());
+    history.record(&data);
+    history.record(&data);
+
+    let a = history.content_fingerprint(60);
+    let b = history.content_fingerprint(60);
+    assert_eq!(a, b, "identical value series must fingerprint equal");
+
+    data.insert("cpu_temp".to_string(), "43".to_string());
+    history.record(&data);
+    let c = history.content_fingerprint(60);
+    assert_ne!(a, c, "new sample must change fingerprint");
+}

@@ -12,7 +12,7 @@ Current status: Public Beta (`v0.1.0`).
 
 A cooler screen is a background accessory — the software driving it should cost almost nothing. thermalwriter is built to sit quietly in the background of a gaming PC:
 
-- **Lightweight, and measured**: ~50 MB RSS and ~10 ms of CPU per rendered frame (≈2% of one core at the default 2 FPS), background compositing on — real numbers from the committed [profiling baselines](docs/profiling-baselines.md), reproducible with `scripts/profile.sh`.
+- **Lightweight, and measured**: ~70 MB PSS and **0.86% of one core** at the default 2 FPS (stock neon-dash layout, NVML GPU sensors, dirty-frame skip) — full protocol in the [comparison methodology](docs/comparison-methodology.md); frame-path microbenchmarks in [profiling baselines](docs/profiling-baselines.md).
 - **A real Linux daemon**: systemd user service, D-Bus control interface, unprivileged USB access via udev, clean SIGTERM shutdown, automatic USB reconnect.
 - **Designed layouts**: SVG templates with live sensors, per-layout variables surfaced as GUI controls, global background images, and an optional Tauri configuration GUI.
 - **Streams any X11 app**: conky, cava, btop — anything — captured from a hidden Xvfb framebuffer straight to the LCD.
@@ -25,15 +25,18 @@ Measured on one machine, same day, same protocol, each tool driving the same 480
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/memory-dark.svg">
-  <img alt="Memory while driving the LCD (avg PSS): thermalwriter daemon 42 MB, TRCC-Linux headless daemon 107 MB, thermalright-lcd-control GUI 278 MB, TRCC-Linux GUI 284 MB" src="docs/assets/comparison/memory-light.svg">
+  <img alt="Memory while driving the LCD (avg PSS): thermalwriter daemon 69 MB, TRCC-Linux headless daemon 107 MB, thermalright-lcd-control GUI 278 MB, TRCC-Linux GUI 284 MB" src="docs/assets/comparison/memory-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/cpu-dark.svg">
+  <img alt="CPU while keeping the LCD live (% of one core): thermalright-lcd-control GUI 0.42, thermalwriter daemon 0.86, TRCC-Linux daemon 1.06, TRCC-Linux GUI 1.26" src="docs/assets/comparison/cpu-light.svg">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/install-dark.svg">
   <img alt="Installed size: thermalwriter daemon 20 MB, thermalright-lcd-control pip venv 530 MB, TRCC-Linux pip venv 847 MB" src="docs/assets/comparison/install-light.svg">
 </picture>
-
-CPU is not charted here because the tools do different work per tick (thermalwriter re-renders its animated layout every frame; the Python tools cache frames and skip unchanged renders) — every tool measured under 3% of one core, and the [methodology](docs/comparison-methodology.md#reading-the-cpu-numbers) has the full breakdown.
 
 ## Quickstart
 

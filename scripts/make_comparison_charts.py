@@ -25,7 +25,7 @@ MEMORY = {
     "subtitle": "avg PSS over 60 s, fresh start, whole process tree · lower is better",
     "unit": "MB",
     "rows": [
-        ("thermalwriter daemon", 41.7, True),
+        ("thermalwriter daemon", 69.0, True),
         ("TRCC-Linux daemon (headless)", 106.9, False),
         ("thermalright-lcd-control GUI", 278.0, False),
         ("TRCC-Linux GUI", 284.2, False),
@@ -35,13 +35,13 @@ MEMORY = {
 CPU = {
     "title": "CPU while keeping the LCD live",
     "subtitle": ("% of one core, stock sensor theme at each tool's default cadence "
-                 "· cadences differ — see notes, not directly comparable"),
+                 "· lower is better"),
     "unit": "%",
     "rows": [
-        ("thermalwriter daemon · 2 fps", 2.52, True),
-        ("TRCC-Linux GUI · 0.5 fps", 1.26, False),
-        ("TRCC-Linux daemon · 0.5 fps", 1.06, False),
         ("thermalright-lcd-control GUI", 0.42, False),
+        ("thermalwriter daemon · 2 fps", 0.86, True),
+        ("TRCC-Linux daemon · 0.5 fps", 1.06, False),
+        ("TRCC-Linux GUI · 0.5 fps", 1.26, False),
     ],
 }
 

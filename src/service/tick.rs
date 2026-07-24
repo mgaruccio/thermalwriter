@@ -120,6 +120,10 @@ pub async fn run_tick_loop(
     let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
     let mut last_poll = Instant::now() - sensor_poll_interval;
     let mut next_reconnect_at: Option<Instant> = None;
+    // Dirty-frame skip: when the active source can fingerprint its inputs and
+    // the fingerprint is unchanged, skip render/encode/send. LCD holds last
+    // frame (no keepalive required). Invalidated on source/template/bg swap.
+    let mut last_frame_fingerprint: Option<u64> = None;
 
     // Startup: if we already have a transport+info, the caller built the source
     // at negotiated dimensions — commit ActiveConnection immediately.
@@ -193,6 +197,7 @@ pub async fn run_tick_loop(
                 &generation_tx,
                 &mut source_revision,
                 &mut next_reconnect_at,
+                &mut last_frame_fingerprint,
             );
         }
 
@@ -201,6 +206,7 @@ pub async fn run_tick_loop(
             let template = template_rx.borrow_and_update().clone();
             if !template.is_empty() {
                 frame_source.set_template(&template);
+                last_frame_fingerprint = None;
             }
         }
 
@@ -211,6 +217,7 @@ pub async fn run_tick_loop(
             match frame_source.set_background(apply.image.clone()) {
                 Ok(()) => {
                     cached_background = apply.image;
+                    last_frame_fingerprint = None;
                     let _ = apply.ack.send(Ok(()));
                 }
                 Err(e) => {
@@ -237,6 +244,7 @@ pub async fn run_tick_loop(
                 warn!("Background watch apply failed: {e:#}");
             } else {
                 cached_background = bg;
+                last_frame_fingerprint = None;
             }
         }
 
@@ -318,58 +326,73 @@ pub async fn run_tick_loop(
 
         // Render + encode + send only when ActiveConnection is committed.
         if let Some(conn) = active.as_mut() {
-            let rendered = tokio::task::block_in_place(|| {
-                let frame = frame_source.render(sensors)?;
-                let encoded = encode_frame(&frame, &conn.info, rotation, jpeg_quality)?;
-                Ok::<_, anyhow::Error>((frame, encoded))
-            });
-            match rendered {
-                Ok((frame, encoded)) => {
-                    debug!(
-                        "Frame encoded: {} bytes ({})",
-                        encoded.data.len(),
-                        encoded.encoding
-                    );
+            // Cheap dirty check: skip full render when inputs are unchanged.
+            // Streaming sources return None and always render (Xvfb capture).
+            let fingerprint = frame_source.content_fingerprint(sensors);
+            let skip_render = match (fingerprint, last_frame_fingerprint) {
+                (Some(now), Some(prev)) if now == prev => true,
+                _ => false,
+            };
 
-                    if frame_source.is_streaming() {
-                        match frame_dump::frame_dir() {
-                            Ok(dir) => {
-                                let dump_bytes = if encoded.encoding.is_jpeg() {
-                                    encoded.data.clone()
-                                } else {
-                                    encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
-                                };
-                                if !dump_bytes.is_empty()
-                                    && let Err(e) = tokio::task::block_in_place(|| {
-                                        frame_dump::write_frame_atomic(&dir, &dump_bytes)
-                                    })
-                                {
-                                    warn!("frame_dump write failed: {e}");
+            if skip_render {
+                debug!("Skipping unchanged frame (fingerprint match)");
+            } else {
+                let rendered = tokio::task::block_in_place(|| {
+                    let frame = frame_source.render(sensors)?;
+                    let encoded = encode_frame(&frame, &conn.info, rotation, jpeg_quality)?;
+                    Ok::<_, anyhow::Error>((frame, encoded))
+                });
+                match rendered {
+                    Ok((frame, encoded)) => {
+                        debug!(
+                            "Frame encoded: {} bytes ({})",
+                            encoded.data.len(),
+                            encoded.encoding
+                        );
+
+                        if frame_source.is_streaming() {
+                            match frame_dump::frame_dir() {
+                                Ok(dir) => {
+                                    let dump_bytes = if encoded.encoding.is_jpeg() {
+                                        encoded.data.clone()
+                                    } else {
+                                        encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
+                                    };
+                                    if !dump_bytes.is_empty()
+                                        && let Err(e) = tokio::task::block_in_place(|| {
+                                            frame_dump::write_frame_atomic(&dir, &dump_bytes)
+                                        })
+                                    {
+                                        warn!("frame_dump write failed: {e}");
+                                    }
                                 }
+                                Err(e) => warn!("frame_dump disabled: {e}"),
                             }
-                            Err(e) => warn!("frame_dump disabled: {e}"),
                         }
-                    }
 
-                    let send_result =
-                        tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
-                    if let Err(e) = send_result {
-                        warn!("Failed to send frame: {e}");
-                        if !conn.transport.is_connected() {
-                            warn!(
-                                "Fatal send — dropping generation {} and reconnecting",
-                                conn.generation
-                            );
-                            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                            let _ = connected_tx.send(false);
-                            let _ = generation_tx.send(0);
-                            active = None;
-                            pending = None;
-                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        let send_result =
+                            tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
+                        if let Err(e) = send_result {
+                            warn!("Failed to send frame: {e}");
+                            if !conn.transport.is_connected() {
+                                warn!(
+                                    "Fatal send — dropping generation {} and reconnecting",
+                                    conn.generation
+                                );
+                                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                                let _ = connected_tx.send(false);
+                                let _ = generation_tx.send(0);
+                                active = None;
+                                pending = None;
+                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                                last_frame_fingerprint = None;
+                            }
+                        } else {
+                            last_frame_fingerprint = fingerprint;
                         }
                     }
+                    Err(e) => warn!("Render/encode failed: {e:#}"),
                 }
-                Err(e) => warn!("Render/encode failed: {e:#}"),
             }
         }
 
@@ -404,6 +427,7 @@ fn handle_source_result(
     generation_tx: &tokio::sync::watch::Sender<u64>,
     current_source_revision: &mut u64,
     next_reconnect_at: &mut Option<Instant>,
+    last_frame_fingerprint: &mut Option<u64>,
 ) {
     let generation = result.generation;
     let source_revision = result.source_revision;
@@ -463,6 +487,7 @@ fn handle_source_result(
             }
 
             *frame_source = source;
+            *last_frame_fingerprint = None;
             if pending_match {
                 let connection = pending.take().expect("pending_match");
                 info!(

@@ -93,6 +93,7 @@ libc = "0.2"
 # Heap allocation profiling (optional — see `dhat-heap` feature below)
 dhat = { version = "0.3", optional = true }
 material-colors = { version = "0.4.2", default-features = false, features = ["std"] }
+nvml-wrapper = "0.12"
 
 [features]
 default = ["daemon"]
