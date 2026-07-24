@@ -155,6 +155,7 @@ impl SensorProvider for AmdGpuProvider {
                     key: r.key.clone(),
                     name: r.key.clone(),
                     unit: r.unit.clone(),
+                    cost_us: 0,
                 })
                 .collect(),
             Err(_) => Vec::new(),

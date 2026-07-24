@@ -213,6 +213,7 @@ impl SensorProvider for MangoHudProvider {
                 key: k.to_string(),
                 name: k.to_string(),
                 unit: String::new(),
+                cost_us: 0,
             })
             .collect()
     }

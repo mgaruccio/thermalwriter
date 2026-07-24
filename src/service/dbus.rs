@@ -104,9 +104,9 @@ pub struct ServiceState {
     pub layout_dir: std::path::PathBuf,
     /// Path to the on-disk config.toml (used by set_layout_vars for persistence).
     pub config_path: std::path::PathBuf,
-    /// Snapshot of sensor descriptors (key, name, unit). Populated in main.rs
-    /// after the first sensor_hub.poll() so list_sensors() returns real data.
-    pub sensor_descriptors: Vec<(String, String, String)>,
+    /// Live sensor catalog (key, name, unit, cost_us). Shared with the tick
+    /// loop so list_sensors reflects the latest poll timing.
+    pub sensor_descriptors: Arc<std::sync::Mutex<Vec<(String, String, String, u64)>>>,
     /// In-memory mirror of the running daemon's Config. set_layout_vars mutates
     /// this alongside the on-disk file so the tick loop sees fresh values
     /// without a restart.
@@ -753,11 +753,16 @@ impl DisplayInterface {
         list_layouts_impl(&state.layout_dir)
     }
 
-    /// Return available sensor descriptors as `(key, name, unit)` tuples.
-    /// Populated from the sensor hub at startup — D-Bus does not support
-    /// custom structs, so we expose a tuple shape.
-    async fn list_sensors(&self) -> Vec<(String, String, String)> {
-        self.state.lock().await.sensor_descriptors.clone()
+    /// Return available sensor descriptors as `(key, name, unit, cost_us)`.
+    /// `cost_us` is the last measured poll attribution for that key.
+    async fn list_sensors(&self) -> Vec<(String, String, String, u64)> {
+        self.state
+            .lock()
+            .await
+            .sensor_descriptors
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Return the declared variables for `name` as a list of dicts with keys
@@ -1304,7 +1309,7 @@ accent_color: color = "#ff0000" "Accent"
             tick_rate_tx,
             layout_dir: layout_dir.clone(),
             config_path: dir.path().join("config.toml"),
-            sensor_descriptors: vec![],
+            sensor_descriptors: Arc::new(std::sync::Mutex::new(vec![])),
             config,
             mode_change_tx: mode_tx,
             background_dir: dir.path().join("backgrounds"),

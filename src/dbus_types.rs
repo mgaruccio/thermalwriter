@@ -22,8 +22,9 @@ pub trait Display {
     async fn set_layout(&self, name: &str) -> zbus::Result<String>;
     async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;
     async fn list_layouts(&self) -> zbus::Result<Vec<String>>;
-    /// Returns (key, name, unit) tuples for each available sensor.
-    async fn list_sensors(&self) -> zbus::Result<Vec<(String, String, String)>>;
+    /// Returns (key, name, unit, cost_us) tuples for each available sensor.
+    /// `cost_us` is the last measured poll cost attributed to that key.
+    async fn list_sensors(&self) -> zbus::Result<Vec<(String, String, String, u64)>>;
     async fn get_layout_vars(&self, name: &str) -> zbus::Result<Vec<HashMap<String, String>>>;
     async fn set_layout_vars(&self, name: &str, vars: HashMap<String, String>) -> zbus::Result<()>;
     async fn stop(&self) -> zbus::Result<()>;

@@ -553,26 +553,31 @@ impl SensorProvider for NvidiaProvider {
                 key: "gpu_temp".into(),
                 name: "GPU Temperature".into(),
                 unit: "°C".into(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "gpu_util".into(),
                 name: "GPU Utilization".into(),
                 unit: "%".into(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "gpu_power".into(),
                 name: "GPU Power".into(),
                 unit: "W".into(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "vram_used".into(),
                 name: "VRAM Used".into(),
                 unit: "GB".into(),
+                cost_us: 0,
             },
             SensorDescriptor {
                 key: "vram_total".into(),
                 name: "VRAM Total".into(),
                 unit: "GB".into(),
+                cost_us: 0,
             },
         ]
     }

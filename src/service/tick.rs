@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::render::background::BackgroundImage;
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
+use crate::sensor::default_needed_keys;
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
@@ -101,6 +102,8 @@ pub async fn run_tick_loop(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
+    // Shared catalog updated after each poll so D-Bus list_sensors shows costs.
+    sensor_catalog: Option<Arc<Mutex<Vec<(String, String, String, u64)>>>>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     generation_tx: tokio::sync::watch::Sender<u64>,
@@ -311,11 +314,29 @@ pub async fn run_tick_loop(
         // Poll/render/encode are CPU-bound; run them under block_in_place so
         // Tokio can keep servicing D-Bus on other worker threads.
         let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
+            // Keep adaptive prune aligned with the layout's history metrics.
+            if let Some(hist) = &sensor_history
+                && let Ok(h) = hist.lock()
+            {
+                let mut needed = default_needed_keys();
+                needed.extend(h.configured_metrics());
+                sensor_hub.set_needed_keys(Some(needed));
+            }
             let data = tokio::task::block_in_place(|| sensor_hub.poll());
             if let Some(hist) = &sensor_history
                 && let Ok(mut h) = hist.lock()
             {
                 h.record(&data);
+            }
+            // Publish live costs for the GUI sensor picker.
+            if let Some(catalog) = &sensor_catalog
+                && let Ok(mut guard) = catalog.lock()
+            {
+                *guard = sensor_hub
+                    .available_sensors()
+                    .into_iter()
+                    .map(|d| (d.key, d.name, d.unit, d.cost_us))
+                    .collect();
             }
             cached_sensors = data;
             last_poll = tick_start;

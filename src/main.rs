@@ -14,13 +14,8 @@ use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::sensor::SensorHub;
-use thermalwriter::sensor::amdgpu::AmdGpuProvider;
+use thermalwriter::sensor::default_needed_keys;
 use thermalwriter::sensor::history::SensorHistory;
-use thermalwriter::sensor::hwmon::HwmonProvider;
-use thermalwriter::sensor::mangohud::MangoHudProvider;
-use thermalwriter::sensor::nvidia::NvidiaProvider;
-use thermalwriter::sensor::rapl::RaplProvider;
-use thermalwriter::sensor::sysinfo_provider::SysinfoProvider;
 use thermalwriter::service::dbus::{self, ModeChange, ServiceState};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
 use thermalwriter::service::tick::{
@@ -206,28 +201,18 @@ async fn main() -> Result<()> {
     };
 
     // Setup sensor hub with all providers
-    let mut sensor_hub = SensorHub::new();
-    sensor_hub.add_provider(Box::new(HwmonProvider::new()));
-    sensor_hub.add_provider(Box::new(SysinfoProvider::new()));
-    // Nvidia before AmdGpu so a hybrid (AMD iGPU + NVIDIA dGPU) machine reports
-    // the discrete GPU that users care about on the cooler LCD. On pure-AMD
-    // systems Nvidia returns empty and AmdGpu still owns the keys.
-    sensor_hub.add_provider(Box::new(NvidiaProvider::new()));
-    sensor_hub.add_provider(Box::new(AmdGpuProvider::new()));
-    sensor_hub.add_provider(Box::new(MangoHudProvider::from_configured_dir(
-        &config.sensors.mangohud_log_dir,
-    )));
-    sensor_hub.add_provider(Box::new(RaplProvider::new()));
+    let mut sensor_hub = SensorHub::with_default_providers(&config.sensors.mangohud_log_dir);
 
-    // Prime providers so they discover devices, then snapshot descriptors for
-    // the D-Bus list_sensors method. Must happen before the D-Bus service
-    // starts so the first client call sees real data.
+    // Prime providers so they discover devices, then publish the live catalog
+    // for D-Bus list_sensors (includes per-key poll cost after the first poll).
     let _ = sensor_hub.poll();
-    let sensor_descriptors: Vec<(String, String, String)> = sensor_hub
-        .available_sensors()
-        .into_iter()
-        .map(|d| (d.key, d.name, d.unit))
-        .collect();
+    let sensor_descriptors = Arc::new(std::sync::Mutex::new(
+        sensor_hub
+            .available_sensors()
+            .into_iter()
+            .map(|d| (d.key, d.name, d.unit, d.cost_us))
+            .collect::<Vec<_>>(),
+    ));
 
     // Generation-tagged source rebuild channel (tick → listener request, listener → tick result)
     let (source_build_tx, mut source_build_rx) = mpsc::channel::<SourceBuildRequest>(4);
@@ -304,6 +289,22 @@ async fn main() -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
 
+            // Adaptive prune: only spend poll budget on metrics this layout uses
+            // (plus the always-on desktop defaults).
+            let mut needed = default_needed_keys();
+            needed.extend(frontmatter.history_configs.keys().cloned());
+            for (name, decl) in &frontmatter.variables {
+                if decl.var_type == "sensor" {
+                    // sensor vars store a key name as their value/default
+                    if let Some(v) = layout_vars.get(name) {
+                        needed.insert(v.clone());
+                    } else if !decl.default.is_empty() {
+                        needed.insert(decl.default.clone());
+                    }
+                }
+            }
+            sensor_hub.set_needed_keys(Some(needed));
+
             let is_svg = resolved_layout.ends_with(".svg");
             let boxed: Box<dyn FrameSource> = if is_svg {
                 let mut renderer =
@@ -340,7 +341,7 @@ async fn main() -> Result<()> {
         tick_rate_tx,
         layout_dir: layout_dir.clone(),
         config_path: config_path.clone(),
-        sensor_descriptors,
+        sensor_descriptors: Arc::clone(&sensor_descriptors),
         config: config.clone(),
         mode_change_tx: mode_tx,
         background_dir: background_dir.clone(),
@@ -807,6 +808,7 @@ async fn main() -> Result<()> {
             shutdown_rx,
             initial_sensor_history,
             sensor_poll_interval,
+            Some(Arc::clone(&sensor_descriptors)),
             connected_tx,
             display_tx,
             generation_tx,
