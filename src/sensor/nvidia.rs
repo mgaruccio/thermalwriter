@@ -6,10 +6,11 @@
 //
 // Hung-driver policy (both paths share a 500 ms wall-clock budget):
 // - smi: wait_timeout(500ms) + kill/reap the child
-// - NVML: request/response against a worker; recv_timeout(500ms). NVML calls
-//   are not cancellable, so a wedged call may leave the worker stuck until the
-//   driver recovers — but sensor_hub.poll / the tick loop always return within
-//   the budget and demote off NVML. (#80 / #91)
+// - NVML: init, device_count, and queries all run on a worker thread;
+//   the tick loop only ever recv_timeout(500ms). NVML calls are not
+//   cancellable, so a wedged call may leave the worker stuck until the
+//   driver recovers — but sensor_hub.poll / the tick loop always return
+//   within the budget and demote off NVML. (#80 / #91)
 
 use anyhow::Result;
 use nvml_wrapper::Nvml;
@@ -28,43 +29,81 @@ const NVIDIA_POLL_BUDGET: Duration = Duration::from_millis(500);
 const REPROBE_BACKOFF: Duration = Duration::from_secs(60);
 const SMI_EMPTY_FAIL_LIMIT: u32 = 3;
 
-/// Dedicated NVML owner. Queries run only on this thread; the tick loop never
-/// blocks longer than [`NVIDIA_POLL_BUDGET`] waiting for a reply.
+/// Dedicated NVML owner. Init + all queries run only on this thread; the tick
+/// loop never blocks longer than [`NVIDIA_POLL_BUDGET`] waiting for a reply
+/// (including the startup handshake).
 struct NvmlWorker {
     req_tx: SyncSender<()>,
     resp_rx: Receiver<NvmlPollOutcome>,
 }
 
-impl NvmlWorker {
-    fn spawn() -> Option<Self> {
-        let nvml = match Nvml::init() {
-            Ok(n) => n,
-            Err(e) => {
-                log::debug!("NVML init failed: {e}");
-                return None;
-            }
-        };
-        match nvml.device_count() {
-            Ok(n) if n > 0 => {}
-            Ok(_) => {
-                log::debug!("NVML init ok but device_count=0");
-                return None;
-            }
-            Err(e) => {
-                log::debug!("NVML device_count failed: {e}");
-                return None;
-            }
-        }
+enum WorkerReady {
+    Ready,
+    Failed(String),
+}
 
+impl NvmlWorker {
+    /// Spawn the worker and wait up to [`NVIDIA_POLL_BUDGET`] for init +
+    /// device_count to succeed. On timeout/failure returns `None` and abandons
+    /// the worker thread (it may still be stuck inside a wedged driver call).
+    fn spawn() -> Option<Self> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<WorkerReady>(1);
         let (req_tx, req_rx) = mpsc::sync_channel::<()>(0); // rendezvous
         let (resp_tx, resp_rx) = mpsc::sync_channel::<NvmlPollOutcome>(1);
 
         thread::Builder::new()
             .name("tw-nvml".into())
-            .spawn(move || nvml_worker_loop(nvml, req_rx, resp_tx))
+            .spawn(move || {
+                let nvml = match Nvml::init() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ =
+                            ready_tx.send(WorkerReady::Failed(format!("NVML init failed: {e}")));
+                        return;
+                    }
+                };
+                match nvml.device_count() {
+                    Ok(n) if n > 0 => {
+                        if ready_tx.send(WorkerReady::Ready).is_err() {
+                            return; // parent timed out / dropped
+                        }
+                    }
+                    Ok(_) => {
+                        let _ = ready_tx.send(WorkerReady::Failed(
+                            "NVML init ok but device_count=0".into(),
+                        ));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(WorkerReady::Failed(format!(
+                            "NVML device_count failed: {e}"
+                        )));
+                        return;
+                    }
+                }
+                nvml_worker_loop(nvml, req_rx, resp_tx);
+            })
             .ok()?;
 
-        Some(Self { req_tx, resp_rx })
+        match ready_rx.recv_timeout(NVIDIA_POLL_BUDGET) {
+            Ok(WorkerReady::Ready) => Some(Self { req_tx, resp_rx }),
+            Ok(WorkerReady::Failed(reason)) => {
+                log::debug!("NVML worker startup failed: {reason}");
+                None
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                log::warn!(
+                    "NVML worker startup timed out after {NVIDIA_POLL_BUDGET:?}; abandoning worker"
+                );
+                // Dropping req_tx/resp_rx: if the worker later finishes init it
+                // will see ready_tx already consumed or req channel closed and exit.
+                None
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                log::debug!("NVML worker exited during startup");
+                None
+            }
+        }
     }
 
     /// Poll with a hard wall-clock timeout. On timeout the worker may still be
@@ -602,6 +641,19 @@ mod tests {
         assert!(
             started.elapsed() < NVIDIA_POLL_BUDGET,
             "healthy NVML poll must finish under the hang budget"
+        );
+    }
+
+    #[test]
+    fn nvml_worker_spawn_completes_within_budget() {
+        // Init + device_count run on the worker; spawn() itself must never
+        // block longer than NVIDIA_POLL_BUDGET even if the driver wedges.
+        let started = Instant::now();
+        let _ = NvmlWorker::spawn(); // Some or None both fine
+        assert!(
+            started.elapsed() < NVIDIA_POLL_BUDGET + Duration::from_millis(100),
+            "spawn handshake must be recv_timeout-bounded, took {:?}",
+            started.elapsed()
         );
     }
 
