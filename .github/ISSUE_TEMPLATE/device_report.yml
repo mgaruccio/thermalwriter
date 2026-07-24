@@ -1,0 +1,41 @@
+name: Device report / tester check-in
+description: You have a Thermalright LCD cooler — tell us whether thermalwriter works with it
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only `87ad:70db` has been verified on physical hardware so far; every other supported ID is implemented against protocol fixtures. Reports from real devices — working or not — directly improve the support table. Thank you!
+  - type: input
+    id: model
+    attributes:
+      label: Cooler model
+      placeholder: "e.g. Frozen Warframe 360, Trofeo Vision, Wonder Vision Pro 360"
+    validations:
+      required: true
+  - type: textarea
+    id: lsusb
+    attributes:
+      label: lsusb output
+      description: The line(s) for the cooler's screen device.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works — layouts render correctly
+        - Partially works (describe below)
+        - Detected but no image / wrong image
+        - Not detected
+        - Haven't tried yet — device available for testing
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: "`thermalwriter ctl status` output, journal lines from `journalctl --user -u thermalwriter -n 50`, photos of what the LCD shows — anything helps, especially for partial results."
+      render: text

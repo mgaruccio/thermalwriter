@@ -1,0 +1,45 @@
+name: Bug report
+description: Something broke — daemon, GUI, layouts, or streaming
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Daemon
+        - GUI (Tauri app)
+        - Layout rendering
+        - App streaming (Xvfb)
+        - Install / packaging
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and kernel
+      placeholder: "e.g. Arch, 6.15.4-arch1; from: uname -r && cat /etc/os-release | head -2"
+    validations:
+      required: true
+  - type: textarea
+    id: device
+    attributes:
+      label: Cooler / USB device
+      description: Cooler model, plus the matching line from `lsusb`.
+      placeholder: |
+        Peerless Vision 360
+        Bus 001 Device 012: ID 87ad:70db ...
+  - type: textarea
+    id: status
+    attributes:
+      label: Daemon status and logs
+      description: Output of `thermalwriter ctl status` and any relevant lines from `journalctl --user -u thermalwriter -n 50`.
+      render: text

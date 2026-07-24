@@ -1,8 +1,41 @@
 # thermalwriter
 
-`thermalwriter` is a lightweight Linux daemon for Thermalright cooler LCD displays. It replaces the large vendor Python/Qt app with a Rust service that renders local layouts, polls system sensors, and sends JPEG frames over USB.
+[![CI](https://github.com/mgaruccio/thermalwriter/actions/workflows/ci.yml/badge.svg)](https://github.com/mgaruccio/thermalwriter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mgaruccio/thermalwriter)](https://github.com/mgaruccio/thermalwriter/releases)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+
+`thermalwriter` is a lightweight, Linux-native daemon for Thermalright cooler LCD displays. It renders designed sensor layouts — or any X11 app — and sends JPEG frames to the cooler over USB, with the always-on footprint of a proper background daemon instead of a desktop app.
 
 Current status: Public Beta (`v0.1.0`).
+
+## Why thermalwriter?
+
+A cooler screen is a background accessory — the software driving it should cost almost nothing. thermalwriter is built to sit quietly in the background of a gaming PC:
+
+- **Lightweight, and measured**: ~50 MB RSS and ~10 ms of CPU per rendered frame (≈2% of one core at the default 2 FPS), background compositing on — real numbers from the committed [profiling baselines](docs/profiling-baselines.md), reproducible with `scripts/profile.sh`.
+- **A real Linux daemon**: systemd user service, D-Bus control interface, unprivileged USB access via udev, clean SIGTERM shutdown, automatic USB reconnect.
+- **Designed layouts**: SVG templates with live sensors, per-layout variables surfaced as GUI controls, global background images, and an optional Tauri configuration GUI.
+- **Streams any X11 app**: conky, cava, btop — anything — captured from a hidden Xvfb framebuffer straight to the LCD.
+
+If you want maximum device coverage, LED control, or video playback, [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux) is the feature-rich project in this space (and the upstream source of this project's protocol tables — see [License](#license)). thermalwriter deliberately trades breadth for a minimal, composable always-on footprint.
+
+## Quickstart
+
+Download the latest release tarball from [Releases](https://github.com/mgaruccio/thermalwriter/releases), then:
+
+```sh
+tar xf thermalwriter-v*-x86_64-unknown-linux-gnu.tar.gz
+cd thermalwriter-v*-x86_64-unknown-linux-gnu
+./packaging/install.sh
+```
+
+Replug the cooler once so the new udev rules apply, then check:
+
+```sh
+thermalwriter ctl status
+```
+
+Source installs, the GUI, and full details below.
 
 ### Supported Devices
 
@@ -16,9 +49,20 @@ Current status: Public Beta (`v0.1.0`).
 | **Fixture-verified** | `0416:5406` | Dual-shape Winbond device: vendor bulk preferred, SCSI fallback |
 | **Not supported** | Other IDs / non-Linux hosts | Unknown devices are rejected rather than guessed |
 
+Only `87ad:70db` has been verified on physical hardware so far; the other IDs are implemented against protocol fixtures derived from real captures. **Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
+
 ## Features
 
-![Layout Preview](docs/assets/neon-dash-v2-preview.png)
+<table>
+  <tr>
+    <td align="center"><img src="docs/assets/gallery/neon-dash-v2-480x480.png" width="290" alt="neon-dash-v2 layout"/><br/><sub><b>neon-dash-v2</b> (default)</sub></td>
+    <td align="center"><img src="docs/assets/gallery/arc-gauge-480x480.png" width="290" alt="arc-gauge layout"/><br/><sub><b>arc-gauge</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/gallery/cyber-grid-480x480.png" width="290" alt="cyber-grid layout"/><br/><sub><b>cyber-grid</b></sub></td>
+    <td align="center"><img src="docs/assets/gallery/neon-dash-480x480.png" width="290" alt="neon-dash layout"/><br/><sub><b>neon-dash</b></sub></td>
+  </tr>
+</table>
 
 - User-session systemd daemon with D-Bus control commands.
 - Responsive SVG and legacy HTML layout renderers targeting negotiated native resolutions from portrait through ultrawide.
