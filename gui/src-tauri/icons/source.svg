@@ -1,0 +1,42 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%">
+      <stop offset="0%" stop-color="#24283b"/>
+      <stop offset="100%" stop-color="#16161e"/>
+    </radialGradient>
+    <linearGradient id="arc" x1="15%" y1="85%" x2="85%" y2="15%">
+      <stop offset="0%" stop-color="#7dcfff"/>
+      <stop offset="55%" stop-color="#7aa2f7"/>
+      <stop offset="100%" stop-color="#bb9af7"/>
+    </linearGradient>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+    <filter id="sparkglow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+  </defs>
+
+  <!-- rounded-square plate, transparent corners -->
+  <rect x="56" y="56" width="912" height="912" rx="204" fill="url(#bg)"/>
+  <rect x="56" y="56" width="912" height="912" rx="204" fill="none" stroke="#2f3549" stroke-width="10"/>
+
+  <!-- gauge track -->
+  <circle cx="512" cy="512" r="300" fill="none" stroke="#292e42" stroke-width="86"
+          stroke-linecap="round" stroke-dasharray="1414 1885" transform="rotate(135 512 512)"/>
+
+  <!-- gauge arc: glow pass then crisp pass, 270 degrees starting bottom-left -->
+  <circle cx="512" cy="512" r="300" fill="none" stroke="url(#arc)" stroke-width="86"
+          stroke-linecap="round" stroke-dasharray="1414 1885" transform="rotate(135 512 512)"
+          filter="url(#glow)" opacity="0.75"/>
+  <circle cx="512" cy="512" r="300" fill="none" stroke="url(#arc)" stroke-width="86"
+          stroke-linecap="round" stroke-dasharray="1414 1885" transform="rotate(135 512 512)"/>
+
+  <!-- sensor spark across the LCD face -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 344 560 L 430 560 L 476 424 L 546 624 L 592 512 L 680 512"
+          stroke="#7dcfff" stroke-width="36" filter="url(#sparkglow)" opacity="0.8"/>
+    <path d="M 344 560 L 430 560 L 476 424 L 546 624 L 592 512 L 680 512"
+          stroke="#c3e7ff" stroke-width="30"/>
+  </g>
+</svg>
