@@ -64,8 +64,8 @@ jobs:
         run: |
           mkdir -p release_dist
           cp thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz release_dist/
-          cp gui/src-tauri/target/release/bundle/appimage/*.AppImage release_dist/
-          cp gui/src-tauri/target/release/bundle/deb/*.deb release_dist/
+          cp target/release/bundle/appimage/*.AppImage release_dist/
+          cp target/release/bundle/deb/*.deb release_dist/
           cd release_dist
           sha256sum * > SHA256SUMS
 
