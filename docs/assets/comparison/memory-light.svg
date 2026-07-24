@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="326" viewBox="0 0 920 326" role="img" aria-label="Memory while driving the LCD: thermalwriter daemon 42 MB; TRCC-Linux daemon (headless) 107 MB; thermalright-lcd-control GUI 278 MB; TRCC-Linux GUI 284 MB">
+<rect x="0.5" y="0.5" width="919" height="325" rx="12" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="28" y="36" font-family="system-ui, sans-serif" font-size="17" font-weight="600" fill="#1a1b26">Memory while driving the LCD</text>
+<text x="28" y="58" font-family="system-ui, sans-serif" font-size="12.5" fill="#52514e">avg PSS over 60 s, fresh start, whole process tree · lower is better</text>
+<text x="278.0" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">0</text>
+<line x1="452.7" y1="76" x2="452.7" y2="252" stroke="#e1e0d9" stroke-width="1"/>
+<text x="452.7" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">100</text>
+<line x1="627.3" y1="76" x2="627.3" y2="252" stroke="#e1e0d9" stroke-width="1"/>
+<text x="627.3" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">200</text>
+<line x1="802.0" y1="76" x2="802.0" y2="252" stroke="#e1e0d9" stroke-width="1"/>
+<text x="802.0" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">300</text>
+<text x="836" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle">MB</text>
+<line x1="278" y1="76" x2="278" y2="252" stroke="#898781" stroke-width="1"/>
+<text x="266" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26" text-anchor="end">thermalwriter daemon</text>
+<path d="M 278.0 88.0 h 68.8 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -68.8 z" fill="#2e7de9"/>
+<text x="359.836" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">42</text>
+<text x="266" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="400" fill="#52514e" text-anchor="end">TRCC-Linux daemon (headless)</text>
+<path d="M 278.0 132.0 h 182.7 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -182.7 z" fill="#a8aecb"/>
+<text x="473.71866666666665" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">107</text>
+<text x="266" y="190.5" font-family="system-ui, sans-serif" font-size="13" font-weight="400" fill="#52514e" text-anchor="end">thermalright-lcd-control GUI</text>
+<path d="M 278.0 176.0 h 481.6 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -481.6 z" fill="#a8aecb"/>
+<text x="772.5733333333333" y="190.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">278</text>
+<text x="266" y="234.5" font-family="system-ui, sans-serif" font-size="13" font-weight="400" fill="#52514e" text-anchor="end">TRCC-Linux GUI</text>
+<path d="M 278.0 220.0 h 492.4 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -492.4 z" fill="#a8aecb"/>
+<text x="783.4026666666666" y="234.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">284</text>
+<text x="28" y="304" font-family="system-ui, sans-serif" font-size="10.5" fill="#898781">Ryzen 9 9950X3D · CachyOS Linux · 2026-07-24 · same machine, same protocol · docs/comparison-methodology.md</text>
+</svg>

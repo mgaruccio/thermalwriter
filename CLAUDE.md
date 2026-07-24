@@ -9,7 +9,8 @@ Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Posi
 - **Footprint (measured, see `docs/profiling-baselines.md`)**: ~50 MB avg RSS and ~10.5 ms CPU/frame at 2 FPS (≈2% of one core), ~0.78 s to first frame, ~20 MB release binary — cite these; the earlier "14MB/29MB/1%" figures predate the profiling harness and are superseded
 - **Parked WIP**: MPRIS now-playing feature on `feature/now-playing` (draft PR #76 — tests green, 10 clippy warnings to clear before merge)
 - **Product-gap backlog**: issues #77–#90 (Intel iGPU provider, super-I/O cpu_fan aliases, multi-GPU selection, Xvfb test gating, font vendoring, AUR, `thermalwriter report` diagnostics, clean-VM release QA gate for announcements, …)
-- **Pre-announcement launch collateral still needed**: hardware photos, cava-streaming GIF, measured comparison graphs vs the Python tools (publish methodology; `autoresearch.sh` + `scripts/profile.sh` give the thermalwriter side)
+- **Announcement blockers** (label `release-blocker`): #91 — steady-state CPU (2.52% @ 2 FPS) must drop below TRCC-Linux's daemon (1.06%); plan is skip-identical-frames / render-at-data-cadence / NVML instead of nvidia-smi fork (#80). #90 (clean-VM QA) is the other pre-announcement gate
+- **Pre-announcement launch collateral still needed**: hardware photos, cava-streaming GIF. DONE 2026-07-24: measured comparison graphs vs TRCC-Linux 9.9.2 + thermalright-lcd-control 2.0.0 — `docs/comparison-methodology.md` (protocol + all numbers), `docs/assets/comparison/*.svg` (regenerate via `scripts/make_comparison_charts.py`), README "How it compares" section, `scripts/footprint_sampler.sh` (cgroup/PSS sampler used for all tools). CPU is deliberately NOT a README chart (tools do different per-tick work — conditional render vs unconditional; see the doc's CPU section before quoting CPU numbers)
 
 ## Architecture
 

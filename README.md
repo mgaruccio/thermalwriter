@@ -19,6 +19,22 @@ A cooler screen is a background accessory — the software driving it should cos
 
 If you want maximum device coverage, LED control, or video playback, [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux) is the feature-rich project in this space (and the upstream source of this project's protocol tables — see [License](#license)). thermalwriter deliberately trades breadth for a minimal, composable always-on footprint.
 
+### How it compares
+
+Measured on one machine, same day, same protocol, each tool driving the same 480×480 LCD with its stock sensor theme — full numbers, caveats, and reproduction steps in the [comparison methodology](docs/comparison-methodology.md):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/memory-dark.svg">
+  <img alt="Memory while driving the LCD (avg PSS): thermalwriter daemon 42 MB, TRCC-Linux headless daemon 107 MB, thermalright-lcd-control GUI 278 MB, TRCC-Linux GUI 284 MB" src="docs/assets/comparison/memory-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/comparison/install-dark.svg">
+  <img alt="Installed size: thermalwriter daemon 20 MB, thermalright-lcd-control pip venv 530 MB, TRCC-Linux pip venv 847 MB" src="docs/assets/comparison/install-light.svg">
+</picture>
+
+CPU is not charted here because the tools do different work per tick (thermalwriter re-renders its animated layout every frame; the Python tools cache frames and skip unchanged renders) — every tool measured under 3% of one core, and the [methodology](docs/comparison-methodology.md#reading-the-cpu-numbers) has the full breakdown.
+
 ## Quickstart
 
 Download the latest release tarball from [Releases](https://github.com/mgaruccio/thermalwriter/releases), then:
