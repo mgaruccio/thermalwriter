@@ -271,6 +271,32 @@ For layout pattern examples with complete HTML, see [layout-patterns.md](./refer
 | `cpu_ccd0_temp` | Integer °C | CCD0 temp (Tccd1 label, 0-indexed) |
 | `cpu_ccd1_temp` | Integer °C | CCD1 temp (Tccd2 label) |
 
+
+### Media / MPRIS (`track_*`)
+
+Available when `[media].enabled = true` (default). Keys are always present (empty/`0` when idle).
+
+| Key | Format | Description |
+|-----|--------|-------------|
+| `track_title` | String | Current track title |
+| `track_artist` | String | Artist(s), comma-separated |
+| `track_album` | String | Album name |
+| `track_status` | String | `Playing`, `Paused`, `Stopped`, or empty |
+| `track_player` | String | Player id (bus name suffix, e.g. `spotify`) |
+| `track_position` | `m:ss` or `h:mm:ss` | Elapsed time (extrapolated while playing) |
+| `track_duration` | `m:ss` or `h:mm:ss` | Track length |
+| `track_position_s` | Integer | Elapsed seconds |
+| `track_duration_s` | Integer | Duration seconds |
+| `track_progress` | Integer % | 0–100 progress |
+| `track_has_art` | `0` / `1` | Local album art loaded |
+
+```xml
+<text ...>{{ track_title | default(value="—") }}</text>
+<text ...>{{ track_artist | default(value="") }}</text>
+```
+
+Set `media.album_art_background = true` to show cover art behind semi-transparent SVG panels. Use `svg/now-playing.svg` for a dedicated now-playing layout.
+
 ### Network (sysinfo, available after second poll)
 
 | Key | Format | Description |

@@ -34,6 +34,12 @@
     unit: string;
   };
 
+  type MediaSettings = {
+    enabled: boolean;
+    player: string;
+    album_art_background: boolean;
+  };
+
   type DaemonStatus = {
     mode: string;
     tick_rate: number;
@@ -80,7 +86,15 @@
   let daemonProbeInFlight = false;
   let daemonProbeQueued = false;
   let appMounted = false;
-  let activeTab = $state<"variables" | "stream">("variables");
+  let activeTab = $state<"variables" | "media" | "stream">("variables");
+  let mediaDraft = $state<MediaSettings>({
+    enabled: true,
+    player: "",
+    album_art_background: false,
+  });
+  let mediaLoaded = $state(false);
+  let mediaStatus = $state("");
+  let mediaError = $state("");
   let theme = $state<ThemeId>(
     (localStorage.getItem("tw-theme") as ThemeId) || "tokyo-night-storm",
   );
@@ -118,16 +132,19 @@
     }
 
     try {
-      const [layoutList, sensorList, bgList, activeBg] = await Promise.all([
+      const [layoutList, sensorList, bgList, activeBg, media] = await Promise.all([
         invoke<LayoutSummary[]>("list_layouts"),
         invoke<SensorDescriptor[]>("list_sensors"),
         invoke<string[]>("list_backgrounds"),
         invoke<string | null>("get_active_background"),
+        invoke<MediaSettings>("get_media_settings"),
       ]);
       layouts = layoutList;
       sensors = sensorList;
       backgrounds = bgList;
       selectedBackground = activeBg;
+      mediaDraft = { ...media };
+      mediaLoaded = true;
       const firstConfigurable = layouts.find((layout) => layout.configurable) ?? layouts[0];
       if (firstConfigurable) {
         await selectLayout(firstConfigurable.name);
@@ -283,6 +300,25 @@
   // background's dominant colors. Merging into `values` retriggers the live
   // preview, so the suggestion is visible immediately and adjustable before
   // Apply — nothing is persisted until the user applies/saves as usual.
+  async function applyMedia() {
+    if (!mediaLoaded) return;
+    applying = true;
+    mediaStatus = "";
+    mediaError = "";
+    try {
+      const result = await invoke<{ live: boolean }>("set_media_settings", {
+        settings: mediaDraft,
+      });
+      mediaStatus = result.live
+        ? "Media settings applied live."
+        : "Media settings saved. Daemon offline — changes load on next start.";
+    } catch (e) {
+      mediaError = String(e);
+    } finally {
+      applying = false;
+    }
+  }
+
   async function suggestColors() {
     if (!selectedLayout || !selectedBackground || suggesting) return;
     suggesting = true;
@@ -475,40 +511,126 @@
             >Variables</button>
             <button
               type="button"
+              class="tab-btn"
+              class:active={activeTab === "media"}
+              onclick={() => { activeTab = "media"; }}
+            >Media</button>
+            <button
+              type="button"
               class="tab-btn kind-xvfb"
               class:active={activeTab === "stream"}
               onclick={() => { activeTab = "stream"; }}
             >Stream</button>
           </nav>
         </div>
-        {#if activeTab === "variables"}
+        {#if activeTab === "variables" || activeTab === "media"}
           <div class="header-actions">
-            <button
-              type="button"
-              class="btn-suggest"
-              onclick={suggestColors}
-              disabled={suggesting || !selectedBackground || !hasColorVars}
-              title={!selectedBackground
-                ? "Select a background to suggest colors from"
-                : !hasColorVars
-                  ? "This layout declares no color variables"
-                  : "Suggest overlay colors from the background's dominant colors"}
-            >
-              {suggesting ? "Sampling…" : "◑ Suggest"}
-            </button>
-            <button
-              type="button"
-              class="btn-apply"
-              onclick={apply}
-              disabled={applying || !selectedLayout}
-            >
-              {applying ? "Applying…" : "Apply ↳"}
-            </button>
+            {#if activeTab === "variables"}
+              <button
+                type="button"
+                class="btn-suggest"
+                onclick={suggestColors}
+                disabled={suggesting || !selectedBackground || !hasColorVars}
+                title={!selectedBackground
+                  ? "Select a background to suggest colors from"
+                  : !hasColorVars
+                    ? "This layout declares no color variables"
+                    : "Suggest overlay colors from the background's dominant colors"}
+              >
+                {suggesting ? "Sampling…" : "◑ Suggest"}
+              </button>
+              <button
+                type="button"
+                class="btn-apply"
+                onclick={apply}
+                disabled={applying || !selectedLayout}
+              >
+                {applying ? "Applying…" : "Apply ↳"}
+              </button>
+            {:else}
+              <button
+                type="button"
+                class="btn-apply"
+                onclick={applyMedia}
+                disabled={applying || !mediaLoaded}
+              >
+                {applying ? "Applying…" : "Apply ↳"}
+              </button>
+            {/if}
           </div>
         {/if}
       </div>
       <div class="panel-body">
-        {#if activeTab === "variables"}
+        {#if activeTab === "media"}
+          <form class="media-list" onsubmit={(event) => event.preventDefault()}>
+            <div class="media-row var-row">
+              <label class="media-check-label" for="media-enabled">
+                <input
+                  id="media-enabled"
+                  type="checkbox"
+                  class="media-checkbox"
+                  checked={mediaDraft.enabled}
+                  disabled={!mediaLoaded}
+                  onchange={(event) => {
+                    mediaDraft = { ...mediaDraft, enabled: event.currentTarget.checked };
+                  }}
+                />
+                <span class="media-label-text">Now-playing data</span>
+              </label>
+              <span class="var-help">Read track metadata from desktop media players.</span>
+            </div>
+
+            <div class="media-row var-row">
+              <label class="media-field-label" for="media-player">Preferred player</label>
+              <input
+                id="media-player"
+                type="text"
+                class="media-text-input"
+                placeholder="Auto-select"
+                value={mediaDraft.player}
+                disabled={!mediaLoaded || !mediaDraft.enabled}
+                oninput={(event) => {
+                  mediaDraft = { ...mediaDraft, player: event.currentTarget.value };
+                }}
+              />
+              <span class="var-help">Optional MPRIS name match, such as spotify or firefox.</span>
+            </div>
+
+            <div class="media-row var-row">
+              <label class="media-check-label" for="media-album-art">
+                <input
+                  id="media-album-art"
+                  type="checkbox"
+                  class="media-checkbox"
+                  checked={mediaDraft.album_art_background}
+                  disabled={!mediaLoaded || !mediaDraft.enabled}
+                  onchange={(event) => {
+                    mediaDraft = {
+                      ...mediaDraft,
+                      album_art_background: event.currentTarget.checked,
+                    };
+                  }}
+                />
+                <span class="media-label-text">Album art background</span>
+              </label>
+              <span class="var-help">
+                Use local player artwork behind SVG layouts on the device.
+                <span class="media-muted">The editor preview keeps your selected static background.</span>
+              </span>
+            </div>
+
+            <div class="media-info-card var-row">
+              <span class="var-help">Choose svg/now-playing.svg from Layouts for a full-screen player.</span>
+            </div>
+          </form>
+
+          {#if mediaStatus}
+            <p class="status">{mediaStatus}</p>
+          {/if}
+          {#if mediaError}
+            <p class="error">{mediaError}</p>
+          {/if}
+        {:else if activeTab === "variables"}
           {#if !selectedLayout}
             <div class="empty">Select a layout to edit its variables.</div>
           {:else if variables.length === 0}

@@ -21,6 +21,17 @@ pub fn mock_sensors() -> SensorData {
         ("vram_total".into(), "15.9".into()),
         ("fps".into(), "144".into()),
         ("frametime".into(), "6.9".into()),
+        ("track_title".into(), "Hard Times".into()),
+        ("track_artist".into(), "Paramore".into()),
+        ("track_album".into(), "After Laughter".into()),
+        ("track_status".into(), "Playing".into()),
+        ("track_player".into(), "mock".into()),
+        ("track_position".into(), "1:23".into()),
+        ("track_duration".into(), "3:12".into()),
+        ("track_position_s".into(), "83".into()),
+        ("track_duration_s".into(), "192".into()),
+        ("track_progress".into(), "43".into()),
+        ("track_has_art".into(), "0".into()),
     ])
 }
 

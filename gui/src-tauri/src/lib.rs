@@ -63,6 +63,8 @@ pub fn run() {
             commands::read_frame,
             commands::resolve_binaries,
             commands::set_tick_rate,
+            commands::get_media_settings,
+            commands::set_media_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -134,6 +134,39 @@ impl ThemeConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MediaConfig {
+    /// Poll MPRIS players on the session bus for now-playing metadata.
+    pub enabled: bool,
+    /// Optional bus-name substring filter (e.g. "spotify", "firefox"). Empty = auto.
+    pub player: String,
+    /// While Playing/Paused with art, use album art as the live SVG background
+    /// (does not write `[background].image`). When idle/no art, restore the
+    /// user-configured background.
+    pub album_art_background: bool,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            player: String::new(),
+            album_art_background: false,
+        }
+    }
+}
+
+impl MediaConfig {
+    /// Trim the preferred-player filter; empty means auto-select.
+    pub fn normalized(self) -> Self {
+        Self {
+            player: self.player.trim().to_string(),
+            ..self
+        }
+    }
+}
+
 /// Background image configuration. The image file lives under
 /// `~/.config/thermalwriter/backgrounds/`. Empty/None = no background.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -151,6 +184,7 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub xvfb: XvfbConfig,
     pub background: BackgroundConfig,
+    pub media: MediaConfig,
     /// Per-layout variable overrides keyed by layout filename.
     /// The outer map is `{layout_name: {var_name: value}}`.
     pub layout_vars: HashMap<String, HashMap<String, String>>,
@@ -452,6 +486,66 @@ impl Config {
 
         Ok(())
     }
+    /// Persist `[media]` settings, preserving unrelated sections and comments.
+    pub fn save_media_config(path: &Path, media: &MediaConfig) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Table, value};
+
+        let media = media.clone().normalized();
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let existing = if path.exists() {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config: {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut doc: DocumentMut = existing
+            .parse()
+            .with_context(|| format!("Invalid TOML in config: {}", path.display()))?;
+
+        if doc.get("media").is_none() {
+            doc["media"] = Item::Table(Table::new());
+        }
+        let section = doc["media"]
+            .as_table_mut()
+            .context("media section is not a table")?;
+        section.insert("enabled", value(media.enabled));
+        section.insert("player", value(media.player.clone()));
+        section.insert("album_art_background", value(media.album_art_background));
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
+        let tmp_name = format!(
+            "{}.tmp.{}.{}",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            next_tmp_suffix(),
+        );
+        let tmp_path = parent.join(tmp_name);
+
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            tmp.write_all(doc.to_string().as_bytes())
+                .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
+            tmp.sync_all()
+                .with_context(|| format!("Failed to fsync temp file: {}", tmp_path.display()))?;
+        }
+
+        std::fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+
+        Ok(())
+    }
 }
 
 /// Built-in layout HTML content, embedded at compile time.
@@ -465,6 +559,7 @@ pub mod builtin_layouts {
     pub const SVG_ARC_GAUGE: &str = include_str!("../layouts/svg/arc-gauge.svg");
     pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
     pub const SVG_NEON_DASH_V2: &str = include_str!("../layouts/svg/neon-dash-v2.svg");
+    pub const SVG_NOW_PLAYING: &str = include_str!("../layouts/svg/now-playing.svg");
 
     // Xvfb wrapper configs (conky + cava starter presets for LCD streaming)
     pub const WRAPPER_CONKY: &str = include_str!("../layouts/wrappers/conky-480.conf");
@@ -555,6 +650,7 @@ pub mod builtin_layouts {
             ("svg/arc-gauge.svg", SVG_ARC_GAUGE),
             ("svg/cyber-grid.svg", SVG_CYBER_GRID),
             ("svg/neon-dash-v2.svg", SVG_NEON_DASH_V2),
+            ("svg/now-playing.svg", SVG_NOW_PLAYING),
         ];
         for (name, content) in &layouts {
             let dest = layout_dir.join(name);

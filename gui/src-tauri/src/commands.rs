@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Response;
-use thermalwriter::config::Config;
+use thermalwriter::config::{Config, MediaConfig};
 use thermalwriter::dbus_types::DisplayProxy;
 use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
@@ -89,6 +89,116 @@ pub struct SensorDescriptor {
     pub key: String,
     pub name: String,
     pub unit: String,
+}
+
+#[derive(Debug, Serialize, serde::Deserialize, Clone)]
+pub struct MediaSettings {
+    pub enabled: bool,
+    pub player: String,
+    pub album_art_background: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaApplyResult {
+    pub live: bool,
+}
+
+const DAEMON_SERVICE_NAME: &str = "com.thermalwriter.Service";
+
+#[cfg(test)]
+#[derive(Clone)]
+struct MediaDaemonTestHook {
+    owner_present: bool,
+    get_media_config: Option<Result<(bool, String, bool), String>>,
+    set_media_config: Option<Result<(), String>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static MEDIA_DAEMON_TEST_HOOK: std::cell::RefCell<Option<MediaDaemonTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct MediaDaemonTestGuard;
+
+#[cfg(test)]
+impl Drop for MediaDaemonTestGuard {
+    fn drop(&mut self) {
+        MEDIA_DAEMON_TEST_HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn media_daemon_test_guard(hook: MediaDaemonTestHook) -> MediaDaemonTestGuard {
+    MEDIA_DAEMON_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    MediaDaemonTestGuard
+}
+
+async fn daemon_is_running() -> Result<bool, zbus::fdo::Error> {
+    #[cfg(test)]
+    if let Some(hook) = MEDIA_DAEMON_TEST_HOOK.with(|slot| slot.borrow().clone()) {
+        return Ok(hook.owner_present);
+    }
+    let connection = zbus::Connection::session().await?;
+    let dbus = zbus::fdo::DBusProxy::new(&connection).await?;
+    let name = zbus::names::BusName::try_from(DAEMON_SERVICE_NAME)
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+    dbus.name_has_owner(name.as_ref()).await
+}
+
+async fn daemon_get_media_config() -> Result<(bool, String, bool), AppError> {
+    #[cfg(test)]
+    if let Some(result) = MEDIA_DAEMON_TEST_HOOK.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|hook| hook.get_media_config.clone())
+    }) {
+        return result.map_err(|msg| AppError::DaemonCall(msg));
+    }
+
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("daemon proxy failed: {e}")))?;
+    proxy
+        .get_media_config()
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("get_media_config failed: {e}")))
+}
+
+async fn daemon_set_media_config(media: &MediaConfig) -> Result<(), AppError> {
+    #[cfg(test)]
+    if let Some(result) = MEDIA_DAEMON_TEST_HOOK.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|hook| hook.set_media_config.clone())
+    }) {
+        return result.map_err(|msg| AppError::DaemonCall(msg));
+    }
+
+    let connection =
+        zbus::Connection::session()
+            .await
+            .map_err(|e| AppError::DaemonUnavailable {
+                reason: format!("session bus unavailable: {e}"),
+            })?;
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("daemon proxy failed: {e}")))?;
+    proxy
+        .set_media_config(
+            media.enabled,
+            media.player.clone(),
+            media.album_art_background,
+        )
+        .await
+        .map_err(|e| AppError::DaemonCall(format!("set_media_config failed: {e}")))
 }
 
 #[tauri::command]
@@ -495,6 +605,63 @@ fn assign_scheme_to_vars(
         out.insert(name.clone(), hex.to_string());
     }
     out
+}
+
+// ---- media settings ----
+
+async fn get_media_settings_for(state: &RendererState) -> Result<MediaSettings, AppError> {
+    if daemon_is_running().await.unwrap_or(false) {
+        let (enabled, player, album_art_background) = daemon_get_media_config().await?;
+        return Ok(MediaSettings {
+            enabled,
+            player,
+            album_art_background,
+        });
+    }
+
+    let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
+    let media = config.media.normalized();
+    Ok(MediaSettings {
+        enabled: media.enabled,
+        player: media.player,
+        album_art_background: media.album_art_background,
+    })
+}
+
+#[tauri::command]
+pub async fn get_media_settings(
+    state: tauri::State<'_, RendererState>,
+) -> Result<MediaSettings, AppError> {
+    get_media_settings_for(&state).await
+}
+
+async fn set_media_settings_for(
+    settings: MediaSettings,
+    state: &RendererState,
+) -> Result<MediaApplyResult, AppError> {
+    let media = MediaConfig {
+        enabled: settings.enabled,
+        player: settings.player,
+        album_art_background: settings.album_art_background,
+    }
+    .normalized();
+
+    if daemon_is_running().await.unwrap_or(false) {
+        daemon_set_media_config(&media).await?;
+        return Ok(MediaApplyResult { live: true });
+    }
+
+    Config::save_media_config(&state.config_path, &media)
+        .map_err(|e| AppError::ConfigWrite(e.to_string()))?;
+    Ok(MediaApplyResult { live: false })
+}
+
+#[tauri::command]
+pub async fn set_media_settings(
+    settings: MediaSettings,
+    state: tauri::State<'_, RendererState>,
+) -> Result<MediaApplyResult, AppError> {
+    set_media_settings_for(settings, &state).await
 }
 
 // ---- daemon status ----
@@ -983,6 +1150,17 @@ fn mock_sensors() -> SensorData {
         ("frametime".to_string(), "6.9".to_string()),
         ("net_rx".to_string(), "125".to_string()),
         ("net_tx".to_string(), "42".to_string()),
+        ("track_title".to_string(), "Hard Times".to_string()),
+        ("track_artist".to_string(), "Paramore".to_string()),
+        ("track_album".to_string(), "After Laughter".to_string()),
+        ("track_status".to_string(), "Playing".to_string()),
+        ("track_player".to_string(), "mock".to_string()),
+        ("track_position".to_string(), "1:23".to_string()),
+        ("track_duration".to_string(), "3:12".to_string()),
+        ("track_position_s".to_string(), "83".to_string()),
+        ("track_duration_s".to_string(), "192".to_string()),
+        ("track_progress".to_string(), "43".to_string()),
+        ("track_has_art".to_string(), "0".to_string()),
     ])
 }
 
@@ -1032,6 +1210,61 @@ fn fallback_sensors() -> Vec<SensorDescriptor> {
             key: "fps".into(),
             name: "FPS".into(),
             unit: "fps".into(),
+        },
+        SensorDescriptor {
+            key: "track_title".into(),
+            name: "Track Title".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_artist".into(),
+            name: "Track Artist".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_album".into(),
+            name: "Track Album".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_status".into(),
+            name: "Playback Status".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_player".into(),
+            name: "Media Player".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_position".into(),
+            name: "Track Position".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_duration".into(),
+            name: "Track Duration".into(),
+            unit: "".into(),
+        },
+        SensorDescriptor {
+            key: "track_position_s".into(),
+            name: "Track Position (s)".into(),
+            unit: "s".into(),
+        },
+        SensorDescriptor {
+            key: "track_duration_s".into(),
+            name: "Track Duration (s)".into(),
+            unit: "s".into(),
+        },
+        SensorDescriptor {
+            key: "track_progress".into(),
+            name: "Track Progress".into(),
+            unit: "%".into(),
+        },
+        SensorDescriptor {
+            key: "track_has_art".into(),
+            name: "Track Has Art".into(),
+            unit: "".into(),
         },
     ]
 }
@@ -1094,6 +1327,158 @@ mod tests {
             dim: "#555555".into(),
             panel_bg: "#666666".into(),
         }
+    }
+
+    #[test]
+    fn mock_sensors_includes_all_track_keys() {
+        let sensors = mock_sensors();
+        for key in [
+            "track_title",
+            "track_artist",
+            "track_album",
+            "track_status",
+            "track_player",
+            "track_position",
+            "track_duration",
+            "track_position_s",
+            "track_duration_s",
+            "track_progress",
+            "track_has_art",
+        ] {
+            assert!(sensors.contains_key(key), "missing {key}");
+        }
+        assert_eq!(sensors["track_title"], "Hard Times");
+        assert_eq!(sensors["track_artist"], "Paramore");
+    }
+
+    #[test]
+    fn fallback_sensors_include_all_track_keys() {
+        let sensors = fallback_sensors();
+        let keys: Vec<_> = sensors.iter().map(|s| s.key.as_str()).collect();
+        for key in [
+            "track_title",
+            "track_artist",
+            "track_album",
+            "track_status",
+            "track_player",
+            "track_position",
+            "track_duration",
+            "track_position_s",
+            "track_duration_s",
+            "track_progress",
+            "track_has_art",
+        ] {
+            assert!(keys.contains(&key), "missing {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_media_settings_loads_offline_defaults() {
+        let _guard = media_daemon_test_guard(MediaDaemonTestHook {
+            owner_present: false,
+            get_media_config: None,
+            set_media_config: None,
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state(&tmp);
+        let settings = get_media_settings_for(&state)
+            .await
+            .expect("offline settings");
+        assert!(settings.enabled);
+        assert_eq!(settings.player, "");
+        assert!(!settings.album_art_background);
+    }
+
+    #[tokio::test]
+    async fn get_media_settings_daemon_method_error_does_not_fall_back_to_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state(&tmp);
+        std::fs::write(
+            &state.config_path,
+            "[media]\nenabled = false\nplayer = \"sentinel\"\nalbum_art_background = true\n",
+        )
+        .unwrap();
+
+        let _guard = media_daemon_test_guard(MediaDaemonTestHook {
+            owner_present: true,
+            get_media_config: Some(Err("get_media_config failed: mock".into())),
+            set_media_config: None,
+        });
+
+        let err = get_media_settings_for(&state)
+            .await
+            .expect_err("daemon method failure must surface");
+        assert!(
+            matches!(err, AppError::DaemonCall(msg) if msg.contains("get_media_config failed"))
+        );
+
+        let config = Config::load(&state.config_path).unwrap();
+        assert_eq!(config.media.player, "sentinel");
+        assert!(!config.media.enabled);
+        assert!(config.media.album_art_background);
+    }
+
+    #[tokio::test]
+    async fn set_media_settings_offline_writes_media_section() {
+        let _guard = media_daemon_test_guard(MediaDaemonTestHook {
+            owner_present: false,
+            get_media_config: None,
+            set_media_config: None,
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state(&tmp);
+        let result = set_media_settings_for(
+            MediaSettings {
+                enabled: false,
+                player: "firefox".into(),
+                album_art_background: true,
+            },
+            &state,
+        )
+        .await
+        .expect("offline save");
+        assert!(!result.live);
+
+        let config = Config::load(&state.config_path).unwrap();
+        assert!(!config.media.enabled);
+        assert_eq!(config.media.player, "firefox");
+        assert!(config.media.album_art_background);
+    }
+
+    #[tokio::test]
+    async fn set_media_settings_daemon_method_error_does_not_write_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state(&tmp);
+        std::fs::write(
+            &state.config_path,
+            "[media]\nenabled = true\nplayer = \"sentinel\"\nalbum_art_background = false\n",
+        )
+        .unwrap();
+
+        let _guard = media_daemon_test_guard(MediaDaemonTestHook {
+            owner_present: true,
+            get_media_config: None,
+            set_media_config: Some(Err("set_media_config failed: mock".into())),
+        });
+
+        let err = set_media_settings_for(
+            MediaSettings {
+                enabled: false,
+                player: "firefox".into(),
+                album_art_background: true,
+            },
+            &state,
+        )
+        .await
+        .expect_err("daemon method failure must surface");
+        assert!(
+            matches!(err, AppError::DaemonCall(msg) if msg.contains("set_media_config failed"))
+        );
+
+        let config = Config::load(&state.config_path).unwrap();
+        assert!(config.media.enabled);
+        assert_eq!(config.media.player, "sentinel");
+        assert!(!config.media.album_art_background);
     }
 
     #[test]

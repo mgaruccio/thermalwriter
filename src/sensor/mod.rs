@@ -7,6 +7,7 @@ pub mod hwmon;
 pub mod mangohud;
 #[doc(hidden)]
 pub mod mock;
+pub mod mpris;
 pub mod nvidia;
 pub mod rapl;
 pub mod sysinfo_provider;

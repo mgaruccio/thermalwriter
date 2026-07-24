@@ -1,0 +1,56 @@
+{# canvas: responsive #}
+{# vars:
+theme_primary: color = "#e94560" "Accent color"
+theme_secondary: color = "#53d8fb" "Secondary accent"
+theme_background: color = "#08080f" "Background color"
+#}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
+  {% set use_compact_typography = width <= 320 or height <= 320 %}
+  {% set progress = track_progress | default(value=0) | int %}
+  {% set title_size = token_hero | default(value=40) %}
+  {% if use_compact_typography %}{% set title_size = 32 %}{% endif %}
+  {% set title_long = (use_compact_typography and track_title | length > 22) or (not use_compact_typography and track_title | length > 11) %}
+
+  {% if is_portrait %}
+  <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
+  {% elif is_square %}
+  <g transform="scale({{ width * 1.0 / 480 }})">
+  {% else %}
+  <g transform="translate({{ (width - height) / 2 }}, 0) scale({{ height * 1.0 / 480 }})">
+  {% endif %}
+
+  <!-- Dark scrim over album art / theme background -->
+  <rect x="0" y="0" width="480" height="480" fill="#000000" opacity="0.62"/>
+
+  <!-- Status pill -->
+  <text x="240" y="72" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}16{% else %}14{% endif %}" fill="{{ theme_text_dim }}">
+    {% if track_status and track_player %}{{ track_status }} · {{ track_player }}{% elif track_status %}{{ track_status }}{% elif track_player %}{{ track_player }}{% else %}&#160;{% endif %}
+  </text>
+
+  <!-- Title -->
+  <text x="240" y="170" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ title_size }}" fill="{{ theme_text }}" font-weight="bold"{% if title_long %} textLength="440" lengthAdjust="spacingAndGlyphs"{% endif %}>
+    {% if track_title %}{{ track_title }}{% else %}Nothing playing{% endif %}
+  </text>
+
+  <!-- Artist -->
+  <text x="240" y="220" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}22{% else %}26{% endif %}" fill="{{ theme_secondary }}"{% if track_artist | length > 24 %} textLength="400" lengthAdjust="spacingAndGlyphs"{% endif %}>
+    {{ track_artist | default(value="") }}
+  </text>
+
+  <!-- Album -->
+  {% if track_album %}
+  <text x="240" y="258" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}16{% else %}18{% endif %}" fill="{{ theme_text_dim }}"{% if track_album | length > 28 %} textLength="360" lengthAdjust="spacingAndGlyphs"{% endif %}>
+    {{ track_album }}
+  </text>
+  {% endif %}
+
+  <!-- Progress track -->
+  <rect x="48" y="340" width="384" height="8" rx="4" fill="#ffffff" opacity="0.15"/>
+  <rect x="48" y="340" width="{{ (384 * progress / 100) | int }}" height="8" rx="4" fill="{{ theme_primary }}"/>
+
+  <!-- Time row -->
+  <text x="48" y="382" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}18{% else %}20{% endif %}" fill="{{ theme_text_dim }}">{{ track_position | default(value="0:00") }}</text>
+  <text x="432" y="382" text-anchor="end" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}18{% else %}20{% endif %}" fill="{{ theme_text_dim }}">{{ track_duration | default(value="0:00") }}</text>
+
+  </g>
+</svg>

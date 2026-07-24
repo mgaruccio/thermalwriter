@@ -7,13 +7,15 @@
 use anyhow::Result;
 use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::config::MediaConfig;
 use crate::render::background::BackgroundImage;
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
 use crate::sensor::history::SensorHistory;
+use crate::sensor::mpris::{self, MediaSnapshot};
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
 use crate::transport::discovery::TransportConnector;
@@ -83,6 +85,51 @@ struct ActiveConnection {
 ///    then publish negotiated resolution + `connected=true` together
 /// 3. Stale generation results are ignored; failed pending drops and retries after 2s
 /// 4. Fatal send publishes `(0,0),false`, drops the generation, reconnects
+/// Returns true when `desired` is the same artwork pointer that previously
+/// failed to apply. Only `Some` artwork pointers are suppressed; a failed
+/// clear-to-None is retried so the device can recover once the underlying
+/// condition changes.
+fn is_failed_artwork(
+    failed: &Option<Arc<BackgroundImage>>,
+    desired: &Option<Arc<BackgroundImage>>,
+) -> bool {
+    match (failed, desired) {
+        (Some(failed_arc), Some(desired_arc)) => Arc::ptr_eq(failed_arc, desired_arc),
+        _ => false,
+    }
+}
+
+/// Apply the desired effective background to the frame source, but suppress
+/// retrying the exact same pointer that previously failed. Clear the failure
+/// memo whenever the desired value changes so that a config change (e.g.
+/// disabling and re-enabling album art) always gets one fresh attempt.
+fn apply_effective_background(
+    frame_source: &mut Box<dyn FrameSource>,
+    cached: &mut Option<Arc<BackgroundImage>>,
+    failed: &mut Option<Arc<BackgroundImage>>,
+    last_desired: &mut Option<Arc<BackgroundImage>>,
+    effective: Option<Arc<BackgroundImage>>,
+    context: &str,
+) {
+    if !mpris::backgrounds_equal(last_desired, &effective) {
+        *last_desired = effective.clone();
+        *failed = None;
+    }
+    if mpris::backgrounds_equal(cached, &effective) {
+        return;
+    }
+    if is_failed_artwork(failed, &effective) {
+        return;
+    }
+    match frame_source.set_background(effective.clone()) {
+        Ok(()) => *cached = effective,
+        Err(e) => {
+            warn!("{context} failed: {e:#}");
+            *failed = effective;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_loop(
     mut transport: Option<Box<dyn Transport>>,
@@ -106,6 +153,8 @@ pub async fn run_tick_loop(
     generation_tx: tokio::sync::watch::Sender<u64>,
     source_revision_rx: &mut tokio::sync::mpsc::Receiver<SourceRevisionApply>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
+    media_snapshot: Arc<RwLock<MediaSnapshot>>,
+    media_config_rx: tokio::sync::watch::Receiver<MediaConfig>,
 ) -> Result<()> {
     info!(
         "Tick loop started: {} FPS, JPEG quality={}, rotation={}°",
@@ -118,6 +167,13 @@ pub async fn run_tick_loop(
     let mut active: Option<ActiveConnection> = None;
     let mut cached_sensors: HashMap<String, String> = HashMap::new();
     let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
+    let mut cached_effective_background = mpris::effective_background(
+        &media_config_rx.borrow(),
+        &media_snapshot,
+        &cached_background,
+    );
+    let mut last_desired_effective_background = cached_effective_background.clone();
+    let mut failed_effective_background: Option<Arc<BackgroundImage>> = None;
     let mut last_poll = Instant::now() - sensor_poll_interval;
     let mut next_reconnect_at: Option<Instant> = None;
 
@@ -129,9 +185,10 @@ pub async fn run_tick_loop(
             let _ = display_tx.send(RuntimeDisplayDimensions::new(info.width(), info.height()));
             let _ = connected_tx.send(true);
             let _ = generation_tx.send(generation);
-            if let Some(bg) = &cached_background {
+            if let Some(bg) = &cached_effective_background {
                 let _ = frame_source.set_background(Some(bg.clone()));
             }
+            last_desired_effective_background = cached_effective_background.clone();
             active = Some(ActiveConnection {
                 generation,
                 transport: t,
@@ -187,12 +244,13 @@ pub async fn run_tick_loop(
                 &mut pending,
                 &mut active,
                 &mut frame_source,
-                &cached_background,
+                &cached_effective_background,
                 &display_tx,
                 &connected_tx,
                 &generation_tx,
                 &mut source_revision,
                 &mut next_reconnect_at,
+                &mut failed_effective_background,
             );
         }
 
@@ -204,19 +262,42 @@ pub async fn run_tick_loop(
             }
         }
 
-        // Transactional background applies (D-Bus set/clear). Ack only after
-        // set_background succeeds; on failure keep prior cache/source state.
+        // Transactional background applies (D-Bus set/clear). First validate the
+        // requested user background; if it succeeds, ACK and best-effort restore
+        // the effective (album-art) background. Only rollback when the user
+        // background itself fails.
         while let Ok(apply) = background_apply_rx.try_recv() {
             let prior_cache = cached_background.clone();
+            let prior_effective = cached_effective_background.clone();
+
             match frame_source.set_background(apply.image.clone()) {
                 Ok(()) => {
-                    cached_background = apply.image;
+                    cached_background = apply.image.clone();
+                    // The renderer is now actually showing the user image.
+                    cached_effective_background = apply.image.clone();
                     let _ = apply.ack.send(Ok(()));
+
+                    // Restore album-art override if still active.
+                    failed_effective_background = None;
+                    last_desired_effective_background = cached_effective_background.clone();
+                    let effective = mpris::effective_background(
+                        &media_config_rx.borrow(),
+                        &media_snapshot,
+                        &cached_background,
+                    );
+                    apply_effective_background(
+                        &mut frame_source,
+                        &mut cached_effective_background,
+                        &mut failed_effective_background,
+                        &mut last_desired_effective_background,
+                        effective,
+                        "Album-art restore after background apply",
+                    );
                 }
                 Err(e) => {
-                    // Restore prior source background if possible.
-                    let _ = frame_source.set_background(prior_cache.clone());
                     cached_background = prior_cache;
+                    let _ = frame_source.set_background(prior_effective.clone());
+                    cached_effective_background = prior_effective;
                     // Pending connection must abort on background raster failure.
                     if pending.is_some() {
                         warn!(
@@ -233,12 +314,45 @@ pub async fn run_tick_loop(
         // when no oneshot is involved, e.g. startup).
         if background_rx.has_changed().unwrap_or(false) {
             let bg = background_rx.borrow_and_update().clone();
-            if let Err(e) = frame_source.set_background(bg.clone()) {
-                warn!("Background watch apply failed: {e:#}");
-            } else {
-                cached_background = bg;
+            cached_background = bg;
+            match frame_source.set_background(cached_background.clone()) {
+                Ok(()) => {
+                    cached_effective_background = cached_background.clone();
+                    failed_effective_background = None;
+                    last_desired_effective_background = cached_effective_background.clone();
+                    let effective = mpris::effective_background(
+                        &media_config_rx.borrow(),
+                        &media_snapshot,
+                        &cached_background,
+                    );
+                    apply_effective_background(
+                        &mut frame_source,
+                        &mut cached_effective_background,
+                        &mut failed_effective_background,
+                        &mut last_desired_effective_background,
+                        effective,
+                        "Background watch effective apply",
+                    );
+                }
+                Err(e) => {
+                    warn!("Background watch apply failed: {e:#}");
+                }
             }
         }
+
+        let effective = mpris::effective_background(
+            &media_config_rx.borrow(),
+            &media_snapshot,
+            &cached_background,
+        );
+        apply_effective_background(
+            &mut frame_source,
+            &mut cached_effective_background,
+            &mut failed_effective_background,
+            &mut last_desired_effective_background,
+            effective,
+            "Effective background apply",
+        );
 
         // Pending timeout: if source rebuild never arrives, drop and retry.
         if let Some(p) = &pending
@@ -404,6 +518,7 @@ fn handle_source_result(
     generation_tx: &tokio::sync::watch::Sender<u64>,
     current_source_revision: &mut u64,
     next_reconnect_at: &mut Option<Instant>,
+    failed_effective_background: &mut Option<Arc<BackgroundImage>>,
 ) {
     let generation = result.generation;
     let source_revision = result.source_revision;
@@ -463,6 +578,9 @@ fn handle_source_result(
             }
 
             *frame_source = source;
+            // A new renderer is being committed; allow a previously failed
+            // effective background one fresh attempt on the new source.
+            *failed_effective_background = None;
             if pending_match {
                 let connection = pending.take().expect("pending_match");
                 info!(
