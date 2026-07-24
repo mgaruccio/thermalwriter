@@ -89,14 +89,20 @@ reproduced at the bottom.
 
 | Configuration | CPU (% of one core) | avg RSS (MB) | peak RSS (MB) | avg PSS (MB) | peak PSS (MB) |
 |---|---|---|---|---|---|
-| thermalwriter daemon · 2 fps | **0.86** | 71.8 | 71.8 | 69.0 | 69.0 |
+| thermalwriter daemon · 2 fps | **0.73** | 71.6 | 71.6 | 68.9 | 68.9 |
 | TRCC-Linux daemon (headless) · 0.5 fps | 1.06 | 118.8 | 118.9 | 106.9 | 107.5 |
 | TRCC-Linux GUI · 0.5 fps | 1.26 | 301.4 | 301.4 | 284.2 | 284.2 |
 | thermalright-lcd-control GUI | 0.42 | 295.9 | 298.5 | 278.0 | 281.5 |
 
-thermalwriter memory is higher than the first 2026-07-24 snapshot (41.7 MB
-PSS) because this remeasure loads NVML (`libnvidia-ml`) and settles with the
-full sensor + background path; it is still well below the Python daemons.
+thermalwriter remeasure after #91 (dirty-frame skip + NVML + skip spd5118
+DIMM sensors). Binary SHA-256
+`6952a0c80376d726b3f75ee97129ccd5a85cea8090efe5909436471f8bb9f699`, sampled
+via `scripts/footprint_sampler.sh thermalwriter.service 60 60` against the
+user unit `ExecStart=%h/.cargo/bin/thermalwriter daemon` immediately after
+`cp target/release/thermalwriter ~/.cargo/bin/ && systemctl --user restart`.
+Memory is higher than the first 2026-07-24 snapshot (41.7 MB PSS) because
+this path loads NVML and settles with the full sensor + background stack; it
+is still well below the Python daemons.
 
 ### Matched update cadence (1 s), where supported
 
@@ -158,9 +164,10 @@ by a wide margin.
   running, the thermalwriter daemon's VmRSS sat at **7.2 MB** (with ~9.7 MB
   compressed into zram, VmHWM 24.9 MB). That figure is an observation from a
   single long-running instance, not part of the controlled protocol — quote
-  the 41.7 MB PSS number, not this one, unless the uptime context is stated.
-- thermalwriter's peak (67–72 MB in the first measured seconds) is startup
-  cost: the system font scan and decoding the 960×960 background image; it
+  the **68.9 MB PSS** number from the table above, not the long-uptime
+  observation, unless the uptime context is stated.
+- thermalwriter's peak in the first measured seconds is startup cost: the
+  system font scan, NVML load, and decoding the 960×960 background image; it
   settles within the warmup window.
 - These absolute numbers are machine-specific (sensor population, GPU,
   kernel, swap policy). The *relative* picture is the durable part.

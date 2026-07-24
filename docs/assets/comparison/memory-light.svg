@@ -12,8 +12,8 @@
 <text x="836" y="270" font-family="system-ui, sans-serif" font-size="11" fill="#898781" text-anchor="middle">MB</text>
 <line x1="278" y1="76" x2="278" y2="252" stroke="#898781" stroke-width="1"/>
 <text x="266" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26" text-anchor="end">thermalwriter daemon</text>
-<path d="M 278.0 88.0 h 116.5 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -116.5 z" fill="#2e7de9"/>
-<text x="407.52" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">69</text>
+<path d="M 278.0 88.0 h 116.3 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -116.3 z" fill="#2e7de9"/>
+<text x="407.3453333333334" y="102.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">69</text>
 <text x="266" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="400" fill="#52514e" text-anchor="end">TRCC-Linux daemon (headless)</text>
 <path d="M 278.0 132.0 h 182.7 a 4 4 0 0 1 4 4 v 12.0 a 4 4 0 0 1 -4 4 h -182.7 z" fill="#a8aecb"/>
 <text x="473.71866666666665" y="146.5" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#1a1b26">107</text>

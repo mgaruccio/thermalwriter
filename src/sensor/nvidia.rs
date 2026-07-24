@@ -2,8 +2,17 @@
 //
 // Forking nvidia-smi every poll costs ~15 ms of process overhead on this
 // hardware and dominates steady-state daemon CPU. NVML is the same data over
-// a long-lived dlopen'd library handle. When neither path is available we
-// back off instead of retrying a failed exec every second (#80 / #91).
+// a long-lived dlopen'd library handle (~µs per query). When neither path is
+// available we back off instead of retrying a failed exec every second
+// (#80 / #91).
+//
+// Hung-driver policy: nvidia-smi still uses wait_timeout(500ms)+kill. NVML
+// calls are not cancellable; we measure wall time after each poll and demote
+// to smi/backoff if a call ever exceeds the same 500 ms budget (so a once-
+// wedged driver does not keep us on the slow path after it recovers). A call
+// that never returns still blocks sensor_hub.poll — same class of failure as
+// a wedged hwmon read — but no longer forks a process every second on the
+// healthy path.
 
 use anyhow::Result;
 use nvml_wrapper::Nvml;
@@ -16,23 +25,23 @@ use wait_timeout::ChildExt;
 
 use super::{SensorDescriptor, SensorProvider, SensorReading};
 
-// 500ms is generous for a healthy GPU; a hung driver blocks indefinitely.
-const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_millis(500);
-/// How long to wait before re-probing after NVML and nvidia-smi both fail.
-const UNAVAILABLE_BACKOFF: Duration = Duration::from_secs(60);
+const NVIDIA_POLL_BUDGET: Duration = Duration::from_millis(500);
+const REPROBE_BACKOFF: Duration = Duration::from_secs(60);
+const SMI_EMPTY_FAIL_LIMIT: u32 = 3;
 
 enum Backend {
-    /// Live NVML handle (libnvidia-ml loaded via libloading).
     Nvml(Nvml),
-    /// Fork nvidia-smi each poll.
-    Smi,
-    /// Neither path worked; retry after `retry_at`.
-    Unavailable { retry_at: Instant },
+    Smi {
+        reprobe_at: Instant,
+        empty_streak: u32,
+    },
+    Unavailable {
+        retry_at: Instant,
+    },
 }
 
 pub struct NvidiaProvider {
     backend: Backend,
-    /// Executable used for the smi fallback. Overridable for tests.
     smi_path: PathBuf,
 }
 
@@ -47,58 +56,109 @@ impl NvidiaProvider {
         Self::with_smi_path(PathBuf::from("nvidia-smi"))
     }
 
-    /// Construct a provider that uses `smi_path` when NVML is unavailable.
-    /// Tests that need to shim the binary should prefer [`Self::smi_only`].
     pub fn with_smi_path(smi_path: PathBuf) -> Self {
-        let backend = probe_backend(&smi_path);
-        Self { backend, smi_path }
+        Self {
+            backend: probe_backend(&smi_path),
+            smi_path,
+        }
     }
 
     /// Force the nvidia-smi backend (skip NVML). Used by tests that inject a
     /// shim binary via PATH or an absolute path.
     pub fn smi_only(smi_path: PathBuf) -> Self {
         Self {
-            backend: Backend::Smi,
+            backend: Backend::Smi {
+                reprobe_at: Instant::now() + REPROBE_BACKOFF,
+                empty_streak: 0,
+            },
             smi_path,
         }
     }
 
-    fn reprobe_if_due(&mut self) {
-        let Backend::Unavailable { retry_at } = &self.backend else {
-            return;
+    fn enter_smi(&mut self) {
+        self.backend = Backend::Smi {
+            reprobe_at: Instant::now() + REPROBE_BACKOFF,
+            empty_streak: 0,
         };
-        if Instant::now() < *retry_at {
-            return;
+    }
+
+    fn enter_unavailable(&mut self) {
+        self.backend = Backend::Unavailable {
+            retry_at: Instant::now() + REPROBE_BACKOFF,
+        };
+    }
+
+    fn demote_nvml(&mut self, reason: &str) {
+        log::warn!("{reason}; falling back from NVML");
+        if smi_present(&self.smi_path) {
+            self.enter_smi();
+        } else {
+            self.enter_unavailable();
         }
-        self.backend = probe_backend(&self.smi_path);
+    }
+
+    fn maybe_reprobe(&mut self) {
+        match &self.backend {
+            Backend::Unavailable { retry_at } if Instant::now() >= *retry_at => {
+                self.backend = probe_backend(&self.smi_path);
+            }
+            Backend::Smi { reprobe_at, .. } if Instant::now() >= *reprobe_at => {
+                match try_init_nvml() {
+                    Some(nvml) => {
+                        log::info!("NVML became available; leaving nvidia-smi fallback");
+                        self.backend = Backend::Nvml(nvml);
+                    }
+                    None => {
+                        if let Backend::Smi { reprobe_at, .. } = &mut self.backend {
+                            *reprobe_at = Instant::now() + REPROBE_BACKOFF;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn try_init_nvml() -> Option<Nvml> {
+    match Nvml::init() {
+        Ok(nvml) => match nvml.device_count() {
+            Ok(n) if n > 0 => Some(nvml),
+            Ok(_) => {
+                log::debug!("NVML init ok but device_count=0");
+                None
+            }
+            Err(e) => {
+                log::debug!("NVML device_count failed: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            log::debug!("NVML init failed: {e}");
+            None
+        }
+    }
+}
+
+fn smi_present(smi_path: &Path) -> bool {
+    if smi_path.is_absolute() {
+        smi_path.is_file()
+    } else {
+        which_in_path(smi_path)
     }
 }
 
 fn probe_backend(smi_path: &Path) -> Backend {
-    match Nvml::init() {
-        Ok(nvml) => {
-            // Confirm at least one device is addressable; otherwise fall through.
-            match nvml.device_count() {
-                Ok(n) if n > 0 => Backend::Nvml(nvml),
-                _ => probe_smi(smi_path),
-            }
+    if let Some(nvml) = try_init_nvml() {
+        Backend::Nvml(nvml)
+    } else if smi_present(smi_path) {
+        Backend::Smi {
+            reprobe_at: Instant::now() + REPROBE_BACKOFF,
+            empty_streak: 0,
         }
-        Err(_) => probe_smi(smi_path),
-    }
-}
-
-fn probe_smi(smi_path: &Path) -> Backend {
-    // Cheap existence check — avoid forking every poll when the binary is gone.
-    let available = if smi_path.is_absolute() {
-        smi_path.is_file()
-    } else {
-        which_in_path(smi_path)
-    };
-    if available {
-        Backend::Smi
     } else {
         Backend::Unavailable {
-            retry_at: Instant::now() + UNAVAILABLE_BACKOFF,
+            retry_at: Instant::now() + REPROBE_BACKOFF,
         }
     }
 }
@@ -111,21 +171,24 @@ fn which_in_path(command: &Path) -> bool {
         return false;
     };
     for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
+        if dir.join(name).is_file() {
             return true;
         }
     }
     false
 }
 
-fn poll_nvml(nvml: &Nvml) -> Result<Vec<SensorReading>> {
+enum NvmlPollOutcome {
+    Ok(Vec<SensorReading>),
+    Empty,
+    /// Device/library failure — caller must demote off NVML.
+    Fatal(String),
+}
+
+fn collect_nvml_readings(nvml: &Nvml) -> NvmlPollOutcome {
     let device = match nvml.device_by_index(0) {
         Ok(d) => d,
-        Err(e) => {
-            log::warn!("NVML device_by_index(0) failed: {e}");
-            return Ok(Vec::new());
-        }
+        Err(e) => return NvmlPollOutcome::Fatal(format!("NVML device_by_index(0) failed: {e}")),
     };
 
     let mut readings = Vec::with_capacity(5);
@@ -162,7 +225,6 @@ fn poll_nvml(nvml: &Nvml) -> Result<Vec<SensorReading>> {
 
     match device.memory_info() {
         Ok(mem) => {
-            // NVML reports bytes; match nvidia-smi MiB→GB formatting (1 decimal).
             let used_mib = mem.used as f64 / (1024.0 * 1024.0);
             let total_mib = mem.total as f64 / (1024.0 * 1024.0);
             readings.push(SensorReading {
@@ -179,7 +241,11 @@ fn poll_nvml(nvml: &Nvml) -> Result<Vec<SensorReading>> {
         Err(e) => log::debug!("NVML memory_info unavailable: {e}"),
     }
 
-    Ok(readings)
+    if readings.is_empty() {
+        NvmlPollOutcome::Empty
+    } else {
+        NvmlPollOutcome::Ok(readings)
+    }
 }
 
 fn poll_smi(smi_path: &Path) -> Result<Vec<SensorReading>> {
@@ -193,10 +259,10 @@ fn poll_smi(smi_path: &Path) -> Result<Vec<SensorReading>> {
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return Ok(Vec::new()), // binary vanished between probe and poll
+        Err(_) => return Ok(Vec::new()),
     };
 
-    match child.wait_timeout(NVIDIA_SMI_TIMEOUT) {
+    match child.wait_timeout(NVIDIA_POLL_BUDGET) {
         Ok(Some(status)) if status.success() => {
             let mut buf = String::new();
             if let Some(mut out) = child.stdout.take() {
@@ -209,14 +275,13 @@ fn poll_smi(smi_path: &Path) -> Result<Vec<SensorReading>> {
                 Ok(parse_csv_line(line))
             }
         }
-        Ok(Some(_)) => Ok(Vec::new()), // non-zero exit
+        Ok(Some(_)) => Ok(Vec::new()),
         Ok(None) => {
-            // Timed out — kill and reap so the process doesn't become a zombie.
             let _ = child.kill();
             let _ = child.wait();
             log::warn!(
                 "nvidia-smi timed out after {:?} — GPU may be in deep sleep or driver hung",
-                NVIDIA_SMI_TIMEOUT
+                NVIDIA_POLL_BUDGET
             );
             Ok(Vec::new())
         }
@@ -239,7 +304,6 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
         return readings;
     }
 
-    // temperature.gpu — skip if N/A
     if fields[0] != "N/A" && fields[0].parse::<f64>().is_ok() {
         readings.push(SensorReading {
             key: "gpu_temp".to_string(),
@@ -248,7 +312,6 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
         });
     }
 
-    // utilization.gpu — skip if N/A
     if fields[1] != "N/A" && fields[1].parse::<f64>().is_ok() {
         readings.push(SensorReading {
             key: "gpu_util".to_string(),
@@ -257,7 +320,6 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
         });
     }
 
-    // power.draw (watts with decimals) — skip if N/A
     if fields[2] != "N/A"
         && let Ok(w) = fields[2].parse::<f64>()
     {
@@ -268,7 +330,6 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
         });
     }
 
-    // memory.used (MiB → GB) — skip if N/A
     if fields[3] != "N/A"
         && let Ok(mib) = fields[3].parse::<f64>()
     {
@@ -279,7 +340,6 @@ pub fn parse_csv_line(line: &str) -> Vec<SensorReading> {
         });
     }
 
-    // memory.total (MiB → GB) — skip if N/A
     if fields[4] != "N/A"
         && let Ok(mib) = fields[4].parse::<f64>()
     {
@@ -299,39 +359,43 @@ impl SensorProvider for NvidiaProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
-        self.reprobe_if_due();
+        self.maybe_reprobe();
 
-        match &self.backend {
-            Backend::Nvml(nvml) => match poll_nvml(nvml) {
-                Ok(readings) => Ok(readings),
-                Err(e) => {
-                    log::warn!("NVML poll failed ({e:#}); falling back to nvidia-smi probe");
-                    self.backend = probe_smi(&self.smi_path);
-                    match &self.backend {
-                        Backend::Smi => poll_smi(&self.smi_path),
-                        Backend::Unavailable { .. } => Ok(Vec::new()),
-                        Backend::Nvml(_) => unreachable!("probe_smi never returns Nvml"),
-                    }
-                }
-            },
-            Backend::Smi => {
-                let readings = poll_smi(&self.smi_path)?;
-                // If the binary disappeared, demote to unavailable with backoff.
-                if readings.is_empty() {
-                    let still_there = if self.smi_path.is_absolute() {
-                        self.smi_path.is_file()
-                    } else {
-                        which_in_path(&self.smi_path)
-                    };
-                    if !still_there {
-                        self.backend = Backend::Unavailable {
-                            retry_at: Instant::now() + UNAVAILABLE_BACKOFF,
-                        };
-                    }
-                }
-                Ok(readings)
+        // NVML path: borrow the handle, collect, then decide demotion without
+        // holding the borrow.
+        if matches!(self.backend, Backend::Nvml(_)) {
+            let started = Instant::now();
+            let outcome = {
+                let Backend::Nvml(nvml) = &self.backend else {
+                    unreachable!()
+                };
+                collect_nvml_readings(nvml)
+            };
+            let elapsed = started.elapsed();
+
+            // Soft budget: if NVML ever runs longer than the old smi timeout,
+            // demote so a recovering-but-slow driver does not keep us hot.
+            if elapsed > NVIDIA_POLL_BUDGET {
+                self.demote_nvml(&format!(
+                    "NVML poll took {elapsed:?} (budget {NVIDIA_POLL_BUDGET:?})"
+                ));
+                return self.poll_via_smi_backend();
             }
+
+            return match outcome {
+                NvmlPollOutcome::Ok(readings) => Ok(readings),
+                NvmlPollOutcome::Empty => Ok(Vec::new()),
+                NvmlPollOutcome::Fatal(reason) => {
+                    self.demote_nvml(&reason);
+                    self.poll_via_smi_backend()
+                }
+            };
+        }
+
+        match self.backend {
+            Backend::Smi { .. } => self.poll_via_smi_backend(),
             Backend::Unavailable { .. } => Ok(Vec::new()),
+            Backend::Nvml(_) => unreachable!("handled above"),
         }
     }
 
@@ -366,14 +430,46 @@ impl SensorProvider for NvidiaProvider {
     }
 }
 
+impl NvidiaProvider {
+    fn poll_via_smi_backend(&mut self) -> Result<Vec<SensorReading>> {
+        if !matches!(self.backend, Backend::Smi { .. }) {
+            if smi_present(&self.smi_path) {
+                self.enter_smi();
+            } else {
+                self.enter_unavailable();
+                return Ok(Vec::new());
+            }
+        }
+
+        let readings = poll_smi(&self.smi_path)?;
+
+        if let Backend::Smi { empty_streak, .. } = &mut self.backend {
+            if readings.is_empty() {
+                *empty_streak = empty_streak.saturating_add(1);
+                let streak = *empty_streak;
+                let gone = !smi_present(&self.smi_path);
+                if gone || streak >= SMI_EMPTY_FAIL_LIMIT {
+                    log::warn!(
+                        "nvidia-smi unusable (empty_streak={streak}, present={}); backing off",
+                        !gone
+                    );
+                    self.enter_unavailable();
+                }
+            } else {
+                *empty_streak = 0;
+            }
+        }
+
+        Ok(readings)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn unavailable_backend_skips_spawn_until_backoff() {
-        // Point at a path that cannot exist; provider must not panic and must
-        // stay quiet across repeated polls inside the backoff window.
         let missing = PathBuf::from("/tmp/thermalwriter-definitely-missing-nvidia-smi");
         let mut provider = NvidiaProvider {
             backend: Backend::Unavailable {
@@ -382,8 +478,7 @@ mod tests {
             smi_path: missing,
         };
         for _ in 0..5 {
-            let readings = provider.poll().unwrap();
-            assert!(readings.is_empty());
+            assert!(provider.poll().unwrap().is_empty());
             assert!(matches!(provider.backend, Backend::Unavailable { .. }));
         }
     }
@@ -392,7 +487,6 @@ mod tests {
     fn smi_only_uses_injected_path() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("nvidia-smi");
-        // The shim exits 0 with valid CSV so poll returns readings.
         std::fs::write(&shim, "#!/bin/sh\necho '55, 10, 100.0, 1024, 8192'\n").unwrap();
         #[cfg(unix)]
         {
@@ -411,5 +505,47 @@ mod tests {
             "smi_only must parse shim output: {:?}",
             readings
         );
+        assert!(matches!(provider.backend, Backend::Smi { .. }));
+    }
+
+    #[test]
+    fn smi_empty_streak_enters_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("nvidia-smi");
+        std::fs::write(&shim, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&shim, perms).unwrap();
+        }
+
+        let mut provider = NvidiaProvider::smi_only(shim);
+        for _ in 0..SMI_EMPTY_FAIL_LIMIT {
+            assert!(provider.poll().unwrap().is_empty());
+        }
+        assert!(matches!(provider.backend, Backend::Unavailable { .. }));
+    }
+
+    #[test]
+    fn device_by_index_failure_is_fatal_not_empty() {
+        let outcome = NvmlPollOutcome::Fatal("NVML device_by_index(0) failed: test".into());
+        assert!(matches!(outcome, NvmlPollOutcome::Fatal(_)));
+        assert!(!matches!(outcome, NvmlPollOutcome::Empty));
+    }
+
+    #[test]
+    fn nvml_collects_gpu_temp_on_this_machine_or_skips() {
+        let Some(nvml) = try_init_nvml() else {
+            return;
+        };
+        match collect_nvml_readings(&nvml) {
+            NvmlPollOutcome::Ok(r) => {
+                assert!(r.iter().any(|x| x.key == "gpu_temp"), "{r:?}");
+            }
+            NvmlPollOutcome::Empty => {}
+            NvmlPollOutcome::Fatal(e) => panic!("unexpected fatal: {e}"),
+        }
     }
 }

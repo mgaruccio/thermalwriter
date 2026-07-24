@@ -1028,6 +1028,34 @@ fn hwmon_skips_wireless_nic_chips() {
 }
 
 #[test]
+fn hwmon_skips_spd5118_dimm_chips() {
+    let tmp = TempDir::new().unwrap();
+    let dimm = tmp.path().join("hwmon0");
+    fs::create_dir_all(&dimm).unwrap();
+    fs::write(dimm.join("name"), "spd5118\n").unwrap();
+    fs::write(dimm.join("temp1_input"), "38000\n").unwrap();
+
+    let cpu_dir = tmp.path().join("hwmon1");
+    fs::create_dir_all(&cpu_dir).unwrap();
+    fs::write(cpu_dir.join("name"), "k10temp\n").unwrap();
+    fs::write(cpu_dir.join("temp1_input"), "72000\n").unwrap();
+    fs::write(cpu_dir.join("temp1_label"), "Tctl\n").unwrap();
+
+    let mut provider = HwmonProvider::with_base_path(tmp.path().to_path_buf());
+    let readings = provider.poll().unwrap();
+
+    assert!(
+        !readings.iter().any(|r| r.key.contains("spd5118")),
+        "spd5118 DIMM sensors must be skipped, got {:?}",
+        readings
+    );
+    assert!(
+        readings.iter().any(|r| r.key == "cpu_temp"),
+        "CPU chip should still be read"
+    );
+}
+
+#[test]
 fn hwmon_quarantines_slow_chip_after_first_poll() {
     use std::time::{Duration, Instant};
 
