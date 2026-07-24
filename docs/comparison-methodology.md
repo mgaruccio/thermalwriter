@@ -89,14 +89,14 @@ reproduced at the bottom.
 
 | Configuration | CPU (% of one core) | avg RSS (MB) | peak RSS (MB) | avg PSS (MB) | peak PSS (MB) |
 |---|---|---|---|---|---|
-| thermalwriter daemon · 2 fps | **0.74** | 71.6 | 71.6 | 68.9 | 68.9 |
+| thermalwriter daemon · 2 fps | **0.87** | 75.1 | 75.1 | 72.1 | 72.1 |
 | TRCC-Linux daemon (headless) · 0.5 fps | 1.06 | 118.8 | 118.9 | 106.9 | 107.5 |
 | TRCC-Linux GUI · 0.5 fps | 1.26 | 301.4 | 301.4 | 284.2 | 284.2 |
 | thermalright-lcd-control GUI | 0.42 | 295.9 | 298.5 | 278.0 | 281.5 |
 
-thermalwriter remeasure after #91 (dirty-frame skip + NVML + skip spd5118
-DIMM sensors). Binary SHA-256
-`a16b100257a2166321a9406a53e1469dbf3426590a037bfa68a6f7ef6c444702`, sampled
+thermalwriter remeasure after #91 + adaptive prune + catalog-cost fix
+(dirty-frame skip, NVML, spd5118 skip, needed-key hwmon prune). Binary SHA-256
+`6d427a5e47801740e6b0820b8cfc1a698938ed7d69489a58f3553938f512ff78`, sampled
 via `scripts/footprint_sampler.sh thermalwriter.service 60 60` against the
 user unit `ExecStart=%h/.cargo/bin/thermalwriter daemon` immediately after
 `cp target/release/thermalwriter ~/.cargo/bin/ && systemctl --user restart`.
@@ -164,7 +164,7 @@ by a wide margin.
   running, the thermalwriter daemon's VmRSS sat at **7.2 MB** (with ~9.7 MB
   compressed into zram, VmHWM 24.9 MB). That figure is an observation from a
   single long-running instance, not part of the controlled protocol — quote
-  the **68.9 MB PSS** number from the table above, not the long-uptime
+  the **72.1 MB PSS** number from the table above, not the long-uptime
   observation, unless the uptime context is stated.
 - thermalwriter's peak in the first measured seconds is startup cost: the
   system font scan, NVML load, and decoding the 960×960 background image; it

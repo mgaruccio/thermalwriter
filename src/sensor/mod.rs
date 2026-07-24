@@ -87,6 +87,10 @@ pub struct SensorHub {
     /// means discovery mode — poll everything that isn't hard-denylisted.
     needed_keys: Option<HashSet<String>>,
     last_stats: SensorPollStats,
+    /// Catalog of known sensors with last attributed costs. Built once from
+    /// provider discovery, then only cost fields are refreshed after each poll
+    /// (never re-polls providers just to list sensors).
+    last_catalog: Vec<SensorDescriptor>,
 }
 
 impl Default for SensorHub {
@@ -102,6 +106,7 @@ impl SensorHub {
             collision_warned: HashSet::new(),
             needed_keys: None,
             last_stats: SensorPollStats::default(),
+            last_catalog: Vec::new(),
         }
     }
 
@@ -216,28 +221,49 @@ impl SensorHub {
                 keys_emitted,
             });
         }
-
         self.last_stats = SensorPollStats {
             total: total_start.elapsed(),
             providers: provider_stats,
-            key_cost_us,
+            key_cost_us: key_cost_us.clone(),
         };
+
+        // One-time discovery of names/units; subsequent polls only refresh costs.
+        if self.last_catalog.is_empty() {
+            self.last_catalog = self.discover_catalog();
+        }
+        // Merge any newly seen keys from this poll into the catalog.
+        for key in data.keys() {
+            if !self.last_catalog.iter().any(|d| d.key == *key) {
+                self.last_catalog.push(SensorDescriptor {
+                    key: key.clone(),
+                    name: key.clone(),
+                    unit: String::new(),
+                    cost_us: 0,
+                });
+            }
+        }
+        for d in &mut self.last_catalog {
+            d.cost_us = key_cost_us.get(&d.key).copied().unwrap_or(0);
+        }
 
         data
     }
 
-    pub fn available_sensors(&self) -> Vec<SensorDescriptor> {
-        let costs = &self.last_stats.key_cost_us;
+    /// Expensive: asks each provider for its descriptor list (some re-poll).
+    /// Only used to seed [`last_catalog`] once.
+    fn discover_catalog(&self) -> Vec<SensorDescriptor> {
         self.providers
             .iter()
             .flat_map(|p| p.available_sensors())
-            .map(|mut d| {
-                if d.cost_us == 0 {
-                    d.cost_us = costs.get(&d.key).copied().unwrap_or(0);
-                }
-                d
-            })
             .collect()
+    }
+
+    pub fn available_sensors(&self) -> Vec<SensorDescriptor> {
+        if !self.last_catalog.is_empty() {
+            return self.last_catalog.clone();
+        }
+        // Pre-first-poll fallback (e.g. unit tests that never called poll).
+        self.discover_catalog()
     }
 
     /// Build the default desktop sensor stack (same order as the daemon).
