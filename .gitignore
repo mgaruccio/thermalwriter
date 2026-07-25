@@ -11,3 +11,6 @@ gui/.vite/
 gui/src-tauri/target/
 gui/src-tauri/gen/
 *.orig
+
+# Release QA generated reports
+scripts/release-qa/out/

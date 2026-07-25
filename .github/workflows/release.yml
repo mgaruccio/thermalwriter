@@ -38,7 +38,7 @@ jobs:
           mkdir -p "$STAGED_DIR/skills/designing-layouts"
           cp target/release/thermalwriter "$STAGED_DIR/bin/"
           cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md "$STAGED_DIR/"
-          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md "$STAGED_DIR/docs/"
+          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md "$STAGED_DIR/docs/"
           cp -r docs/assets/. "$STAGED_DIR/docs/assets/"
           cp skills/designing-layouts/SKILL.md "$STAGED_DIR/skills/designing-layouts/"
           cp packaging/install.sh packaging/uninstall.sh "$STAGED_DIR/packaging/"
