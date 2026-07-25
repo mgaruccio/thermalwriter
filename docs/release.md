@@ -74,5 +74,5 @@ Before public announcement posts, validate the **tagged release artifacts** (not
 
 Reports land in `scripts/release-qa/out/<tag>/summary.md`. Full guest mapping and env overrides: `scripts/release-qa/README.md`.
 
-L1 scopes hardware-free install paths. Detach/reattach and "udev after replug" are L2 on bare metal (USB passthrough into QEMU is intentionally not required to close the install gate).
+**#90 acceptance** = L0 + L1 multi-distro install matrix (Ubuntu LTS tarball/GUI, Arch source/AppImage). L2 host unplug/replug is optional host tooling and is not required to close the issue.
 

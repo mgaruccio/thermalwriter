@@ -61,14 +61,20 @@ Arch: `ssh -p 2223 qa@127.0.0.1`
 | Custom `CARGO_HOME` → unit `ExecStart` | `guest/ubuntu-tarball.sh` |
 | GUI `.deb` + AppImage | `guest/ubuntu-gui.sh` (+ AppImage on Arch) |
 | Tarball README relative links | `check-artifacts.sh` (L0) |
-| Detach/reattach `connected` | `host/hw-attach-smoke.sh` (L2, bare metal) |
+| Detach/reattach `connected` | optional `host/hw-attach-smoke.sh` (L2) — **not required to close #90** |
+
+## Acceptance for #90
+
+**Done when L0 + L1 pass across the multi-distro matrix** (Ubuntu LTS tarball/GUI + Arch source/AppImage), including daemon/D-Bus with no hardware and custom `CARGO_HOME` → unit `ExecStart`.
+
+L2 physical unplug/replug is optional tooling for host debugging. Install-path confidence comes from different distros (and GUI smoke under xvfb), not from USB cable cycles or DE matrix coverage.
 
 ## Notes
 
 - Guests enable `loginctl linger` so `systemctl --user` works over SSH.
 - Source installs pin the **release tag**, not `main`.
 - GUI smoke = package installs + short `xvfb-run` launch (not full UI click-through).
-- Hardware USB passthrough into QEMU is intentionally out of L1; use L2 on the host with the Peerless Vision.
+- Hardware USB passthrough into QEMU is intentionally out of scope; host already runs the cooler day-to-day.
 
 ## Known v0.1.1 L0 finding
 
