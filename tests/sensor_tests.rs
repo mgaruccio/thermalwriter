@@ -931,7 +931,7 @@ fn rapl_resets_baseline_on_unneeded_to_needed_transition() {
     let mut provider = RaplProvider::with_base_path(tmp.path().to_path_buf());
 
     // Phase 1: needed_keys = None (discovery) → poll primes the baseline.
-    let _ = provider.set_needed_keys(None);
+    provider.set_needed_keys(None);
     let _ = provider.poll().unwrap();
     assert!(
         provider.last_energy_uj().is_some(),

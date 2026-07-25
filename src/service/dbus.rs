@@ -106,7 +106,7 @@ pub struct ServiceState {
     pub config_path: std::path::PathBuf,
     /// Live sensor catalog (key, name, unit, cost_us). Shared with the tick
     /// loop so list_sensors reflects the latest poll timing.
-    pub sensor_descriptors: Arc<std::sync::Mutex<Vec<(String, String, String, u64)>>>,
+    pub sensor_descriptors: crate::service::SharedSensorCatalog,
     /// In-memory mirror of the running daemon's Config. set_layout_vars mutates
     /// this alongside the on-disk file so the tick loop sees fresh values
     /// without a restart.

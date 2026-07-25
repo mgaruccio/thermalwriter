@@ -102,7 +102,7 @@ pub async fn run_tick_loop(
     sensor_history: Option<Arc<Mutex<SensorHistory>>>,
     sensor_poll_interval: Duration,
     // Shared catalog updated after each poll so D-Bus list_sensors shows costs.
-    sensor_catalog: Option<Arc<Mutex<Vec<(String, String, String, u64)>>>>,
+    sensor_catalog: Option<crate::service::SharedSensorCatalog>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     generation_tx: tokio::sync::watch::Sender<u64>,
@@ -492,7 +492,6 @@ pub async fn run_tick_loop(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn handle_source_result(
     result: SourceBuildResult,

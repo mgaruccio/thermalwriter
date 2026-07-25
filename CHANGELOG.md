@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - 2026-07-24
+## [0.1.1] - 2026-07-25
 
 ### Performance
 - Tick loop skips render/encode/USB send when the active layout's resolved inputs are unchanged (`FrameSource::content_fingerprint`). Streaming (Xvfb) sources still render every tick.
@@ -10,9 +10,16 @@ All notable changes to this project will be documented in this file.
 - Hybrid AMD+NVIDIA machines register Nvidia before AmdGpu so the discrete GPU owns `gpu_*` / `vram_*` keys.
 - SensorHub collision warnings log once per key for the life of the hub (no per-poll journal spam).
 - hwmon skips high-latency JEDEC `spd5118` DIMM sensors (~8 ms/poll on typical boards) that no stock layout displays.
-- Steady-state daemon CPU on the comparison machine dropped from 2.52% → **0.87%** of one core at default 2 fps (below TRCC-Linux's 1.06% default).
 - Adaptive hwmon pruning: after a short discovery window, chips that cannot serve the active layout's needed metrics are skipped (EMA cost > 500µs or simply unneeded).
+- Sensor polling is limited to keys the active layout can display (frontmatter + template token scan against the catalog), with provider short-circuit once those keys are collected.
+- Default `sensors.poll_interval_ms` lowered from `1000` to `2000` (still one sensor refresh per display frame at the default 2 FPS).
 - `list_sensors` reports per-key poll cost (`cost_us`); GUI sensor pickers show live-measured cost so setup can avoid expensive keys.
+- Steady-state daemon footprint on the comparison machine: **0.41% of one core** and ~81 MB PSS at default 2 FPS (stock neon-dash, NVML, dirty-frame skip, 2000 ms poll). Earlier post-`v0.1.0` remasure was 0.87% / ~72 MB PSS before the 2000 ms poll + layout-needed prune path.
+
+### Fixed
+- Clippy `-D warnings` clean again on CI (`type_complexity` on the shared sensor catalog, duplicated `too_many_arguments` allow, plus a couple of follow-on lints).
+
+## [0.1.0] - 2026-07-24
 
 ### Added
 - Initial daemon implementation for controlling Thermalright LCD coolers.

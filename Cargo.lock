@@ -5980,7 +5980,7 @@ dependencies = [
 
 [[package]]
 name = "thermalwriter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "anyrender",
@@ -6024,7 +6024,7 @@ dependencies = [
 
 [[package]]
 name = "thermalwriter-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "env_logger",

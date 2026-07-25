@@ -90,7 +90,7 @@ async fn apply_source_revision(
 fn send_layout_needed_keys(
     layout_path: &std::path::Path,
     vars: &HashMap<String, String>,
-    sensor_descriptors: &Arc<std::sync::Mutex<Vec<(String, String, String, u64)>>>,
+    sensor_descriptors: &thermalwriter::service::SharedSensorCatalog,
     declared_keys: &HashSet<String>,
     needed_tx: &tokio::sync::watch::Sender<Option<HashSet<String>>>,
     recipe_tx: &tokio::sync::watch::Sender<Option<thermalwriter::sensor::LayoutSensorRecipe>>,

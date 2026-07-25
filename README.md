@@ -6,7 +6,7 @@
 
 `thermalwriter` is a lightweight, Linux-native daemon for Thermalright cooler LCD displays. It renders designed sensor layouts — or any X11 app — and sends JPEG frames to the cooler over USB, with the always-on footprint of a proper background daemon instead of a desktop app.
 
-Current status: Public Beta (`v0.1.0`).
+Current status: Public Beta (`v0.1.1`).
 
 ## Why thermalwriter?
 

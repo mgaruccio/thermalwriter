@@ -188,22 +188,21 @@ pub async fn list_sensors() -> Result<Vec<SensorDescriptor>, AppError> {
 
     // Prefer non-empty local measure; if somehow empty, fall back to daemon
     // catalog (without relying on it for costs).
-    if out.is_empty() {
-        if let Ok(connection) = zbus::Connection::session().await
-            && let Ok(proxy) = DisplayProxy::new(&connection).await
-            && let Ok(sensors) = proxy.list_sensors().await
-            && !sensors.is_empty()
-        {
-            out = sensors
-                .into_iter()
-                .map(|(key, name, unit, cost_us)| SensorDescriptor {
-                    key,
-                    name,
-                    unit,
-                    cost_us,
-                })
-                .collect();
-        }
+    if out.is_empty()
+        && let Ok(connection) = zbus::Connection::session().await
+        && let Ok(proxy) = DisplayProxy::new(&connection).await
+        && let Ok(sensors) = proxy.list_sensors().await
+        && !sensors.is_empty()
+    {
+        out = sensors
+            .into_iter()
+            .map(|(key, name, unit, cost_us)| SensorDescriptor {
+                key,
+                name,
+                unit,
+                cost_us,
+            })
+            .collect();
     }
 
     if out.is_empty() {
