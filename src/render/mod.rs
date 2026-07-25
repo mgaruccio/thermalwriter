@@ -94,6 +94,13 @@ pub trait FrameSource: Send {
     fn content_fingerprint(&self, _sensors: &SensorData) -> Option<u64> {
         None
     }
+    /// Returns true when this source produces time-varying content (e.g. animations,
+    /// clocks, or any self-driven redraw). When false and the content fingerprint
+    /// is unchanged, the tick loop can extend its sleep beyond the normal tick
+    /// duration to avoid busy-waiting. Default: `true` (conservative — render every tick).
+    fn is_time_varying(&self) -> bool {
+        true
+    }
 }
 
 /// Renders HTML/CSS templates with sensor data substitution.
@@ -105,6 +112,8 @@ pub struct TemplateRenderer {
     render_height: u32,
     variable_defaults: HashMap<String, String>,
     variable_overrides: HashMap<String, String>,
+    /// True if the layout declares animation_fps — content changes every frame.
+    time_varying: bool,
 }
 
 fn template_canvas_dimensions(template: &str, width: u32, height: u32) -> (u32, u32) {
@@ -144,10 +153,12 @@ fn template_variable_defaults(template: &str) -> HashMap<String, String> {
         .map(|(name, decl)| (name.clone(), decl.default.clone()))
         .collect()
 }
-
 impl TemplateRenderer {
     pub fn new(template: &str, width: u32, height: u32) -> Result<Self> {
         let (render_width, render_height) = template_canvas_dimensions(template, width, height);
+        let time_varying = frontmatter::LayoutFrontmatter::parse(template)
+            .animation_fps
+            .is_some();
         Ok(Self {
             template: template.to_string(),
             width,
@@ -156,6 +167,7 @@ impl TemplateRenderer {
             render_height,
             variable_defaults: template_variable_defaults(template),
             variable_overrides: HashMap::new(),
+            time_varying,
         })
     }
 
@@ -163,6 +175,9 @@ impl TemplateRenderer {
         self.template = template.to_string();
         (self.render_width, self.render_height) =
             template_canvas_dimensions(template, self.width, self.height);
+        self.time_varying = frontmatter::LayoutFrontmatter::parse(template)
+            .animation_fps
+            .is_some();
         self.variable_defaults = template_variable_defaults(template);
     }
 
@@ -174,6 +189,9 @@ impl TemplateRenderer {
 }
 
 impl FrameSource for TemplateRenderer {
+    fn name(&self) -> &str {
+        "template"
+    }
     fn render(&mut self, sensors: &SensorData) -> Result<RawFrame> {
         // Step 1: Template substitution via tera
         let mut context = tera::Context::new();
@@ -244,6 +262,10 @@ impl FrameSource for TemplateRenderer {
     }
 
     fn content_fingerprint(&self, sensors: &SensorData) -> Option<u64> {
+        // Animated layouts change every frame — always dirty.
+        if self.time_varying {
+            return None;
+        }
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         "template".hash(&mut hasher);
@@ -277,8 +299,8 @@ impl FrameSource for TemplateRenderer {
         Some(hasher.finish())
     }
 
-    fn name(&self) -> &str {
-        "template"
+    fn is_time_varying(&self) -> bool {
+        self.time_varying
     }
 
     fn set_template(&mut self, template: &str) {
@@ -355,5 +377,24 @@ accent: color = "#112233" "Accent fill"
         )]));
         let overridden = renderer.render(&SensorData::new()).unwrap();
         assert_eq!(rgb_at(&overridden, 240, 240), [0x44, 0x55, 0x66]);
+    }
+
+    #[test]
+    fn time_varying_layout_returns_none_fingerprint() {
+        let template = r##"{# canvas: responsive #}
+{# vars:
+accent: color = "#112233" "Accent fill"
+#}
+<div style="width: 480px; height: 480px; background: {{ accent }};"></div>"##;
+        let renderer = TemplateRenderer::new(template, 480, 480).unwrap();
+        // No animation_fps → fingerprint is Some (stable).
+        assert!(renderer.content_fingerprint(&SensorData::new()).is_some());
+
+        // With animation_fps → fingerprint is None (always dirty).
+        let animated = r##"{# canvas: responsive #}
+{# animation: fps=30 #}
+<div style="width: 480px; height: 480px; background: #ff0000;"></div>"##;
+        let renderer = TemplateRenderer::new(animated, 480, 480).unwrap();
+        assert!(renderer.content_fingerprint(&SensorData::new()).is_none());
     }
 }

@@ -107,7 +107,7 @@ fn config_uses_defaults_when_file_missing() {
     assert_eq!(cfg.display.tick_rate, 2);
     assert_eq!(cfg.display.default_layout, "svg/neon-dash-v2.svg");
     assert_eq!(cfg.display.jpeg_quality, 85);
-    assert_eq!(cfg.sensors.poll_interval_ms, 1000);
+    assert_eq!(cfg.sensors.poll_interval_ms, 2000);
 }
 
 #[test]
@@ -127,7 +127,7 @@ tick_rate = 10
     // Unspecified fields should be defaults
     assert_eq!(cfg.display.default_layout, "svg/neon-dash-v2.svg");
     assert_eq!(cfg.display.jpeg_quality, 85);
-    assert_eq!(cfg.sensors.poll_interval_ms, 1000);
+    assert_eq!(cfg.sensors.poll_interval_ms, 2000);
 }
 
 #[test]

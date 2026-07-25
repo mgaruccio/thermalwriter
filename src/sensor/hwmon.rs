@@ -343,6 +343,9 @@ impl SensorProvider for HwmonProvider {
             Err(_) => Vec::new(),
         }
     }
+    fn declared_keys(&self) -> Vec<&str> {
+        vec!["cpu_temp", "cpu_fan"]
+    }
 }
 
 /// Parse "Core N" or "Core N" (case-insensitive) label → core index N.

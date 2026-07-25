@@ -1,6 +1,7 @@
 // RAPL power sensor: reads CPU package power from /sys/class/powercap.
 // Computes instantaneous watts from energy counter deltas between polls.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -20,6 +21,7 @@ pub struct RaplProvider {
     last_energy_uj: Option<u64>,
     last_poll: Option<Instant>,
     access_warned: bool,
+    needed_keys: Option<HashSet<String>>,
 }
 
 impl Default for RaplProvider {
@@ -38,6 +40,7 @@ impl RaplProvider {
             last_energy_uj: None,
             last_poll: None,
             access_warned: false,
+            needed_keys: None,
         }
     }
 
@@ -49,6 +52,7 @@ impl RaplProvider {
             last_energy_uj: None,
             last_poll: None,
             access_warned: false,
+            needed_keys: None,
         }
     }
 
@@ -66,14 +70,44 @@ impl RaplProvider {
             .ok()
             .and_then(|s| s.trim().parse().ok())
     }
+    pub fn last_energy_uj(&self) -> Option<u64> {
+        self.last_energy_uj
+    }
 }
 
 impl SensorProvider for RaplProvider {
     fn name(&self) -> &str {
         "rapl"
     }
+    fn set_needed_keys(&mut self, keys: Option<&HashSet<String>>) {
+        // None means full discovery (poll everything). Some(set) means pruned.
+        // cpu_power is "needed" when None (discovery) or when the set contains it.
+        let was_needed = self.needed_keys.is_none()
+            || self
+                .needed_keys
+                .as_ref()
+                .is_some_and(|k| k.contains("cpu_power"));
+        let now_needed = keys.is_none() || keys.is_some_and(|k| k.contains("cpu_power"));
+        // Reset baseline only on the false→true transition (unavailable→available),
+        // so the first poll after a pruning gap primes the counter instead of
+        // averaging over the entire gap (and avoids multi-wrap issues on long gaps).
+        if !was_needed && now_needed {
+            self.last_energy_uj = None;
+            self.last_poll = None;
+        }
+        self.needed_keys = keys.cloned();
+    }
+    fn wants_any(&self, needed: &HashSet<String>) -> bool {
+        needed.contains("cpu_power")
+    }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
+        // If needed_keys is set and cpu_power isn't needed, skip entirely.
+        if let Some(ref needed) = self.needed_keys {
+            if !needed.contains("cpu_power") {
+                return Ok(Vec::new());
+            }
+        }
         let mut readings = Vec::new();
 
         let Some(energy_uj) = self.read_energy_uj() else {
@@ -141,5 +175,8 @@ impl SensorProvider for RaplProvider {
         } else {
             Vec::new()
         }
+    }
+    fn declared_keys(&self) -> Vec<&str> {
+        vec!["cpu_power"]
     }
 }

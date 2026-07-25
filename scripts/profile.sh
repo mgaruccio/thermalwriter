@@ -400,7 +400,7 @@ write_scenario_config() {
     echo "mode = \"$mode\""
     echo
     echo "[sensors]"
-    echo "poll_interval_ms = 1000"
+    echo "poll_interval_ms = 2000"
     echo
     echo "[background]"
     if [[ -n "$bg_image" ]]; then

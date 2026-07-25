@@ -7,11 +7,14 @@ pub mod hwmon;
 pub mod mangohud;
 #[doc(hidden)]
 pub mod mock;
+pub mod needed_keys;
 pub mod nvidia;
 pub mod rapl;
+pub use needed_keys::{LayoutSensorRecipe, layout_needed_keys};
 pub mod sysinfo_provider;
 
 use anyhow::Result;
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -47,6 +50,22 @@ pub trait SensorProvider: Send {
     fn name(&self) -> &str;
     fn poll(&mut self) -> Result<Vec<SensorReading>>;
     fn available_sensors(&self) -> Vec<SensorDescriptor>;
+    /// Canonical keys this provider *can* emit, regardless of whether they are
+    /// currently readable. Used for layout-needed-key derivation so that a
+    /// temporarily-unreadable sensor (e.g. RAPL during early boot) stays
+    /// eligible for polling when a layout references it.
+    /// Default: empty (provider only declares keys via `available_sensors`).
+    fn declared_keys(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// Returns true if this provider could emit any of the needed keys.
+    /// Used by the hub to skip providers that can't contribute.
+    /// Default: `true` (conservative — never skip unless overridden).
+    /// Override with a static key check when keys are known at compile time.
+    fn wants_any(&self, _needed: &HashSet<String>) -> bool {
+        true
+    }
 
     /// Optional: provider-specific timing breakdown (e.g. per hwmon chip).
     /// Default empty — hub attributes the whole provider duration to every key.
@@ -152,6 +171,36 @@ impl SensorHub {
 
         for provider in &mut self.providers {
             let name = provider.name().to_string();
+
+            // Short-circuit: skip providers that can't contribute any *remaining* needed key.
+            if let Some(ref n) = self.needed_keys {
+                // Compute keys still missing from collected data.
+                let remaining: HashSet<String> = n
+                    .iter()
+                    .filter(|k| !data.contains_key(*k))
+                    .cloned()
+                    .collect();
+                if remaining.is_empty() {
+                    debug!("All needed keys collected; stopping provider poll");
+                    break;
+                }
+                // Skip providers whose static keys don't intersect with remaining needed.
+                // hwmon returns empty provided_keys() (dynamic) → wants_any returns
+                // true → never skipped here (it chip-filters internally).
+                if !provider.wants_any(&remaining) {
+                    debug!(
+                        "Skipping provider '{}' (no remaining needed keys intersect)",
+                        name
+                    );
+                    provider_stats.push(ProviderPollStat {
+                        name,
+                        duration: Duration::ZERO,
+                        keys_emitted: 0,
+                    });
+                    continue;
+                }
+            }
+
             let started = Instant::now();
             let result = provider.poll();
             let elapsed = started.elapsed();
@@ -265,6 +314,16 @@ impl SensorHub {
         // Pre-first-poll fallback (e.g. unit tests that never called poll).
         self.discover_catalog()
     }
+    /// Canonical keys declared by providers (regardless of current readability).
+    /// Used for layout-needed-key token scanning so a transiently-unreadable
+    /// sensor (e.g. RAPL's `cpu_power`) stays eligible when a layout references it.
+    pub fn declared_keys(&self) -> HashSet<String> {
+        self.providers
+            .iter()
+            .flat_map(|p| p.declared_keys())
+            .map(String::from)
+            .collect()
+    }
 
     /// Build the default desktop sensor stack (same order as the daemon).
     pub fn with_default_providers(mangohud_log_dir: &str) -> Self {
@@ -302,25 +361,7 @@ fn key_matches_source(key: &str, source: &str) -> bool {
     false
 }
 
-/// Canonical keys always considered "needed" so CPU/GPU/RAM keep polling even
-/// when a layout's frontmatter is empty during discovery transitions.
-pub fn default_needed_keys() -> HashSet<String> {
-    [
-        "cpu_temp",
-        "cpu_util",
-        "cpu_power",
-        "cpu_fan",
-        "gpu_temp",
-        "gpu_util",
-        "gpu_power",
-        "vram_used",
-        "vram_total",
-        "ram_used",
-        "ram_total",
-        "fps",
-        "frametime",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
+// Needed-key computation now lives in `needed_keys::layout_needed_keys`, which
+// derives the needed set from the active layout's frontmatter + template tokens
+// against the known sensor catalog. `default_needed_keys` (the old fixed desktop
+// set) is removed — see `layout_needed_keys` for the replacement.

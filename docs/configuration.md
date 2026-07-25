@@ -42,7 +42,7 @@ Settings related to polling frequency and custom log path detection.
 
 - **`poll_interval_ms`** (Integer)
   - Description: How often to poll metric providers/sensors in milliseconds.
-  - Default: `1000`
+  - Default: `2000`
   - Range: `100..=60000`
 
 - **`mangohud_log_dir`** (String)

@@ -3,6 +3,7 @@
 // We read only the header line + last data line — NOT the full file (can be 100s of MB).
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use super::{SensorDescriptor, SensorProvider, SensorReading};
 
 pub struct MangoHudProvider {
     log_dir: PathBuf,
+    needed_keys: Option<HashSet<String>>,
 }
 
 impl Default for MangoHudProvider {
@@ -26,12 +28,18 @@ impl MangoHudProvider {
         } else {
             dirs_next_mangohud_default()
         };
-        Self { log_dir }
+        Self {
+            log_dir,
+            needed_keys: None,
+        }
     }
 
     /// For testing with a custom log directory.
     pub fn with_log_dir(log_dir: PathBuf) -> Self {
-        Self { log_dir }
+        Self {
+            log_dir,
+            needed_keys: None,
+        }
     }
 
     /// Construct from a configured directory path.
@@ -40,7 +48,10 @@ impl MangoHudProvider {
         if configured.is_empty() {
             Self::new()
         } else {
-            Self::with_log_dir(PathBuf::from(configured))
+            Self {
+                log_dir: PathBuf::from(configured),
+                needed_keys: None,
+            }
         }
     }
 
@@ -139,10 +150,23 @@ impl SensorProvider for MangoHudProvider {
     fn name(&self) -> &str {
         "mangohud"
     }
+    fn set_needed_keys(&mut self, keys: Option<&HashSet<String>>) {
+        self.needed_keys = keys.cloned();
+    }
+    fn wants_any(&self, needed: &HashSet<String>) -> bool {
+        const KEYS: &[&str] = &["fps", "frametime", "cpu_load", "gpu_load"];
+        KEYS.iter().any(|k| needed.contains(*k))
+    }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
+        // If needed_keys is set and none of our keys are needed, skip entirely.
+        if let Some(ref needed) = self.needed_keys {
+            const KEYS: &[&str] = &["fps", "frametime", "cpu_load", "gpu_load"];
+            if !KEYS.iter().any(|k| needed.contains(*k)) {
+                return Ok(Vec::new());
+            }
+        }
         let mut readings = Vec::new();
-
         let csv_path = match self.find_latest_csv() {
             Some(p) => p,
             None => return Ok(readings), // No CSV files — return empty
@@ -216,6 +240,9 @@ impl SensorProvider for MangoHudProvider {
                 cost_us: 0,
             })
             .collect()
+    }
+    fn declared_keys(&self) -> Vec<&str> {
+        WANTED_KEYS.to_vec()
     }
 }
 

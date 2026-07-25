@@ -1,4 +1,5 @@
 use serial_test::serial;
+use std::collections::HashSet;
 use std::fs;
 use tempfile::TempDir;
 use thermalwriter::sensor::SensorProvider;
@@ -253,6 +254,98 @@ fn sensor_hub_earlier_provider_wins_on_key_collision() {
     assert_eq!(data.get("cpu_temp").map(String::as_str), Some("from_first"));
     assert_eq!(data.get("gpu_temp").map(String::as_str), Some("81"));
     assert_eq!(data.len(), 2);
+}
+
+#[test]
+fn sensor_hub_short_circuits_when_remaining_keys_collected() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use thermalwriter::sensor::{SensorDescriptor, SensorHub, SensorProvider, SensorReading};
+
+    /// Tracks whether poll() was called via a shared counter.
+    struct TrackingProvider {
+        name: &'static str,
+        keys: Vec<&'static str>,
+        poll_count: Arc<AtomicUsize>,
+    }
+
+    impl SensorProvider for TrackingProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn poll(&mut self) -> anyhow::Result<Vec<SensorReading>> {
+            self.poll_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .keys
+                .iter()
+                .map(|k| SensorReading {
+                    key: (*k).into(),
+                    value: "1".into(),
+                    unit: "".into(),
+                })
+                .collect())
+        }
+        fn available_sensors(&self) -> Vec<SensorDescriptor> {
+            self.keys
+                .iter()
+                .map(|k| SensorDescriptor::new(*k, *k, ""))
+                .collect()
+        }
+        fn wants_any(&self, needed: &HashSet<String>) -> bool {
+            self.keys.iter().any(|k| needed.contains(*k))
+        }
+    }
+
+    // Hybrid-GPU scenario: needed = {gpu_temp, fps}.
+    // nvidia fills gpu_temp, remaining = {fps}. mangohud fills fps, remaining = {}.
+    // amdgpu should NOT be polled (its only key "gpu_temp" is not in remaining).
+    let nvidia_count = Arc::new(AtomicUsize::new(0));
+    let mangohud_count = Arc::new(AtomicUsize::new(0));
+    let amd_count = Arc::new(AtomicUsize::new(0));
+
+    let mut hub = SensorHub::new();
+    hub.add_provider(Box::new(TrackingProvider {
+        name: "nvidia",
+        keys: vec!["gpu_temp"],
+        poll_count: nvidia_count.clone(),
+    }));
+    hub.add_provider(Box::new(TrackingProvider {
+        name: "mangohud",
+        keys: vec!["fps"],
+        poll_count: mangohud_count.clone(),
+    }));
+    hub.add_provider(Box::new(TrackingProvider {
+        name: "amdgpu",
+        keys: vec!["gpu_temp"],
+        poll_count: amd_count.clone(),
+    }));
+
+    let needed: HashSet<String> = ["gpu_temp", "fps"].iter().map(|s| s.to_string()).collect();
+    hub.set_needed_keys(Some(needed));
+    let data = hub.poll();
+
+    assert_eq!(data.get("gpu_temp").map(String::as_str), Some("1"));
+    assert_eq!(data.get("fps").map(String::as_str), Some("1"));
+    assert_eq!(data.len(), 2);
+    // nvidia and mangohud should each be polled once.
+    assert_eq!(
+        nvidia_count.load(Ordering::SeqCst),
+        1,
+        "nvidia should be polled"
+    );
+    assert_eq!(
+        mangohud_count.load(Ordering::SeqCst),
+        1,
+        "mangohud should be polled"
+    );
+    // amdgpu should be skipped: after nvidia fills gpu_temp, remaining = {fps},
+    // and amdgpu's only key "gpu_temp" is not in remaining.
+    assert_eq!(
+        amd_count.load(Ordering::SeqCst),
+        0,
+        "amdgpu should be skipped when its keys are already collected"
+    );
 }
 
 #[test]
@@ -824,6 +917,45 @@ fn rapl_rollover_with_unreadable_max_does_not_explode() {
         );
     }
     // Absent reading is also acceptable — both outcomes are sane.
+}
+
+#[test]
+fn rapl_resets_baseline_on_unneeded_to_needed_transition() {
+    use thermalwriter::sensor::SensorProvider;
+    let tmp = tempfile::tempdir().unwrap();
+    let rapl_dir = tmp.path().join("intel-rapl:0");
+    fs::create_dir_all(&rapl_dir).unwrap();
+    let energy_path = rapl_dir.join("energy_uj");
+    fs::write(&energy_path, "1000000").unwrap();
+
+    let mut provider = RaplProvider::with_base_path(tmp.path().to_path_buf());
+
+    // Phase 1: needed_keys = None (discovery) → poll primes the baseline.
+    let _ = provider.set_needed_keys(None);
+    let _ = provider.poll().unwrap();
+    assert!(
+        provider.last_energy_uj().is_some(),
+        "baseline should be set after first poll"
+    );
+
+    // Phase 2: cpu_power not needed → poll returns empty, baseline retained.
+    let unneeded: HashSet<String> = ["ram_used"].iter().map(|s| s.to_string()).collect();
+    provider.set_needed_keys(Some(&unneeded));
+    let readings = provider.poll().unwrap();
+    assert!(
+        readings.is_empty(),
+        "RAPL should skip when cpu_power not needed"
+    );
+
+    // Phase 3: cpu_power becomes needed again → baseline should be reset.
+    let needed: HashSet<String> = ["cpu_power"].iter().map(|s| s.to_string()).collect();
+    provider.set_needed_keys(Some(&needed));
+    // After re-enabling, the first poll should NOT produce a reading (baseline was reset).
+    let readings = provider.poll().unwrap();
+    assert!(
+        readings.is_empty(),
+        "first poll after re-enable should prime, not compute"
+    );
 }
 
 // ─── nvidia-smi N/A parser tests ─────────────────────────────────────────────

@@ -106,7 +106,7 @@ mode = "svg"    # "svg", "html", or "xvfb"
 device = "auto" # or explicit "VID:PID" (hex) when multiple distinct displays are attached
 
 [sensors]
-poll_interval_ms = 1000
+poll_interval_ms = 2000
 
 [background]
 image = "skyline.png"  # filename only, lives under ~/.config/thermalwriter/backgrounds/. Omit or unset for no bg.

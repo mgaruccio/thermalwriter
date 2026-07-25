@@ -15,6 +15,7 @@
 use anyhow::Result;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -168,6 +169,8 @@ pub struct NvidiaProvider {
     /// query timeout). Suppresses all further NVML spawns for this lifetime so
     /// a permanent driver wedge cannot accumulate one `tw-nvml` thread/minute.
     nvml_wedged: bool,
+    /// Keys the layout actually needs; if None, poll everything.
+    needed_keys: Option<HashSet<String>>,
 }
 
 impl Default for NvidiaProvider {
@@ -188,6 +191,7 @@ impl NvidiaProvider {
             },
             smi_path,
             nvml_wedged: false,
+            needed_keys: None,
         };
         provider.backend = provider.probe_backend();
         provider
@@ -203,6 +207,7 @@ impl NvidiaProvider {
             },
             smi_path,
             nvml_wedged: false,
+            needed_keys: None,
         }
     }
 
@@ -511,8 +516,35 @@ impl SensorProvider for NvidiaProvider {
     fn name(&self) -> &str {
         "nvidia"
     }
+    fn set_needed_keys(&mut self, keys: Option<&HashSet<String>>) {
+        self.needed_keys = keys.cloned();
+    }
+    fn wants_any(&self, needed: &HashSet<String>) -> bool {
+        const KEYS: &[&str] = &[
+            "gpu_temp",
+            "gpu_util",
+            "gpu_power",
+            "vram_used",
+            "vram_total",
+        ];
+        KEYS.iter().any(|k| needed.contains(*k))
+    }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
+        // If needed_keys is set and none of our keys are needed, skip entirely.
+        if let Some(ref needed) = self.needed_keys {
+            const KEYS: &[&str] = &[
+                "gpu_temp",
+                "gpu_util",
+                "gpu_power",
+                "vram_used",
+                "vram_total",
+            ];
+            if !KEYS.iter().any(|k| needed.contains(*k)) {
+                return Ok(Vec::new());
+            }
+        }
+
         self.maybe_reprobe();
 
         let nvml_outcome = if let Backend::Nvml(worker) = &self.backend {
@@ -581,6 +613,15 @@ impl SensorProvider for NvidiaProvider {
             },
         ]
     }
+    fn declared_keys(&self) -> Vec<&str> {
+        vec![
+            "gpu_temp",
+            "gpu_util",
+            "gpu_power",
+            "vram_used",
+            "vram_total",
+        ]
+    }
 }
 
 impl NvidiaProvider {
@@ -630,6 +671,7 @@ mod tests {
             },
             smi_path: missing,
             nvml_wedged: false,
+            needed_keys: None,
         };
         for _ in 0..5 {
             assert!(provider.poll().unwrap().is_empty());

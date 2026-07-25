@@ -25,7 +25,7 @@ MEMORY = {
     "subtitle": "avg PSS over 60 s, fresh start, whole process tree · lower is better",
     "unit": "MB",
     "rows": [
-        ("thermalwriter daemon", 72.1, True),
+        ("thermalwriter daemon", 81.3, True),
         ("TRCC-Linux daemon (headless)", 106.9, False),
         ("thermalright-lcd-control GUI", 278.0, False),
         ("TRCC-Linux GUI", 284.2, False),
@@ -37,9 +37,10 @@ CPU = {
     "subtitle": ("% of one core, stock sensor theme at each tool's default cadence "
                  "· lower is better"),
     "unit": "%",
+    "decimals": 2,
     "rows": [
+        ("thermalwriter daemon · 2 fps", 0.41, True),
         ("thermalright-lcd-control GUI", 0.42, False),
-        ("thermalwriter daemon · 2 fps", 0.87, True),
         ("TRCC-Linux daemon · 0.5 fps", 1.06, False),
         ("TRCC-Linux GUI · 0.5 fps", 1.26, False),
     ],
@@ -103,9 +104,10 @@ def _is_clean_step(step: float) -> bool:
     s = step / 10 ** math.floor(math.log10(step))
     return any(abs(s - c) < 1e-9 for c in (1, 2, 2.5, 5))
 
-
-def fmt(v: float) -> str:
-    return f"{v:,.1f}" if v < 10 else f"{v:,.0f}"
+def fmt(v: float, decimals: int = 1) -> str:
+    if v < 10:
+        return f"{v:,.{decimals}f}"
+    return f"{v:,.0f}"
 
 
 def bar_path(x: float, y: float, w: float, h: float, r: float) -> str:
@@ -124,10 +126,11 @@ def render(spec: dict, theme_name: str) -> str:
     vmax = nice_max(max(v for _, v, _ in rows))
 
     s = []
+    decimals = spec.get("decimals", 1)
     s.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h}" '
              f'viewBox="0 0 {W} {h}" role="img" '
              f'aria-label="{spec["title"]}: '
-             + "; ".join(f"{n} {fmt(v)} {spec['unit']}" for n, v, _ in rows) + '">')
+             + "; ".join(f"{n} {fmt(v, decimals)} {spec['unit']}" for n, v, _ in rows) + '">')
     s.append(f'<rect x="0.5" y="0.5" width="{W-1}" height="{h-1}" rx="12" '
              f'fill="{t["surface"]}" stroke="{t["ring"]}"/>')
     s.append(f'<text x="{PAD}" y="{PAD + 8}" font-family="{FONT}" font-size="17" '
@@ -148,7 +151,7 @@ def render(spec: dict, theme_name: str) -> str:
         if i > 0:
             s.append(f'<line x1="{gx:.1f}" y1="{y0}" x2="{gx:.1f}" '
                      f'y2="{y0 + plot_h}" stroke="{t["grid"]}" stroke-width="1"/>')
-        label = f"{val:,.0f}" if vmax >= 10 else f"{val:,.1f}"
+        label = f"{val:,.0f}" if vmax >= 10 else f"{val:,.{decimals}f}"
         s.append(f'<text x="{gx:.1f}" y="{y0 + plot_h + 18}" font-family="{FONT}" '
                  f'font-size="11" fill="{t["muted"]}" text-anchor="middle" '
                  f'font-variant-numeric="tabular-nums">{label}</text>')
@@ -172,7 +175,7 @@ def render(spec: dict, theme_name: str) -> str:
                  f'fill="{color}"/>')
         s.append(f'<text x="{x0 + bw + 9}" y="{cy + 4.5}" font-family="{FONT}" '
                  f'font-size="13" font-weight="600" fill="{t["ink"]}">'
-                 f'{fmt(v)}</text>')
+                 f'{fmt(v, decimals)}</text>')
 
     s.append(f'<text x="{PAD}" y="{h - PAD + 6}" font-family="{FONT}" '
              f'font-size="10.5" fill="{t["muted"]}">{FOOTNOTE}</text>')

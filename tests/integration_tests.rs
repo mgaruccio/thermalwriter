@@ -263,6 +263,11 @@ async fn run_mock_tick(
     use thermalwriter::sensor::SensorHub;
     use thermalwriter::service::tick::run_tick_loop;
 
+    let (_needed_tx, needed_rx) =
+        tokio::sync::watch::channel::<Option<std::collections::HashSet<String>>>(None);
+    let (_recipe_tx, recipe_rx) =
+        tokio::sync::watch::channel::<Option<thermalwriter::sensor::LayoutSensorRecipe>>(None);
+
     let mut hub = SensorHub::new();
     let transport: Option<Box<dyn Transport>> = Some(Box::new(MockTransport {
         frames_sent,
@@ -291,6 +296,8 @@ async fn run_mock_tick(
         generation_tx,
         &mut source_revision_rx,
         tick_rate_rx,
+        needed_rx,
+        recipe_rx,
     )
     .await
     .unwrap();
@@ -1088,6 +1095,10 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
         fingerprint: Arc::clone(&fingerprint),
         always_dirty: false,
     };
+    let (_needed_tx, needed_rx) =
+        tokio::sync::watch::channel::<Option<std::collections::HashSet<String>>>(None);
+    let (_recipe_tx, recipe_rx) =
+        tokio::sync::watch::channel::<Option<thermalwriter::sensor::LayoutSensorRecipe>>(None);
 
     let frames_for_loop = Arc::clone(&frames_sent);
     let handle = tokio::spawn(async move {
@@ -1119,6 +1130,8 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
             generation_tx,
             &mut source_revision_rx,
             tick_rate_rx,
+            needed_rx,
+            recipe_rx,
         )
         .await
         .unwrap();

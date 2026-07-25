@@ -6,14 +6,13 @@
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::render::background::BackgroundImage;
 use crate::render::{FrameSource, RawFrame};
 use crate::sensor::SensorHub;
-use crate::sensor::default_needed_keys;
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
@@ -109,6 +108,8 @@ pub async fn run_tick_loop(
     generation_tx: tokio::sync::watch::Sender<u64>,
     source_revision_rx: &mut tokio::sync::mpsc::Receiver<SourceRevisionApply>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
+    mut needed_rx: tokio::sync::watch::Receiver<Option<HashSet<String>>>,
+    mut recipe_rx: tokio::sync::watch::Receiver<Option<crate::sensor::LayoutSensorRecipe>>,
 ) -> Result<()> {
     info!(
         "Tick loop started: {} FPS, JPEG quality={}, rotation={}°",
@@ -157,6 +158,39 @@ pub async fn run_tick_loop(
         let tick_start = Instant::now();
         let current_fps = (*tick_rate_rx.borrow_and_update()).max(1);
         let tick_duration = Duration::from_secs_f64(1.0 / f64::from(current_fps));
+
+        // Apply needed-keys updates from the mode listener / startup.
+        if needed_rx.has_changed().unwrap_or(false) {
+            let n = needed_rx.borrow_and_update().clone();
+            sensor_hub.set_needed_keys(n);
+        }
+
+        // Fallback: if needed keys are still None (discovery mode) and the
+        // catalog is now non-empty, compute from the active layout recipe.
+        if sensor_hub.needed_keys().is_none() {
+            if let Some(recipe) = recipe_rx.borrow_and_update().as_ref() {
+                let known: HashSet<String> = sensor_hub
+                    .available_sensors()
+                    .into_iter()
+                    .map(|d| d.key)
+                    .collect();
+                let declared: HashSet<String> = sensor_hub.declared_keys();
+                if !known.is_empty() {
+                    let frontmatter =
+                        crate::render::frontmatter::LayoutFrontmatter::parse(&recipe.template);
+                    let n = crate::sensor::layout_needed_keys(
+                        &frontmatter,
+                        &recipe.vars,
+                        &recipe.template,
+                        &known,
+                        &declared,
+                    );
+                    if !n.is_empty() {
+                        sensor_hub.set_needed_keys(Some(n));
+                    }
+                }
+            }
+        }
 
         while let Ok(apply) = source_revision_rx.try_recv() {
             if apply.revision < source_revision {
@@ -313,15 +347,8 @@ pub async fn run_tick_loop(
 
         // Poll/render/encode are CPU-bound; run them under block_in_place so
         // Tokio can keep servicing D-Bus on other worker threads.
-        let sensors = if tick_start.duration_since(last_poll) >= sensor_poll_interval {
-            // Keep adaptive prune aligned with the layout's history metrics.
-            if let Some(hist) = &sensor_history
-                && let Ok(h) = hist.lock()
-            {
-                let mut needed = default_needed_keys();
-                needed.extend(h.configured_metrics());
-                sensor_hub.set_needed_keys(Some(needed));
-            }
+        let sensors_refreshed = tick_start.duration_since(last_poll) >= sensor_poll_interval;
+        let sensors = if sensors_refreshed {
             let data = tokio::task::block_in_place(|| sensor_hub.poll());
             if let Some(hist) = &sensor_history
                 && let Ok(mut h) = hist.lock()
@@ -349,13 +376,23 @@ pub async fn run_tick_loop(
         if let Some(conn) = active.as_mut() {
             // Cheap dirty check: skip full render when inputs are unchanged.
             // Streaming sources return None and always render (Xvfb capture).
-            let fingerprint = frame_source.content_fingerprint(sensors);
-            let skip_render = match (fingerprint, last_frame_fingerprint) {
-                (Some(now), Some(prev)) if now == prev => true,
-                _ => false,
+            // Compute fingerprint when sensors changed, source is time-varying,
+            // or the cache was invalidated (None). Computing on invalidation
+            // ensures one redraw rather than repeated redraws until the next
+            // sensor poll (up to 2s with the 2000ms default).
+            let fingerprint = if sensors_refreshed
+                || frame_source.is_time_varying()
+                || last_frame_fingerprint.is_none()
+            {
+                frame_source.content_fingerprint(sensors)
+            } else {
+                last_frame_fingerprint
             };
-
-            if skip_render {
+            let skip = matches!(
+                (fingerprint, last_frame_fingerprint),
+                (Some(now), Some(prev)) if now == prev
+            );
+            if skip {
                 debug!("Skipping unchanged frame (fingerprint match)");
             } else {
                 let rendered = tokio::task::block_in_place(|| {
@@ -419,7 +456,26 @@ pub async fn run_tick_loop(
 
         let elapsed = tick_start.elapsed();
         if elapsed < tick_duration {
-            tokio::time::sleep(tick_duration - elapsed).await;
+            // Sleep policy:
+            // - Streaming or time-varying sources: sleep the remainder of tick_duration
+            //   (need to render every frame).
+            // - Non-time-varying: sleep until min(next_sensor_poll, tick_start + 250ms)
+            //   so D-Bus/source channels still drain at ≥4 Hz without 2 Hz render wakeups.
+            let time_varying = frame_source.is_time_varying();
+            let sleep_dur = if frame_source.is_streaming() || time_varying {
+                tick_duration - elapsed
+            } else {
+                let next_sensor = last_poll + sensor_poll_interval;
+                let ceiling = tick_start + Duration::from_millis(250);
+                let deadline = next_sensor.min(ceiling);
+                let now = Instant::now();
+                if deadline > now {
+                    deadline - now
+                } else {
+                    Duration::from_millis(1)
+                }
+            };
+            tokio::time::sleep(sleep_dur).await;
         }
 
         if *shutdown.borrow_and_update() {
@@ -436,6 +492,7 @@ pub async fn run_tick_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn handle_source_result(
     result: SourceBuildResult,
@@ -506,7 +563,6 @@ fn handle_source_result(
                     }
                 }
             }
-
             *frame_source = source;
             *last_frame_fingerprint = None;
             if pending_match {

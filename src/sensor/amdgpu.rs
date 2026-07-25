@@ -1,6 +1,7 @@
 // AmdGpu sensor provider: reads /sys/class/drm/card*/device for GPU metrics.
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,6 +12,7 @@ const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 
 pub struct AmdGpuProvider {
     base_path: PathBuf,
+    needed_keys: Option<HashSet<String>>,
 }
 
 impl Default for AmdGpuProvider {
@@ -23,12 +25,16 @@ impl AmdGpuProvider {
     pub fn new() -> Self {
         Self {
             base_path: PathBuf::from(DEFAULT_DRM_PATH),
+            needed_keys: None,
         }
     }
 
     /// For testing with a fake sysfs tree.
     pub fn with_base_path(base: PathBuf) -> Self {
-        Self { base_path: base }
+        Self {
+            base_path: base,
+            needed_keys: None,
+        }
     }
 
     fn read_trimmed(path: &std::path::Path) -> Option<String> {
@@ -44,8 +50,34 @@ impl SensorProvider for AmdGpuProvider {
     fn name(&self) -> &str {
         "amdgpu"
     }
+    fn set_needed_keys(&mut self, keys: Option<&HashSet<String>>) {
+        self.needed_keys = keys.cloned();
+    }
+    fn wants_any(&self, needed: &HashSet<String>) -> bool {
+        const KEYS: &[&str] = &[
+            "gpu_temp",
+            "gpu_util",
+            "gpu_power",
+            "vram_used",
+            "vram_total",
+        ];
+        KEYS.iter().any(|k| needed.contains(*k))
+    }
 
     fn poll(&mut self) -> Result<Vec<SensorReading>> {
+        // If needed_keys is set and none of our keys are needed, skip entirely.
+        if let Some(ref needed) = self.needed_keys {
+            const KEYS: &[&str] = &[
+                "gpu_temp",
+                "gpu_util",
+                "gpu_power",
+                "vram_used",
+                "vram_total",
+            ];
+            if !KEYS.iter().any(|k| needed.contains(*k)) {
+                return Ok(Vec::new());
+            }
+        }
         let mut readings = Vec::new();
 
         // Scan all card* directories
@@ -160,5 +192,14 @@ impl SensorProvider for AmdGpuProvider {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+    fn declared_keys(&self) -> Vec<&str> {
+        vec![
+            "gpu_temp",
+            "gpu_util",
+            "gpu_power",
+            "vram_used",
+            "vram_total",
+        ]
     }
 }

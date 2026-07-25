@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use log::{info, warn};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +15,8 @@ use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::SvgRenderer;
 use thermalwriter::render::{FrameSource, background as bg_decode};
 use thermalwriter::sensor::SensorHub;
-use thermalwriter::sensor::default_needed_keys;
 use thermalwriter::sensor::history::SensorHistory;
+use thermalwriter::sensor::layout_needed_keys;
 use thermalwriter::service::dbus::{self, ModeChange, ServiceState};
 use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
 use thermalwriter::service::tick::{
@@ -80,6 +81,52 @@ async fn apply_source_revision(
         Err(_) => Err(anyhow::anyhow!(
             "tick loop dropped source revision acknowledgement"
         )),
+    }
+}
+/// Compute layout-derived needed keys from a layout file and send them on the
+/// watch channel. Reads the sensor catalog (shared, updated by the tick loop
+/// after each poll) to resolve known keys. If the catalog is empty (pre-discovery),
+/// sends `None` so the tick loop falls back to full discovery.
+fn send_layout_needed_keys(
+    layout_path: &std::path::Path,
+    vars: &HashMap<String, String>,
+    sensor_descriptors: &Arc<std::sync::Mutex<Vec<(String, String, String, u64)>>>,
+    declared_keys: &HashSet<String>,
+    needed_tx: &tokio::sync::watch::Sender<Option<HashSet<String>>>,
+    recipe_tx: &tokio::sync::watch::Sender<Option<thermalwriter::sensor::LayoutSensorRecipe>>,
+) {
+    let Ok(template) = std::fs::read_to_string(layout_path) else {
+        return;
+    };
+    let frontmatter = thermalwriter::render::frontmatter::LayoutFrontmatter::parse(&template);
+    let known: HashSet<String> = sensor_descriptors
+        .lock()
+        .map(|guard| guard.iter().map(|(k, _, _, _)| k.clone()).collect())
+        .unwrap_or_default();
+    if known.is_empty() {
+        // Pre-discovery: send None for full discovery, but still record the recipe.
+        let _ = recipe_tx.send(Some(thermalwriter::sensor::LayoutSensorRecipe {
+            template: template.clone(),
+            vars: vars.clone(),
+        }));
+        let _ = needed_tx.send(None);
+        return;
+    }
+    let needed = thermalwriter::sensor::layout_needed_keys(
+        &frontmatter,
+        vars,
+        &template,
+        &known,
+        declared_keys,
+    );
+    let _ = recipe_tx.send(Some(thermalwriter::sensor::LayoutSensorRecipe {
+        template,
+        vars: vars.clone(),
+    }));
+    if !needed.is_empty() {
+        let _ = needed_tx.send(Some(needed));
+    } else {
+        let _ = needed_tx.send(None);
     }
 }
 
@@ -213,6 +260,10 @@ async fn main() -> Result<()> {
             .map(|d| (d.key, d.name, d.unit, d.cost_us))
             .collect::<Vec<_>>(),
     ));
+    // Canonical keys declared by providers (regardless of current readability).
+    // Shared with the mode listener so layout-needed-key derivation can include
+    // transiently-unreadable sensors (e.g. RAPL's cpu_power).
+    let declared_keys = Arc::new(sensor_hub.declared_keys());
 
     // Generation-tagged source rebuild channel (tick → listener request, listener → tick result)
     let (source_build_tx, mut source_build_rx) = mpsc::channel::<SourceBuildRequest>(4);
@@ -231,6 +282,13 @@ async fn main() -> Result<()> {
         watch::channel::<Option<Arc<BackgroundImage>>>(initial_background.clone());
     // Tick rate watch channel: D-Bus set_tick_rate → tick loop (no restart needed)
     let (tick_rate_tx, tick_rate_rx) = watch::channel::<u32>(config.display.tick_rate);
+    // Needed-keys watch channel: main.rs / mode listener → tick loop.
+    // None = full discovery (pre-catalog or xvfb). Some(set) = prune to layout needs.
+    let (needed_tx, needed_rx) = watch::channel::<Option<HashSet<String>>>(None);
+    // Active layout recipe: lets the tick loop recompute needed keys when the
+    // catalog transitions from empty to non-empty.
+    let (recipe_tx, recipe_rx) =
+        watch::channel::<Option<thermalwriter::sensor::LayoutSensorRecipe>>(None);
     // Mode change channel (D-Bus → listener task)
     let (mode_tx, mut mode_rx) = mpsc::channel::<ModeChange>(4);
 
@@ -247,6 +305,9 @@ async fn main() -> Result<()> {
             }
             let (handle, source) = source_display.start_xvfb_shell(&config.xvfb.command)?;
             let boxed: Box<dyn FrameSource> = Box::new(source);
+            // Xvfb mode: sensors are unused for frame content — skip all
+            // optional provider work by sending an empty needed set.
+            let _ = needed_tx.send(Some(HashSet::new()));
             // History is allocated but not seeded with layout frontmatter — metrics get configured
             // when the user switches to a layout via D-Bus set_layout.
             (
@@ -289,21 +350,26 @@ async fn main() -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
 
-            // Adaptive prune: only spend poll budget on metrics this layout uses
-            // (plus the always-on desktop defaults).
-            let mut needed = default_needed_keys();
-            needed.extend(frontmatter.history_configs.keys().cloned());
-            for (name, decl) in &frontmatter.variables {
-                if decl.var_type == "sensor" {
-                    // sensor vars store a key name as their value/default
-                    if let Some(v) = layout_vars.get(name) {
-                        needed.insert(v.clone());
-                    } else if !decl.default.is_empty() {
-                        needed.insert(decl.default.clone());
-                    }
-                }
+            // Adaptive prune: only spend poll budget on metrics this layout
+            // actually displays. Derive from frontmatter + template tokens
+            // against the sensor catalog (built from the initial poll above).
+            let known: HashSet<String> = sensor_hub
+                .available_sensors()
+                .into_iter()
+                .map(|d| d.key)
+                .collect();
+            let declared: HashSet<String> = sensor_hub.declared_keys();
+            let needed =
+                layout_needed_keys(&frontmatter, &layout_vars, &template, &known, &declared);
+            if !needed.is_empty() {
+                let _ = needed_tx.send(Some(needed));
             }
-            sensor_hub.set_needed_keys(Some(needed));
+            // Send the recipe so the tick loop can recompute if the catalog
+            // transitions from empty to non-empty.
+            let _ = recipe_tx.send(Some(thermalwriter::sensor::LayoutSensorRecipe {
+                template: template.clone(),
+                vars: layout_vars.clone(),
+            }));
 
             let is_svg = resolved_layout.ends_with(".svg");
             let boxed: Box<dyn FrameSource> = if is_svg {
@@ -404,7 +470,10 @@ async fn main() -> Result<()> {
         .get(&initial_active_layout)
         .cloned()
         .unwrap_or_default();
+    let declared_keys_listener = Arc::clone(&declared_keys);
     let initial_xvfb_command = (config.display.mode == "xvfb").then(|| config.xvfb.command.clone());
+    let needed_tx_listener = needed_tx.clone();
+    let sensor_descriptors_listener = Arc::clone(&sensor_descriptors);
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
@@ -567,6 +636,14 @@ async fn main() -> Result<()> {
                                             "svg".to_string()
                                         };
                                         active_layout = name.clone();
+                                        send_layout_needed_keys(
+                                            &layout_path,
+                                            &vars,
+                                            &sensor_descriptors_listener,
+                                            &declared_keys_listener,
+                                            &needed_tx_listener,
+                                            &recipe_tx,
+                                        );
                                         active_layout_vars = vars;
                                         active_xvfb_shell = None;
                                         active_xvfb_argv = None;
@@ -599,6 +676,14 @@ async fn main() -> Result<()> {
                                         "svg".to_string()
                                     };
                                     active_layout = name.clone();
+                                    send_layout_needed_keys(
+                                        &layout_path,
+                                        &vars,
+                                        &sensor_descriptors_listener,
+                                        &declared_keys_listener,
+                                        &needed_tx_listener,
+                                        &recipe_tx,
+                                    );
                                     active_layout_vars = vars;
                                     active_xvfb_shell = None;
                                     active_xvfb_argv = None;
@@ -700,6 +785,8 @@ async fn main() -> Result<()> {
                                     xvfb_handle = Some(new_handle);
                                     current_display = mode_display;
                                     active_mode = "xvfb".to_string();
+                                    // Xvfb mode: sensors unused for frame content.
+                                    let _ = needed_tx_listener.send(Some(HashSet::new()));
                                     active_xvfb_shell = Some(command.clone());
                                     active_xvfb_argv = None;
                                     info!(
@@ -763,6 +850,8 @@ async fn main() -> Result<()> {
                                     active_mode = "xvfb".to_string();
                                     active_xvfb_shell = None;
                                     active_xvfb_argv = Some(argv.clone());
+                                    // Xvfb mode: sensors unused for frame content.
+                                    let _ = needed_tx_listener.send(Some(HashSet::new()));
                                     info!(
                                         "Switched to xvfb mode (argv): {:?} ({}fps, gen {generation})",
                                         argv, xvfb_tick_rate_cfg
@@ -814,6 +903,8 @@ async fn main() -> Result<()> {
             generation_tx,
             &mut source_revision_rx,
             tick_rate_rx,
+            needed_rx,
+            recipe_rx,
         ) => { res?; }
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT received, shutting down");

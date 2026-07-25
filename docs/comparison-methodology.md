@@ -89,14 +89,15 @@ reproduced at the bottom.
 
 | Configuration | CPU (% of one core) | avg RSS (MB) | peak RSS (MB) | avg PSS (MB) | peak PSS (MB) |
 |---|---|---|---|---|---|
-| thermalwriter daemon · 2 fps | **0.87** | 75.1 | 75.1 | 72.1 | 72.1 |
+| thermalwriter daemon · 2 fps | **0.41** | 84.4 | 84.4 | 81.3 | 81.3 |
 | TRCC-Linux daemon (headless) · 0.5 fps | 1.06 | 118.8 | 118.9 | 106.9 | 107.5 |
 | TRCC-Linux GUI · 0.5 fps | 1.26 | 301.4 | 301.4 | 284.2 | 284.2 |
 | thermalright-lcd-control GUI | 0.42 | 295.9 | 298.5 | 278.0 | 281.5 |
 
-thermalwriter remeasure after #91 + adaptive prune + catalog-cost fix
-(dirty-frame skip, NVML, spd5118 skip, needed-key hwmon prune). Binary SHA-256
-`6d427a5e47801740e6b0820b8cfc1a698938ed7d69489a58f3553938f512ff78`, sampled
+thermalwriter remeasure after #91 + adaptive prune + catalog-cost fix + 2000 ms poll
+(dirty-frame skip, NVML, spd5118 skip, needed-key hwmon prune, declared-key
+eligibility for transiently-unreadable sensors). Binary SHA-256
+`2b170253b3f135f494ba9c47b23e4d89c23c87962cc4fb9324a4c66cc5f11b5b`, sampled
 via `scripts/footprint_sampler.sh thermalwriter.service 60 60` against the
 user unit `ExecStart=%h/.cargo/bin/thermalwriter daemon` immediately after
 `cp target/release/thermalwriter ~/.cargo/bin/ && systemctl --user restart`.
@@ -141,8 +142,8 @@ tools still do different work per tick, but the gap is much smaller after
 - thermalwriter fingerprints the resolved template inputs (sensor strings,
   history series, layout vars, theme, background) each tick and **skips
   render/encode/send** when nothing displayed changed. The stock layout's
-  history graphs still force a real redraw at the sensor poll rate (1 Hz
-  default). GPU metrics come from **NVML** (in-process); `nvidia-smi` is only
+  history graphs still force a real redraw at the sensor poll rate (0.5 Hz
+  default, 2000 ms). GPU metrics come from **NVML** (in-process); `nvidia-smi` is only
   a fallback when NVML is unavailable.
 - TRCC-Linux polls sensors every tick but skips the render on a cache hit
   when nothing displayed changed (its stock theme shows integer °C readouts,
@@ -164,7 +165,7 @@ by a wide margin.
   running, the thermalwriter daemon's VmRSS sat at **7.2 MB** (with ~9.7 MB
   compressed into zram, VmHWM 24.9 MB). That figure is an observation from a
   single long-running instance, not part of the controlled protocol — quote
-  the **72.1 MB PSS** number from the table above, not the long-uptime
+  the **81.3 MB PSS** number from the table above, not the long-uptime
   observation, unless the uptime context is stated.
 - thermalwriter's peak in the first measured seconds is startup cost: the
   system font scan, NVML load, and decoding the 960×960 background image; it

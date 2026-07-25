@@ -86,7 +86,7 @@ pub struct SensorsConfig {
 impl Default for SensorsConfig {
     fn default() -> Self {
         Self {
-            poll_interval_ms: 1000,
+            poll_interval_ms: 2000,
             mangohud_log_dir: String::new(),
         }
     }

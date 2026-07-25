@@ -230,6 +230,8 @@ pub struct SvgRenderer<'a> {
     variable_overrides: HashMap<String, String>,
     background_source: Option<Arc<BackgroundImage>>,
     background: Option<Arc<Pixmap>>,
+    /// True if the layout declares animation_fps — content changes every frame.
+    time_varying: bool,
 }
 
 fn logical_canvas_dimensions(
@@ -271,13 +273,14 @@ impl<'a> SvgRenderer<'a> {
             height,
             logical_width,
             logical_height,
-            options,
-            history: None,
             theme: None,
+            history: None,
+            options,
             variable_defaults,
             variable_overrides: HashMap::new(),
             background_source: None,
             background: None,
+            time_varying: frontmatter.animation_fps.is_some(),
         })
     }
 
@@ -575,6 +578,9 @@ impl FrameSource for SvgRenderer<'static> {
     fn name(&self) -> &str {
         "svg"
     }
+    fn is_time_varying(&self) -> bool {
+        self.time_varying
+    }
 
     fn set_template(&mut self, template: &str) {
         // Re-add template to the persistent Tera instance. Keep the active options
@@ -594,6 +600,7 @@ impl FrameSource for SvgRenderer<'static> {
             .iter()
             .map(|(name, decl)| (name.clone(), decl.default.clone()))
             .collect();
+        self.time_varying = frontmatter.animation_fps.is_some();
     }
 
     fn set_background(&mut self, bg: Option<Arc<BackgroundImage>>) -> anyhow::Result<()> {
@@ -601,6 +608,10 @@ impl FrameSource for SvgRenderer<'static> {
     }
 
     fn content_fingerprint(&self, sensors: &SensorData) -> Option<u64> {
+        // Animated layouts change every frame — always dirty.
+        if self.time_varying {
+            return None;
+        }
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         "svg".hash(&mut hasher);
