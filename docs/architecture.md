@@ -37,9 +37,11 @@ GUI release packaging is separate from crates.io publication of the daemon crate
 `tray/` is a workspace member that builds `thermalwriter-tray`. It is intentionally **not** part of the headless daemon and **not** the Tauri process:
 
 - Implements freedesktop StatusNotifierItem via `ksni` (pure D-Bus, no GTK/WebKit).
-- Uses `thermalwriter::dbus_types::DisplayProxy` with `default-features = false`.
-- Spawns the Config GUI as an external process; left-click and the Open Config menu item share that path.
-- Idle path is event-driven (menu callbacks + D-Bus). No status polling timers.
+- Inlines a minimal D-Bus proxy for `com.thermalwriter.Display` (does **not** link the full `thermalwriter` library, to avoid pulling render/sensor deps into the tray binary). Keep method signatures aligned with `src/dbus_types.rs`.
+- Ships multi-size ARGB `IconPixmap` data and leaves `IconName` empty. Hosts that prefer theme names without falling back to pixmaps (notably Quickshell/Noctalia) otherwise show a missing-icon placeholder.
+- Menu items are text-only; no freedesktop `icon-name` entries (same missing-icon issue on some hosts). The active layout is marked with a `✓` prefix.
+- Spawns the Config GUI as an external process (left-click and **Open Config…** share that path). Launch order: `hyprctl dispatch exec` → `systemd-run --user` → direct `setsid` spawn. After launch, the tray focuses/moves the window onto the current Hyprland workspace when possible.
+- Idle path is event-driven (menu callbacks + D-Bus). No status polling timers. SNI registration retries while the tray host starts.
 
 The tray unit is `systemd/thermalwriter-tray.service` (`WantedBy=graphical-session.target`). Packaging also drops an XDG autostart `.desktop` for desktops that do not start that target.
 

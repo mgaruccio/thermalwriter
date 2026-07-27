@@ -69,13 +69,15 @@ The daemon validates streamed executables as absolute paths before launch. Built
 
 `thermalwriter-tray` is a separate, lightweight StatusNotifierItem process (not the Tauri GUI). It stays idle on the session bus with no timers and no WebKit, and talks to the daemon through the same D-Bus API as `thermalwriter ctl`.
 
-### Menu
-- **Open Config…** — launches `thermalwriter-gui` (or `$THERMALWRITER_GUI`)
-- **Layouts** — quick-switch any layout the daemon reports
-- **Stream** — start `conky` / `cava` / `btop` presets; **Return to layout** while streaming
-- **Reload config** / **Stop daemon** / **Quit tray**
+### Controls
+- **Left-click** — open or focus the Config GUI (`thermalwriter-gui`, or `$THERMALWRITER_GUI`)
+- **Right-click menu**
+  - **Open Config…**
+  - **Layouts** — quick-switch any layout the daemon reports (active layout marked with `✓`)
+  - **Stream** — start `conky` / `cava` / `btop` presets; **Return to layout** while streaming
+  - **Reload config** / **Refresh status** / **Stop daemon** / **Quit tray**
 
-Left-click the icon also opens the Config GUI.
+The menu is text-only (no freedesktop theme icon names). Hosts like Noctalia/Quickshell render missing-icon tiles for unresolved `icon-name` values, so the tray intentionally omits them.
 
 ### Install
 
@@ -93,4 +95,13 @@ Override the GUI launcher if it is not on `PATH`:
 
 ```sh
 export THERMALWRITER_GUI=/path/to/Thermalwriter.AppImage
+# or install the binary somewhere on PATH:
+#   install -m0755 target/release/thermalwriter-gui ~/.cargo/bin/
 ```
+
+### Desktop notes (Hyprland / Noctalia)
+
+- The tray icon is an embedded multi-size **pixmap** with an empty `IconName`. Quickshell prefers `IconName` via `QIcon::fromTheme` and does **not** fall back to `IconPixmap` when the theme name is missing, so a non-empty unresolved name becomes the purple missing-icon tile.
+- Left-click launches the GUI detached (`hyprctl dispatch exec`, then `systemd-run --user`, then a direct spawn). After launch the tray moves/focuses the window onto the **current** Hyprland workspace (Tauri often restores on a stale workspace otherwise).
+- The tray resolves the live Hyprland instance by lock file + `.socket.sock` under `$XDG_RUNTIME_DIR/hypr/`, because `/proc/Hyprland/environ` can retain a stale `HYPRLAND_INSTANCE_SIGNATURE`.
+- On Noctalia, pin `Thermalwriter*` / `thermalwriter*` in the bar Tray widget if you want the icon inline instead of only in the tray drawer.

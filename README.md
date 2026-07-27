@@ -164,7 +164,7 @@ chmod +x ./Thermalwriter*.AppImage
 
 ### System tray
 
-`thermalwriter-tray` is a tiny StatusNotifierItem helper (separate from the Tauri GUI) for opening Config, switching layouts, and starting stream presets. Source installs enable it by default:
+`thermalwriter-tray` is a tiny StatusNotifierItem helper (separate from the Tauri GUI) for opening Config, switching layouts, and starting stream presets. Left-click opens/focuses the Config GUI; right-click shows a text-only menu. Source installs enable it by default:
 
 ```sh
 ./packaging/install.sh                 # daemon + tray
@@ -173,7 +173,7 @@ cargo install --path tray --locked     # tray binary alone
 thermalwriter-tray &
 ```
 
-Point it at a non-PATH GUI binary with `THERMALWRITER_GUI=/path/to/AppImage`.
+Point it at a non-PATH GUI binary with `THERMALWRITER_GUI=/path/to/AppImage`. See `docs/gui.md` for Hyprland/Noctalia notes.
 
 Uninstall the service and installed binaries:
 

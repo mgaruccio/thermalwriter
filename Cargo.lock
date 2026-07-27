@@ -6070,6 +6070,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "ksni",
+ "libc",
  "log",
  "png 0.17.16",
  "tokio",
