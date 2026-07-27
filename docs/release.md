@@ -66,14 +66,14 @@ Before public announcement posts, validate the **tagged release artifacts** (not
 
 ```sh
 # L0 — checksums, tarball layout, README relative links (no VMs)
-./scripts/release-qa/host/run-l0.sh v0.1.2
+./scripts/release-qa/host/run-l0.sh v0.1.3
 
 # L1 — Ubuntu 24.04 tarball + GUI packages; Arch source install + AppImage
 # Requires KVM, qemu-system-x86_64, qemu-img, cloud-localds (cloud-image-utils).
-./scripts/release-qa/host/run-all.sh v0.1.2
+./scripts/release-qa/host/run-all.sh v0.1.3
 
 # Tray SNI smoke on Ubuntu GNOME AppIndicator + Arch KDE Plasma watcher hosts
-./scripts/release-qa/host/run-tray-desktop.sh v0.1.2
+./scripts/release-qa/host/run-tray-desktop.sh v0.1.3
 
 # L2 — host cooler unplug/replug (connected transitions); interactive
 ./scripts/release-qa/host/hw-attach-smoke.sh

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-27
+
+### Added
+- Gallery announce media: animated layout GIFs (neon-dash-v2 lead, neon-dash, arc-gauge, cyber-grid) and a live `cava` stream GIF under `docs/assets/gallery/`. Offline multi-frame helper: `cargo run --release --example render_gallery_frames`.
+
+### Fixed
+- Xvfb stream sessions start with `-nocursor` so cooler frames / GUI stream preview / cava captures no longer include a pointer sprite.
+- Tray no longer double-registers on desktops that run both systemd user units and XDG autostart (installer prefers one path; binary takes a single-instance flock on `$XDG_RUNTIME_DIR/thermalwriter/tray.lock`).
+
 ## [0.1.2] - 2026-07-27
 
 ### Added

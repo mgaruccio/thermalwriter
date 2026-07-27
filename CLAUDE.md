@@ -4,7 +4,7 @@ Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Posi
 
 ## Project State
 
-- **Latest release**: `v0.1.2` (tray + packaging fix cut; see `CHANGELOG.md`). Prior tags: `v0.1.1` (CPU/sensor work), `v0.1.0` (initial public beta). Repo: https://github.com/mgaruccio/thermalwriter
+- **Latest release**: `v0.1.3` (tray single-instance + gallery GIFs + Xvfb `-nocursor`; see `CHANGELOG.md`). Prior: `v0.1.2` (tray package), `v0.1.1` (CPU/sensor), `v0.1.0` (initial public beta). Repo: https://github.com/mgaruccio/thermalwriter
 - **Footprint (measured, `docs/comparison-methodology.md` + README charts)**: **0.41% of one core** and ~81 MB PSS at default 2 FPS (stock neon-dash, NVML, dirty-frame skip, 2000 ms poll); ~20 MB release daemon binary. Frame-path micros in `docs/profiling-baselines.md`.
 - **Closed announcement gates**: #91 (CPU under TRCC default) and #90 (clean-machine multi-distro L0/L1 install QA). Release process: `docs/release.md` + `scripts/release-qa/`.
 - **Shipped since v0.1.0**: dirty-frame skip, NVML worker, adaptive/layout-needed sensor prune, 2000 ms default poll, `thermalwriter-tray` StatusNotifier controller (pixmap-only icon; Hyprland/Noctalia + GNOME AppIndicator + KDE Plasma SNI hosts).

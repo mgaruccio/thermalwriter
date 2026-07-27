@@ -6,9 +6,9 @@ Clean-machine install validation for thermalwriter release artifacts.
 
 | Layer | What | Command |
 | --- | --- | --- |
-| **L0** | Checksums, tarball layout (incl. tray), README relative links | `host/run-l0.sh v0.1.2` |
-| **L1** | Ubuntu tarball + GUI packages; Arch source + AppImage | `host/run-l1.sh v0.1.2` |
-| **Tray** | SNI registration on Ubuntu GNOME AppIndicator + Arch KDE/kded | `host/run-tray-desktop.sh v0.1.2` |
+| **L0** | Checksums, tarball layout (incl. tray), README relative links | `host/run-l0.sh v0.1.3` |
+| **L1** | Ubuntu tarball + GUI packages; Arch source + AppImage | `host/run-l1.sh v0.1.3` |
+| **Tray** | SNI registration on Ubuntu GNOME AppIndicator + Arch KDE/kded | `host/run-tray-desktop.sh v0.1.3` |
 | **L2** | Host cooler unplug/replug (`connected` transitions) | `host/hw-attach-smoke.sh` |
 
 L1 needs KVM (`/dev/kvm`), `qemu-system-x86_64`, `qemu-img`, and `cloud-localds` (package `cloud-image-utils`).
@@ -20,18 +20,18 @@ L1 needs KVM (`/dev/kvm`), `qemu-system-x86_64`, `qemu-img`, and `cloud-localds`
 sudo pacman -S --needed qemu-desktop edk2-ovmf cloud-image-utils cdrtools curl
 
 # Static checks only (no VMs)
-./scripts/release-qa/host/run-l0.sh v0.1.2
+./scripts/release-qa/host/run-l0.sh v0.1.3
 
 # Full clean-VM matrix (downloads cloud images on first run)
-./scripts/release-qa/host/run-all.sh v0.1.2
+./scripts/release-qa/host/run-all.sh v0.1.3
 
 # Tray SNI smoke (needs Ubuntu + Arch QA VMs up; GNOME AppIndicator / kded packages)
 ./scripts/release-qa/host/run-tray-desktop.sh --local-bin ./target/release/thermalwriter-tray
 # or against a published tag:
-# ./scripts/release-qa/host/run-tray-desktop.sh v0.1.2
+# ./scripts/release-qa/host/run-tray-desktop.sh v0.1.3
 
 # Ubuntu only / reset disks
-./scripts/release-qa/host/run-l1.sh v0.1.2 --ubuntu-only --reset-vms
+./scripts/release-qa/host/run-l1.sh v0.1.3 --ubuntu-only --reset-vms
 ```
 
 Artifacts cache: `${XDG_CACHE_HOME:-~/.cache}/thermalwriter-qa/artifacts/<tag>/`  
