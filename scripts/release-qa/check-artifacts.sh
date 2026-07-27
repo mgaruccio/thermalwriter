@@ -57,10 +57,13 @@ ROOT="$(find "$STAGE" -mindepth 1 -maxdepth 1 -type d | head -1)"
 
 expected_files=(
     bin/thermalwriter
+    bin/thermalwriter-tray
     packaging/install.sh
     packaging/uninstall.sh
+    packaging/thermalwriter-tray.desktop
     packaging/udev/99-thermalwriter-rapl.rules
     systemd/thermalwriter.service
+    systemd/thermalwriter-tray.service
     README.md
     LICENSE
     CHANGELOG.md
@@ -70,6 +73,7 @@ expected_files=(
     docs/gui.md
     docs/release.md
     docs/architecture.md
+    docs/comparison-methodology.md
 )
 
 for rel in "${expected_files[@]}"; do
@@ -84,6 +88,12 @@ if [[ -x "$ROOT/bin/thermalwriter" ]]; then
     pass "bin/thermalwriter is executable"
 else
     fail_item "bin/thermalwriter not executable"
+fi
+
+if [[ -x "$ROOT/bin/thermalwriter-tray" ]]; then
+    pass "bin/thermalwriter-tray is executable"
+else
+    fail_item "bin/thermalwriter-tray not executable"
 fi
 
 if [[ -x "$ROOT/packaging/install.sh" && -x "$ROOT/packaging/uninstall.sh" ]]; then

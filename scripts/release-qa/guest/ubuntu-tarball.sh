@@ -31,7 +31,8 @@ guest_cleanup_prior_install
 rm -rf "$EXTRACT"
 mkdir -p "$EXTRACT"
 tar -xzf "$TARBALL" -C "$EXTRACT" --strip-components=1
-chmod +x "$EXTRACT/packaging/install.sh" "$EXTRACT/packaging/uninstall.sh" "$EXTRACT/bin/thermalwriter"
+chmod +x "$EXTRACT/packaging/install.sh" "$EXTRACT/packaging/uninstall.sh" \
+    "$EXTRACT/bin/thermalwriter" "$EXTRACT/bin/thermalwriter-tray"
 
 # --- default CARGO_HOME install ---
 guest_log "running packaging/install.sh (default CARGO_HOME)"
@@ -41,10 +42,26 @@ guest_log "running packaging/install.sh (default CARGO_HOME)"
 )
 
 DEFAULT_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/thermalwriter"
+DEFAULT_TRAY="${CARGO_HOME:-$HOME/.cargo}/bin/thermalwriter-tray"
 if [[ -x "$DEFAULT_BIN" ]]; then
     guest_pass "binary installed at $DEFAULT_BIN"
 else
     guest_fail "binary missing at $DEFAULT_BIN"
+fi
+if [[ -x "$DEFAULT_TRAY" ]]; then
+    guest_pass "tray binary installed at $DEFAULT_TRAY"
+else
+    guest_fail "tray binary missing at $DEFAULT_TRAY"
+fi
+if [[ -f "$HOME/.config/systemd/user/thermalwriter-tray.service" ]]; then
+    guest_pass "tray systemd unit installed"
+else
+    guest_fail "tray systemd unit missing"
+fi
+if [[ -f "$HOME/.config/autostart/thermalwriter-tray.desktop" ]]; then
+    guest_pass "tray XDG autostart entry installed"
+else
+    guest_fail "tray XDG autostart entry missing"
 fi
 
 # Ensure PATH sees it for subsequent ctl calls
@@ -65,7 +82,7 @@ if [[ -x "$EXTRACT/packaging/uninstall.sh" ]]; then
     bash "$EXTRACT/packaging/uninstall.sh" || true
 fi
 # uninstall uses CARGO_HOME for binary path — also wipe default
-rm -f "$HOME/.cargo/bin/thermalwriter"
+rm -f "$HOME/.cargo/bin/thermalwriter" "$HOME/.cargo/bin/thermalwriter-tray"
 
 (
     cd "$EXTRACT"

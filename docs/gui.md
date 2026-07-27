@@ -99,9 +99,20 @@ export THERMALWRITER_GUI=/path/to/Thermalwriter.AppImage
 #   install -m0755 target/release/thermalwriter-gui ~/.cargo/bin/
 ```
 
-### Desktop notes (Hyprland / Noctalia)
+### Desktop notes
 
-- The tray icon is an embedded multi-size **pixmap** with an empty `IconName`. Quickshell prefers `IconName` via `QIcon::fromTheme` and does **not** fall back to `IconPixmap` when the theme name is missing, so a non-empty unresolved name becomes the purple missing-icon tile.
+StatusNotifierItem hosts validated for registration:
+
+| Host | Notes |
+| --- | --- |
+| **Hyprland + Quickshell/Noctalia** | Dev host. Pixmap-only icon (empty `IconName`) — Quickshell does not fall back from a missing theme name to `IconPixmap`. |
+| **GNOME (Ubuntu) + AppIndicator extension** | Needs `gnome-shell-extension-appindicator` (shipped/enabled on Ubuntu desktop). Extension provides `org.kde.StatusNotifierWatcher`. |
+| **KDE Plasma** | Native SNI via `kded` StatusNotifierWatcher. |
+
+Hyprland-specific launch behavior:
+
 - Left-click launches the GUI detached (`hyprctl dispatch exec`, then `systemd-run --user`, then a direct spawn). After launch the tray moves/focuses the window onto the **current** Hyprland workspace (Tauri often restores on a stale workspace otherwise).
 - The tray resolves the live Hyprland instance by lock file + `.socket.sock` under `$XDG_RUNTIME_DIR/hypr/`, because `/proc/Hyprland/environ` can retain a stale `HYPRLAND_INSTANCE_SIGNATURE`.
 - On Noctalia, pin `Thermalwriter*` / `thermalwriter*` in the bar Tray widget if you want the icon inline instead of only in the tray drawer.
+
+Menu items are text-only on every host (no freedesktop `icon-name` entries) so hosts that render missing-icon tiles stay clean.

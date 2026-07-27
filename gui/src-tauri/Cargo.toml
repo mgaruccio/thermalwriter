@@ -1,6 +1,6 @@
 [package]
 name = "thermalwriter-gui"
-version = "0.1.1"
+version = "0.1.2"
 description = "Configuration GUI for the thermalwriter cooler LCD daemon"
 edition = "2024"
 rust-version = "1.85"

@@ -176,10 +176,14 @@ guest_cleanup_prior_install() {
         fi
     done
     # Best-effort manual cleanup
+    systemctl --user disable --now thermalwriter-tray.service 2>/dev/null || true
     systemctl --user disable --now thermalwriter.service 2>/dev/null || true
     rm -f "$HOME/.config/systemd/user/thermalwriter.service"
+    rm -f "$HOME/.config/systemd/user/thermalwriter-tray.service"
+    rm -f "$HOME/.config/autostart/thermalwriter-tray.desktop"
     systemctl --user daemon-reload 2>/dev/null || true
     rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/thermalwriter"
+    rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/thermalwriter-tray"
     if [[ -f /etc/udev/rules.d/99-thermalwriter-rapl.rules ]]; then
         sudo rm -f /etc/udev/rules.d/99-thermalwriter-rapl.rules
         sudo udevadm control --reload-rules 2>/dev/null || true

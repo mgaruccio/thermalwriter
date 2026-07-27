@@ -25,8 +25,10 @@ jobs:
       - name: Install system dependencies (Daemon)
         run: sudo apt-get update && sudo apt-get install -y libudev-dev xvfb
 
-      - name: Build daemon
-        run: cargo build --release -p thermalwriter --locked
+      - name: Build daemon and tray
+        run: |
+          cargo build --release -p thermalwriter --locked
+          cargo build --release -p thermalwriter-tray --locked
 
       - name: Stage daemon archive
         run: |
@@ -37,13 +39,14 @@ jobs:
           mkdir -p "$STAGED_DIR/docs/assets"
           mkdir -p "$STAGED_DIR/skills/designing-layouts"
           cp target/release/thermalwriter "$STAGED_DIR/bin/"
+          cp target/release/thermalwriter-tray "$STAGED_DIR/bin/"
           cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md "$STAGED_DIR/"
           cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md "$STAGED_DIR/docs/"
           cp -r docs/assets/. "$STAGED_DIR/docs/assets/"
           cp skills/designing-layouts/SKILL.md "$STAGED_DIR/skills/designing-layouts/"
-          cp packaging/install.sh packaging/uninstall.sh "$STAGED_DIR/packaging/"
+          cp packaging/install.sh packaging/uninstall.sh packaging/thermalwriter-tray.desktop "$STAGED_DIR/packaging/"
           cp packaging/udev/99-thermalwriter-rapl.rules "$STAGED_DIR/packaging/udev/"
-          cp systemd/thermalwriter.service "$STAGED_DIR/systemd/"
+          cp systemd/thermalwriter.service systemd/thermalwriter-tray.service "$STAGED_DIR/systemd/"
           tar -czf "$STAGED_DIR.tar.gz" "$STAGED_DIR"
 
       - name: Install system dependencies (GUI)

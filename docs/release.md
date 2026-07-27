@@ -46,12 +46,16 @@ GitHub release automation runs on tag push (matching `v*`) or `workflow_dispatch
 
 1. **Daemon Tarball**: `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` containing:
    - `bin/thermalwriter` (release binary)
+   - `bin/thermalwriter-tray` (StatusNotifier tray controller)
    - `README.md`
    - `LICENSE`
    - `packaging/install.sh`
    - `packaging/uninstall.sh`
+   - `packaging/thermalwriter-tray.desktop`
    - `packaging/udev/99-thermalwriter-rapl.rules`
    - `systemd/thermalwriter.service`
+   - `systemd/thermalwriter-tray.service`
+   - public docs under `docs/` (including `comparison-methodology.md`)
 2. **GUI Debian Package**: `*.deb`
 3. **GUI AppImage**: `*.AppImage`
 4. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.
@@ -62,11 +66,14 @@ Before public announcement posts, validate the **tagged release artifacts** (not
 
 ```sh
 # L0 — checksums, tarball layout, README relative links (no VMs)
-./scripts/release-qa/host/run-l0.sh v0.1.1
+./scripts/release-qa/host/run-l0.sh v0.1.2
 
 # L1 — Ubuntu 24.04 tarball + GUI packages; Arch source install + AppImage
 # Requires KVM, qemu-system-x86_64, qemu-img, cloud-localds (cloud-image-utils).
-./scripts/release-qa/host/run-all.sh v0.1.1
+./scripts/release-qa/host/run-all.sh v0.1.2
+
+# Tray SNI smoke on Ubuntu GNOME AppIndicator + Arch KDE Plasma watcher hosts
+./scripts/release-qa/host/run-tray-desktop.sh v0.1.2
 
 # L2 — host cooler unplug/replug (connected transitions); interactive
 ./scripts/release-qa/host/hw-attach-smoke.sh

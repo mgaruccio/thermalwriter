@@ -4,13 +4,13 @@ Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Posi
 
 ## Project State
 
-- **v0.1.0 released 2026-07-24** — GitHub release with daemon tarball + GUI .deb/.AppImage + SHA256SUMS; repo public with topics, issue templates, `device-support` label
-- **GitHub**: https://github.com/mgaruccio/thermalwriter
-- **Footprint (measured, see `docs/profiling-baselines.md`)**: ~50 MB avg RSS and ~10.5 ms CPU/frame at 2 FPS (≈2% of one core), ~0.78 s to first frame, ~20 MB release binary — cite these; the earlier "14MB/29MB/1%" figures predate the profiling harness and are superseded
-- **Parked WIP**: MPRIS now-playing feature on `feature/now-playing` (draft PR #76 — tests green, 10 clippy warnings to clear before merge)
-- **Product-gap backlog**: issues #77–#90 (Intel iGPU provider, super-I/O cpu_fan aliases, multi-GPU selection, Xvfb test gating, font vendoring, AUR, `thermalwriter report` diagnostics, clean-VM release QA gate for announcements, …)
-- **Announcement blockers** (label `release-blocker`): #91 — steady-state CPU (2.52% @ 2 FPS) must drop below TRCC-Linux's daemon (1.06%); plan is skip-identical-frames / render-at-data-cadence / NVML instead of nvidia-smi fork (#80). #90 (clean-VM QA) is the other pre-announcement gate
-- **Pre-announcement launch collateral still needed**: hardware photos, cava-streaming GIF. DONE 2026-07-24: measured comparison graphs vs TRCC-Linux 9.9.2 + thermalright-lcd-control 2.0.0 — `docs/comparison-methodology.md` (protocol + all numbers), `docs/assets/comparison/*.svg` (regenerate via `scripts/make_comparison_charts.py`), README "How it compares" section, `scripts/footprint_sampler.sh` (cgroup/PSS sampler used for all tools). CPU is deliberately NOT a README chart (tools do different per-tick work — conditional render vs unconditional; see the doc's CPU section before quoting CPU numbers)
+- **Latest release**: `v0.1.2` (tray + packaging fix cut; see `CHANGELOG.md`). Prior tags: `v0.1.1` (CPU/sensor work), `v0.1.0` (initial public beta). Repo: https://github.com/mgaruccio/thermalwriter
+- **Footprint (measured, `docs/comparison-methodology.md` + README charts)**: **0.41% of one core** and ~81 MB PSS at default 2 FPS (stock neon-dash, NVML, dirty-frame skip, 2000 ms poll); ~20 MB release daemon binary. Frame-path micros in `docs/profiling-baselines.md`.
+- **Closed announcement gates**: #91 (CPU under TRCC default) and #90 (clean-machine multi-distro L0/L1 install QA). Release process: `docs/release.md` + `scripts/release-qa/`.
+- **Shipped since v0.1.0**: dirty-frame skip, NVML worker, adaptive/layout-needed sensor prune, 2000 ms default poll, `thermalwriter-tray` StatusNotifier controller (pixmap-only icon; Hyprland/Noctalia + GNOME AppIndicator + KDE Plasma SNI hosts).
+- **Parked WIP**: MPRIS now-playing on `feature/now-playing` (draft PR #76).
+- **Product-gap backlog** (post-launch): #77–#89 (Intel iGPU, super-I/O aliases, multi-GPU pick, Xvfb test gating, font vendoring, AUR, RPM/AppStream, `thermalwriter report`, udev rule rename, MCP-bridge debug gate, …).
+- **Pre-announcement collateral still needed**: hardware photos, cava-streaming GIF. Comparison graphs vs TRCC-Linux 9.9.2 + thermalright-lcd-control 2.0.0 are done (`docs/assets/comparison/*.svg`, regenerate via `scripts/make_comparison_charts.py`).
 
 ## Architecture
 

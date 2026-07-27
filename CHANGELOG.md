@@ -4,11 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-27
+
 ### Added
 - `thermalwriter-tray`: lightweight StatusNotifierItem controller (`ksni`) for opening the Config GUI, switching layouts, starting stream presets, reloading config, and stopping the daemon. Separate process from both the headless daemon and the Tauri GUI; idle path is D-Bus event-driven with no polling timers. Optional install via `packaging/install.sh` (`INSTALL_TRAY=0` to skip) plus `systemd/thermalwriter-tray.service` and XDG autostart.
   - Pixmap-only tray icon (empty `IconName`) so Quickshell/Noctalia does not show a missing-icon tile.
   - Text-only context menu (no unresolved freedesktop `icon-name` entries); active layout marked with `✓`.
   - Detached GUI launch (`hyprctl` / `systemd-run`) with focus/move onto the current Hyprland workspace; live compositor instance resolved via lock + `.socket.sock`.
+- Release tarball now ships `bin/thermalwriter-tray`, `packaging/thermalwriter-tray.desktop`, and `systemd/thermalwriter-tray.service` alongside the daemon.
+- Clean-machine release QA harness under `scripts/release-qa/` (L0 artifact checks, multi-distro L1 install matrix, optional L2 host cable smoke).
+
+### Fixed
+- Release tarball stages `docs/comparison-methodology.md` (README relative link was broken in the published `v0.1.1` archive).
+- Cooler unplug/replug auto-detect no longer waits on Enter prompts during host cable smoke.
 
 ## [0.1.1] - 2026-07-25
 
