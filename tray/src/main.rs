@@ -502,33 +502,24 @@ async fn apply_status(handle: &ksni::Handle<ThermalTray>, status: DaemonStatus) 
 }
 
 fn open_gui() {
-    if gui_already_running() {
-        info!("Config GUI already running — not launching another copy");
-        // Best-effort focus on Hyprland; ignore failures on other compositors.
-        let _ = std::process::Command::new("hyprctl")
-            .args([
-                "dispatch",
-                "focuswindow",
-                "class:^(com\\.thermalwriter\\.config|thermalwriter-gui)$",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    if let Some(pid) = find_running_gui_pid() {
+        info!("Config GUI already running (pid {pid}) — focusing");
+        focus_gui_window(pid);
         return;
     }
 
     match find_gui_command() {
         Some((program, args)) => {
             info!("launching GUI: {} {:?}", program.display(), args);
-            match std::process::Command::new(&program)
-                .args(&args)
+            let mut cmd = std::process::Command::new(&program);
+            cmd.args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(_) => {}
+                .stderr(Stdio::null());
+            // Ensure graphical session vars exist when started from systemd.
+            inject_graphical_env(&mut cmd);
+            match cmd.spawn() {
+                Ok(child) => info!("Config GUI started (pid {})", child.id()),
                 Err(err) => error!("failed to launch GUI {}: {err}", program.display()),
             }
         }
@@ -540,34 +531,133 @@ fn open_gui() {
     }
 }
 
-/// True if a Config GUI process is already alive (binary or AppImage).
-fn gui_already_running() -> bool {
+/// PID of a real Config GUI process, if any.
+///
+/// Matches on `/proc/<pid>/exe` (not free-text cmdline) so agent shells / scripts
+/// that merely *mention* `thermalwriter-gui` are ignored.
+fn find_running_gui_pid() -> Option<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
+        return None;
     };
     for ent in entries.flatten() {
         let pid: u32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
-        // Skip ourselves.
         if pid == std::process::id() {
             continue;
         }
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        if cmdline.is_empty() {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        let Some(exe) = exe else {
             continue;
-        }
-        // cmdline is NUL-separated args.
-        let text = String::from_utf8_lossy(&cmdline).to_ascii_lowercase();
-        if text.contains("thermalwriter-gui")
-            || (text.contains("thermalwriter") && text.contains(".appimage") && text.contains("config"))
-            || text.contains("thermalwriter config")
-        {
-            return true;
+        };
+        let name = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        // Real binary name, or AppImage runtime whose path contains the product.
+        let path_lc = exe.to_string_lossy().to_ascii_lowercase();
+        let is_gui = name == "thermalwriter-gui"
+            || (name.contains("thermalwriter") && name.ends_with(".appimage") && name.contains("config"))
+            || path_lc.contains("/thermalwriter-gui");
+        if is_gui {
+            return Some(pid);
         }
     }
-    false
+    None
+}
+
+fn focus_gui_window(pid: u32) {
+    // Prefer address-by-pid so we don't depend on window class strings.
+    let mut cmd = std::process::Command::new("hyprctl");
+    cmd.args(["dispatch", "focuswindow", &format!("pid:{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    inject_graphical_env(&mut cmd);
+    if let Ok(status) = cmd.status() {
+        if status.success() {
+            return;
+        }
+    }
+    // Fallback: class match used by Tauri identifier.
+    let mut cmd = std::process::Command::new("hyprctl");
+    cmd.args([
+        "dispatch",
+        "focuswindow",
+        "class:^(com\\.thermalwriter\\.config)$",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    inject_graphical_env(&mut cmd);
+    let _ = cmd.status();
+}
+
+/// Copy compositor session vars from the running Hyprland process when missing.
+/// systemd user units sometimes lack `HYPRLAND_INSTANCE_SIGNATURE` even when
+/// `WAYLAND_DISPLAY` is present, which makes `hyprctl` no-op.
+fn inject_graphical_env(cmd: &mut std::process::Command) {
+    let need_his = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none();
+    let need_display = std::env::var_os("DISPLAY").is_none();
+    let need_wayland = std::env::var_os("WAYLAND_DISPLAY").is_none();
+    if !(need_his || need_display || need_wayland) {
+        return;
+    }
+    let Some(hypr_pid) = find_hyprland_pid() else {
+        return;
+    };
+    let Ok(environ) = std::fs::read(format!("/proc/{hypr_pid}/environ")) else {
+        return;
+    };
+    for entry in environ.split(|b| *b == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let Ok(s) = std::str::from_utf8(entry) else {
+            continue;
+        };
+        let Some((k, v)) = s.split_once('=') else {
+            continue;
+        };
+        match k {
+            "HYPRLAND_INSTANCE_SIGNATURE" if need_his => {
+                cmd.env(k, v);
+            }
+            "DISPLAY" if need_display => {
+                cmd.env(k, v);
+            }
+            "WAYLAND_DISPLAY" if need_wayland => {
+                cmd.env(k, v);
+            }
+            "XDG_RUNTIME_DIR" => {
+                // Always prefer compositor runtime dir if present.
+                if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+                    cmd.env(k, v);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn find_hyprland_pid() -> Option<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return None;
+    };
+    for ent in entries.flatten() {
+        let pid: u32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        let Some(exe) = exe else { continue };
+        if exe.file_name().and_then(|n| n.to_str()) == Some("Hyprland") {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 /// Resolve the GUI launcher.
