@@ -266,7 +266,6 @@ impl ksni::Tray for ThermalTray {
         items.push(
             StandardItem {
                 label: "Open Config…".into(),
-                icon_name: "preferences-system".into(),
                 activate: Box::new(|this: &mut Self| this.request(Action::OpenGui)),
                 ..Default::default()
             }
@@ -296,13 +295,15 @@ impl ksni::Tray for ThermalTray {
                     let checked = name == &self.status.active_layout
                         && self.status.mode != "xvfb";
                     let layout_name = name.clone();
+                    // No theme icon-name: Noctalia shows missing-icon tiles for
+                    // unresolved freedesktop names. Mark the active layout in text.
+                    let label = if checked {
+                        format!("✓ {label}")
+                    } else {
+                        label
+                    };
                     StandardItem {
                         label,
-                        icon_name: if checked {
-                            "object-select-symbolic".into()
-                        } else {
-                            String::new()
-                        },
                         activate: Box::new(move |this: &mut Self| {
                             this.request(Action::SetLayout(layout_name.clone()));
                         }),
@@ -369,7 +370,6 @@ impl ksni::Tray for ThermalTray {
         items.push(
             StandardItem {
                 label: "Reload config".into(),
-                icon_name: "view-refresh".into(),
                 enabled: self.status.online,
                 activate: Box::new(|this: &mut Self| this.request(Action::Reload)),
                 ..Default::default()
@@ -388,7 +388,6 @@ impl ksni::Tray for ThermalTray {
         items.push(
             StandardItem {
                 label: "Stop daemon".into(),
-                icon_name: "process-stop".into(),
                 enabled: self.status.online,
                 activate: Box::new(|this: &mut Self| this.request(Action::StopDaemon)),
                 ..Default::default()
@@ -400,7 +399,6 @@ impl ksni::Tray for ThermalTray {
         items.push(
             StandardItem {
                 label: "Quit tray".into(),
-                icon_name: "application-exit".into(),
                 activate: Box::new(|this: &mut Self| this.request(Action::Quit)),
                 ..Default::default()
             }
