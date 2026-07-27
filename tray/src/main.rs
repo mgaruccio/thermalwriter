@@ -502,6 +502,9 @@ async fn apply_status(handle: &ksni::Handle<ThermalTray>, status: DaemonStatus) 
 }
 
 fn open_gui() {
+    // Always reap first so dead children don't look "running".
+    reap_child_zombies();
+
     if let Some(pid) = find_running_gui_pid() {
         info!("Config GUI already running (pid {pid}) — focusing");
         focus_gui_window(pid);
@@ -511,16 +514,24 @@ fn open_gui() {
     match find_gui_command() {
         Some((program, args)) => {
             info!("launching GUI: {} {:?}", program.display(), args);
-            let mut cmd = std::process::Command::new(&program);
-            cmd.args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            // Ensure graphical session vars exist when started from systemd.
-            inject_graphical_env(&mut cmd);
-            match cmd.spawn() {
-                Ok(child) => info!("Config GUI started (pid {})", child.id()),
-                Err(err) => error!("failed to launch GUI {}: {err}", program.display()),
+            match launch_gui_detached(&program, &args) {
+                Ok(()) => {
+                    info!("Config GUI launch dispatched");
+                    // Give the window a moment to map, then pull it onto the
+                    // active workspace. Without this, Tauri often restores on
+                    // a stale workspace and left-click looks like a no-op.
+                    std::thread::spawn(|| {
+                        for _ in 0..20 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            if let Some(pid) = find_running_gui_pid() {
+                                focus_gui_window(pid);
+                                return;
+                            }
+                        }
+                        warn!("Config GUI did not appear within 2s after launch");
+                    });
+                }
+                Err(err) => error!("failed to launch GUI {}: {err:#}", program.display()),
             }
         }
         None => {
@@ -531,10 +542,100 @@ fn open_gui() {
     }
 }
 
-/// PID of a real Config GUI process, if any.
+/// Launch the GUI outside the tray's process tree so:
+/// 1) it gets a normal desktop session lifecycle
+/// 2) exits don't leave unreaped zombies that block re-launch
+fn launch_gui_detached(program: &Path, args: &[String]) -> Result<()> {
+    // Prefer hyprctl so the window is owned by the compositor session.
+    if let Some(hypr_pid) = find_hyprland_pid() {
+        let mut cmdline = shell_quote(&program.to_string_lossy());
+        for a in args {
+            cmdline.push(' ');
+            cmdline.push_str(&shell_quote(a));
+        }
+        let mut cmd = std::process::Command::new("hyprctl");
+        cmd.args(["dispatch", "exec", &cmdline])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        inject_graphical_env_from_pid(&mut cmd, hypr_pid);
+        let status = cmd
+            .status()
+            .context("hyprctl dispatch exec")?;
+        if status.success() {
+            return Ok(());
+        }
+        warn!("hyprctl exec failed ({status}); falling back to systemd-run");
+    }
+
+    // systemd --user scope: fully detached from the tray service cgroup.
+    let mut cmd = std::process::Command::new("systemd-run");
+    cmd.arg("--user")
+        .arg("--collect")
+        .arg("--same-dir")
+        .arg("--quiet")
+        .arg(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    inject_graphical_env(&mut cmd);
+    let status = cmd.status().context("systemd-run")?;
+    if status.success() {
+        return Ok(());
+    }
+
+    // Last resort: direct spawn + setsid (still reaped via reap_child_zombies).
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    inject_graphical_env(&mut cmd);
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // New session so we aren't tied to the tray's controlling terminal/cgroup signals.
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().context("spawn gui")?;
+    info!("Config GUI started directly (pid {})", child.id());
+    // Intentionally leak/detach: don't keep Child handle; zombies reaped periodically.
+    std::mem::forget(child);
+    Ok(())
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".into();
+    }
+    if s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_./:@+".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn reap_child_zombies() {
+    // Non-blocking wait for any exited children (GUI launches, etc.).
+    loop {
+        let mut status = 0;
+        let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if rc <= 0 {
+            break;
+        }
+    }
+}
+
+/// PID of a live Config GUI process, if any.
 ///
 /// Matches on `/proc/<pid>/exe` (not free-text cmdline) so agent shells / scripts
-/// that merely *mention* `thermalwriter-gui` are ignored.
+/// that merely *mention* `thermalwriter-gui` are ignored. Zombies are skipped.
 fn find_running_gui_pid() -> Option<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return None;
@@ -547,6 +648,16 @@ fn find_running_gui_pid() -> Option<u32> {
         if pid == std::process::id() {
             continue;
         }
+            // Skip zombies (state 'Z') — they still have an exe link briefly.
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // comm is in parentheses and may contain ')'; state is the next field.
+            if let Some(idx) = stat.rfind(')') {
+                let state = stat[idx + 1..].trim().chars().next().unwrap_or(' ');
+                if state == 'Z' || state == 'X' {
+                    continue;
+                }
+            }
+        }
         let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
         let Some(exe) = exe else {
             continue;
@@ -556,11 +667,12 @@ fn find_running_gui_pid() -> Option<u32> {
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        // Real binary name, or AppImage runtime whose path contains the product.
         let path_lc = exe.to_string_lossy().to_ascii_lowercase();
         let is_gui = name == "thermalwriter-gui"
-            || (name.contains("thermalwriter") && name.ends_with(".appimage") && name.contains("config"))
-            || path_lc.contains("/thermalwriter-gui");
+            || (name.contains("thermalwriter")
+                && name.ends_with(".appimage")
+                && name.contains("config"))
+            || path_lc.ends_with("/thermalwriter-gui");
         if is_gui {
             return Some(pid);
         }
@@ -569,47 +681,95 @@ fn find_running_gui_pid() -> Option<u32> {
 }
 
 fn focus_gui_window(pid: u32) {
-    // Prefer address-by-pid so we don't depend on window class strings.
-    let mut cmd = std::process::Command::new("hyprctl");
-    cmd.args(["dispatch", "focuswindow", &format!("pid:{pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    inject_graphical_env(&mut cmd);
-    if let Ok(status) = cmd.status() {
-        if status.success() {
-            return;
-        }
+    // Move to the active workspace first, then focus + raise.
+    // `movetoworkspace current` follows the focused monitor's active WS.
+    let ops = [
+        vec![
+            "dispatch".into(),
+            "movetoworkspace".into(),
+            format!("current,pid:{pid}"),
+        ],
+        vec!["dispatch".into(), "focuswindow".into(), format!("pid:{pid}")],
+        vec![
+            "dispatch".into(),
+            "alterzorder".into(),
+            "top".into(),
+            format!("pid:{pid}"),
+        ],
+    ];
+    for args in ops {
+        let mut cmd = std::process::Command::new("hyprctl");
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        inject_graphical_env(&mut cmd);
+        let _ = cmd.status();
     }
-    // Fallback: class match used by Tauri identifier.
-    let mut cmd = std::process::Command::new("hyprctl");
-    cmd.args([
-        "dispatch",
-        "focuswindow",
-        "class:^(com\\.thermalwriter\\.config)$",
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
-    inject_graphical_env(&mut cmd);
-    let _ = cmd.status();
 }
 
-/// Copy compositor session vars from the running Hyprland process when missing.
-/// systemd user units sometimes lack `HYPRLAND_INSTANCE_SIGNATURE` even when
-/// `WAYLAND_DISPLAY` is present, which makes `hyprctl` no-op.
+/// Graphical session bits needed to talk to the running compositor.
+#[derive(Debug, Clone)]
+struct GraphicalEnv {
+    his: Option<String>,
+    display: Option<String>,
+    wayland: Option<String>,
+    runtime_dir: Option<String>,
+    desktop: Option<String>,
+    session_type: Option<String>,
+}
+
 fn inject_graphical_env(cmd: &mut std::process::Command) {
-    let need_his = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none();
-    let need_display = std::env::var_os("DISPLAY").is_none();
-    let need_wayland = std::env::var_os("WAYLAND_DISPLAY").is_none();
-    if !(need_his || need_display || need_wayland) {
-        return;
+    if let Some(env) = resolve_graphical_env() {
+        apply_graphical_env(cmd, &env);
     }
-    let Some(hypr_pid) = find_hyprland_pid() else {
-        return;
-    };
-    let Ok(environ) = std::fs::read(format!("/proc/{hypr_pid}/environ")) else {
-        return;
+}
+
+fn inject_graphical_env_from_pid(cmd: &mut std::process::Command, hypr_pid: u32) {
+    if let Some(env) = resolve_graphical_env_for_pid(hypr_pid) {
+        apply_graphical_env(cmd, &env);
+    }
+}
+
+fn apply_graphical_env(cmd: &mut std::process::Command, env: &GraphicalEnv) {
+    if let Some(v) = &env.his {
+        cmd.env("HYPRLAND_INSTANCE_SIGNATURE", v);
+    }
+    if let Some(v) = &env.display {
+        cmd.env("DISPLAY", v);
+    }
+    if let Some(v) = &env.wayland {
+        cmd.env("WAYLAND_DISPLAY", v);
+    }
+    if let Some(v) = &env.runtime_dir {
+        cmd.env("XDG_RUNTIME_DIR", v);
+    }
+    if let Some(v) = &env.desktop {
+        cmd.env("XDG_CURRENT_DESKTOP", v);
+    }
+    if let Some(v) = &env.session_type {
+        cmd.env("XDG_SESSION_TYPE", v);
+    }
+    // Prefer wayland for Qt/Tauri children when under Hyprland.
+    if env.wayland.is_some() {
+        cmd.env("QT_QPA_PLATFORM", "wayland;xcb");
+    }
+}
+
+fn resolve_graphical_env() -> Option<GraphicalEnv> {
+    let hypr_pid = find_hyprland_pid()?;
+    resolve_graphical_env_for_pid(hypr_pid)
+}
+
+fn resolve_graphical_env_for_pid(hypr_pid: u32) -> Option<GraphicalEnv> {
+    let environ = std::fs::read(format!("/proc/{hypr_pid}/environ")).ok()?;
+    let mut env = GraphicalEnv {
+        his: None,
+        display: None,
+        wayland: None,
+        runtime_dir: None,
+        desktop: None,
+        session_type: None,
     };
     for entry in environ.split(|b| *b == 0) {
         if entry.is_empty() {
@@ -622,24 +782,82 @@ fn inject_graphical_env(cmd: &mut std::process::Command) {
             continue;
         };
         match k {
-            "HYPRLAND_INSTANCE_SIGNATURE" if need_his => {
-                cmd.env(k, v);
-            }
-            "DISPLAY" if need_display => {
-                cmd.env(k, v);
-            }
-            "WAYLAND_DISPLAY" if need_wayland => {
-                cmd.env(k, v);
-            }
-            "XDG_RUNTIME_DIR" => {
-                // Always prefer compositor runtime dir if present.
-                if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-                    cmd.env(k, v);
-                }
-            }
+            "HYPRLAND_INSTANCE_SIGNATURE" => env.his = Some(v.to_string()),
+            "DISPLAY" => env.display = Some(v.to_string()),
+            "WAYLAND_DISPLAY" => env.wayland = Some(v.to_string()),
+            "XDG_RUNTIME_DIR" => env.runtime_dir = Some(v.to_string()),
+            "XDG_CURRENT_DESKTOP" => env.desktop = Some(v.to_string()),
+            "XDG_SESSION_TYPE" => env.session_type = Some(v.to_string()),
             _ => {}
         }
     }
+
+    // `/proc/Hyprland/environ` can hold a STALE signature after compositor
+    // restarts. Prefer the live instance dir that owns `.socket.sock` and
+    // whose lock/pid matches this Hyprland process.
+    if let Some(live) = find_live_hyprland_signature(hypr_pid, env.runtime_dir.as_deref()) {
+        env.his = Some(live);
+    } else if let Some(his) = env.his.clone() {
+        // Drop unusable signature (no command socket).
+        let runtime = env
+            .runtime_dir
+            .clone()
+            .unwrap_or_else(|| format!("/run/user/{}", nix_uid()));
+        let sock = PathBuf::from(&runtime)
+            .join("hypr")
+            .join(&his)
+            .join(".socket.sock");
+        if !sock.exists() {
+            env.his = None;
+        }
+    }
+
+    Some(env)
+}
+
+fn nix_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+/// Locate the Hyprland instance signature that actually accepts `hyprctl`.
+fn find_live_hyprland_signature(hypr_pid: u32, runtime_dir: Option<&str>) -> Option<String> {
+    let runtime = runtime_dir
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", nix_uid())));
+    let hypr_root = runtime.join("hypr");
+    let entries = std::fs::read_dir(&hypr_root).ok()?;
+
+    let mut fallback: Option<String> = None;
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let sock = path.join(".socket.sock");
+        if !sock.exists() {
+            continue;
+        }
+        let name = path.file_name()?.to_string_lossy().into_owned();
+
+        // Prefer the instance whose lock file pid matches the running compositor.
+        let lock = path.join("hyprland.lock");
+        if let Ok(contents) = std::fs::read_to_string(&lock) {
+            // lock format is typically "pid\nsig" or just contains the pid.
+            if contents
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<u32>().ok())
+                == Some(hypr_pid)
+            {
+                return Some(name);
+            }
+        }
+
+        // Keep newest usable socket as fallback (by directory mtime).
+        fallback = Some(name);
+    }
+    fallback
 }
 
 fn find_hyprland_pid() -> Option<u32> {
@@ -893,10 +1111,22 @@ async fn main() -> Result<()> {
 
     info!("tray registered");
 
-    while let Some(action) = rx.recv().await {
-        debug!("action: {action:?}");
-        if !handle_action(action, &handle).await {
-            break;
+    // Periodically reap any direct children (defensive; normal path detaches GUI).
+    let mut reap = tokio::time::interval(std::time::Duration::from_secs(5));
+    reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = reap.tick() => {
+                reap_child_zombies();
+            }
+            action = rx.recv() => {
+                let Some(action) = action else { break; };
+                debug!("action: {action:?}");
+                if !handle_action(action, &handle).await {
+                    break;
+                }
+            }
         }
     }
 
