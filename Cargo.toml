@@ -35,6 +35,7 @@ include = [
     "/layouts/wrappers/**",
     "/packaging/**",
     "/systemd/**",
+    "/tray/**",
     "/docs/architecture.md",
     "/docs/release.md",
     "/docs/configuration.md",
@@ -46,7 +47,7 @@ include = [
 ]
 
 [workspace]
-members = [".", "gui/src-tauri"]
+members = [".", "gui/src-tauri", "tray"]
 default-members = ["."]
 
 [[bin]]

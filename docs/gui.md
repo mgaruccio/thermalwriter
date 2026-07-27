@@ -62,3 +62,35 @@ The daemon validates streamed executables as absolute paths before launch. Built
 ### Target Framerate (FPS)
 - You can adjust the stream frame rate using the FPS slider or number input.
 - Allowed FPS range: **`1..=60`**.
+
+---
+
+## System Tray
+
+`thermalwriter-tray` is a separate, lightweight StatusNotifierItem process (not the Tauri GUI). It stays idle on the session bus with no timers and no WebKit, and talks to the daemon through the same D-Bus API as `thermalwriter ctl`.
+
+### Menu
+- **Open Config…** — launches `thermalwriter-gui` (or `$THERMALWRITER_GUI`)
+- **Layouts** — quick-switch any layout the daemon reports
+- **Stream** — start `conky` / `cava` / `btop` presets; **Return to layout** while streaming
+- **Reload config** / **Stop daemon** / **Quit tray**
+
+Left-click the icon also opens the Config GUI.
+
+### Install
+
+Source installs enable the tray by default:
+
+```sh
+./packaging/install.sh          # daemon + tray
+INSTALL_TRAY=0 ./packaging/install.sh   # daemon only
+cargo install --path tray --locked      # tray binary alone
+```
+
+The installer writes `~/.config/systemd/user/thermalwriter-tray.service` (`WantedBy=graphical-session.target`) and an XDG autostart entry as a fallback. Start manually with `thermalwriter-tray`.
+
+Override the GUI launcher if it is not on `PATH`:
+
+```sh
+export THERMALWRITER_GUI=/path/to/Thermalwriter.AppImage
+```

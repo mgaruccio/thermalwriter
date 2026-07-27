@@ -15,15 +15,21 @@ if [[ $EUID -eq 0 ]]; then
     exit 1
 fi
 
-echo "==> Stopping and disabling thermalwriter user service..."
+echo "==> Stopping and disabling thermalwriter user services..."
+systemctl --user disable --now thermalwriter-tray.service 2>/dev/null || true
 systemctl --user disable --now thermalwriter.service 2>/dev/null || true
 
-echo "==> Removing systemd user service..."
+echo "==> Removing systemd user services..."
 rm -f "$SYSTEMD_USER_DIR/thermalwriter.service"
+rm -f "$SYSTEMD_USER_DIR/thermalwriter-tray.service"
 systemctl --user daemon-reload
 
-echo "==> Removing installed binary..."
+echo "==> Removing autostart entry..."
+rm -f "$HOME/.config/autostart/thermalwriter-tray.desktop"
+
+echo "==> Removing installed binaries..."
 rm -f "$CARGO_BIN/thermalwriter"
+rm -f "$CARGO_BIN/thermalwriter-tray"
 
 if [[ -f "$UDEV_RULE" ]]; then
     echo "==> Removing thermalwriter udev rule (sudo required)..."

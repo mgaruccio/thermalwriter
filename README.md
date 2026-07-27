@@ -162,7 +162,20 @@ chmod +x ./Thermalwriter*.AppImage
 ./Thermalwriter*.AppImage
 ```
 
-Uninstall the service and installed binary:
+### System tray
+
+`thermalwriter-tray` is a tiny StatusNotifierItem helper (separate from the Tauri GUI) for opening Config, switching layouts, and starting stream presets. Source installs enable it by default:
+
+```sh
+./packaging/install.sh                 # daemon + tray
+INSTALL_TRAY=0 ./packaging/install.sh  # daemon only
+cargo install --path tray --locked     # tray binary alone
+thermalwriter-tray &
+```
+
+Point it at a non-PATH GUI binary with `THERMALWRITER_GUI=/path/to/AppImage`.
+
+Uninstall the service and installed binaries:
 
 ```sh
 ./packaging/uninstall.sh

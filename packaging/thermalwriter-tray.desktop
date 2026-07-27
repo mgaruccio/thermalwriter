@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Thermalwriter Tray
+Comment=System tray controller for Thermalright LCD coolers
+Exec=thermalwriter-tray
+Icon=thermalwriter
+Terminal=false
+Categories=Utility;System;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-UsesNotifications=false

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`thermalwriter` is a Rust 2024 daemon for Thermalright LCD coolers. Core source lives in `src/`: `main.rs` and `cli.rs` wire the binary, `config.rs` handles user config, `transport/` owns USB bulk transfer, `render/` contains SVG/HTML/Xvfb frame sources, `sensor/` contains metric providers, and `service/` contains daemon tick, D-Bus, and Xvfb code. Integration tests live in `tests/`. Development utilities live in `examples/`. Built-in layouts are under `layouts/`, with fonts and assets in `assets/`. Deployment files are in `packaging/` and `systemd/`. Layout guidance is in `skills/designing-layouts/`.
+`thermalwriter` is a Rust 2024 daemon for Thermalright LCD coolers. Core source lives in `src/`: `main.rs` and `cli.rs` wire the binary, `config.rs` handles user config, `transport/` owns USB bulk transfer, `render/` contains SVG/HTML/Xvfb frame sources, `sensor/` contains metric providers, and `service/` contains daemon tick, D-Bus, and Xvfb code. Integration tests live in `tests/`. Development utilities live in `examples/`. Built-in layouts are under `layouts/`, with fonts and assets in `assets/`. The optional Config GUI is under `gui/`; the lightweight system tray is the `tray/` workspace member (`thermalwriter-tray`). Deployment files are in `packaging/` and `systemd/`. Layout guidance is in `skills/designing-layouts/`.
 
 ## Build, Test, and Development Commands
 
@@ -12,7 +12,8 @@
 - `cargo run --example preview_layout layouts/svg/neon-dash-v2.svg` renders a layout preview PNG without USB hardware.
 - `cargo run --example render_layout layouts/svg/neon-dash-v2.svg 15 --mock` renders to the device for 15 seconds with mock sensor data.
 - `cargo run --features blitz --example preview_blitz layouts/blitz-glass.html` exercises the experimental Blitz renderer.
-- `./packaging/install.sh` installs the binary, user systemd service, and udev rule; it may prompt for sudo.
+- `cargo run -p thermalwriter-tray` starts the StatusNotifier tray (needs a desktop tray host + session bus).
+- `./packaging/install.sh` installs the daemon binary, optional tray (`INSTALL_TRAY=0` to skip), user systemd services, and udev rule; it may prompt for sudo.
 
 ## Coding Style & Naming Conventions
 

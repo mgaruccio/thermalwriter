@@ -1,0 +1,16 @@
+[Unit]
+Description=Thermalwriter system tray controller
+Documentation=https://github.com/mgaruccio/thermalwriter
+After=graphical-session.target thermalwriter.service
+Wants=thermalwriter.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/thermalwriter-tray
+Restart=on-failure
+RestartSec=3
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

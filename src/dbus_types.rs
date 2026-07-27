@@ -4,6 +4,10 @@
 // GUI crate can build against it without depending on the daemon feature set.
 // Keeping it out of the `cli` module lets `--no-default-features` builds
 // (library-only) still expose the proxy for downstream consumers.
+//
+// The tray binary (`tray/`) intentionally inlines a minimal subset of this
+// proxy instead of depending on this crate (avoids linking render/sensor).
+// When changing method signatures here, update `tray/src/main.rs` too.
 
 use std::collections::HashMap;
 

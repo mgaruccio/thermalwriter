@@ -1,6 +1,6 @@
 # Architecture
 
-thermalwriter is a Rust daemon plus an optional Tauri configuration GUI for Thermalright cooler LCD displays.
+thermalwriter is a Rust daemon plus an optional Tauri configuration GUI and a lightweight system-tray controller for Thermalright cooler LCD displays.
 
 ## Daemon
 
@@ -31,6 +31,17 @@ The D-Bus interface is `com.thermalwriter.Display` at `/com/thermalwriter/displa
 The GUI lives in `gui/` and uses Svelte 5 with Tauri 2. It depends on the daemon crate with default features disabled so it can reuse config, rendering, and preview code without linking daemon-only USB paths.
 
 GUI release packaging is separate from crates.io publication of the daemon crate.
+
+## System tray
+
+`tray/` is a workspace member that builds `thermalwriter-tray`. It is intentionally **not** part of the headless daemon and **not** the Tauri process:
+
+- Implements freedesktop StatusNotifierItem via `ksni` (pure D-Bus, no GTK/WebKit).
+- Uses `thermalwriter::dbus_types::DisplayProxy` with `default-features = false`.
+- Spawns the Config GUI as an external process; left-click and the Open Config menu item share that path.
+- Idle path is event-driven (menu callbacks + D-Bus). No status polling timers.
+
+The tray unit is `systemd/thermalwriter-tray.service` (`WantedBy=graphical-session.target`). Packaging also drops an XDG autostart `.desktop` for desktops that do not start that target.
 
 ## Multi-cooler transport
 

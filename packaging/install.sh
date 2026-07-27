@@ -14,7 +14,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 INSTALLED_BIN="$CARGO_BIN/thermalwriter"
+INSTALLED_TRAY_BIN="$CARGO_BIN/thermalwriter-tray"
 PREBUILT_BIN="$PROJECT_DIR/bin/thermalwriter"
+PREBUILT_TRAY_BIN="$PROJECT_DIR/bin/thermalwriter-tray"
+# Install the lightweight StatusNotifier tray by default (set INSTALL_TRAY=0 to skip).
+INSTALL_TRAY="${INSTALL_TRAY:-1}"
 
 if [[ $EUID -eq 0 ]]; then
     echo "Run this as your normal user, not root. It will prompt for sudo when needed." >&2
@@ -76,6 +80,19 @@ if [[ ! -x "$INSTALLED_BIN" ]]; then
     exit 1
 fi
 
+if [[ "$INSTALL_TRAY" == "1" ]]; then
+    if [[ -x "$PREBUILT_TRAY_BIN" ]]; then
+        echo "==> Installing bundled thermalwriter-tray binary..."
+        mkdir -p "$CARGO_BIN"
+        install -m 0755 "$PREBUILT_TRAY_BIN" "$INSTALLED_TRAY_BIN"
+    elif [[ -f "$PROJECT_DIR/tray/Cargo.toml" ]]; then
+        echo "==> Building and installing thermalwriter-tray binary..."
+        ( cd "$PROJECT_DIR" && cargo install --path tray --locked )
+    else
+        echo "==> Skipping tray install (no tray sources or bundled binary)"
+        INSTALL_TRAY=0
+    fi
+fi
 
 echo "==> Installing systemd user service..."
 mkdir -p "$SYSTEMD_USER_DIR"
@@ -109,10 +126,61 @@ echo "==> Enabling and (re)starting the service..."
 systemctl --user enable thermalwriter.service
 systemctl --user restart thermalwriter.service
 
+if [[ "$INSTALL_TRAY" == "1" && -x "$INSTALLED_TRAY_BIN" ]]; then
+    echo "==> Installing thermalwriter-tray user service..."
+    SYSTEMD_TRAY_BIN="${INSTALLED_TRAY_BIN//\\/\\\\}"
+    SYSTEMD_TRAY_BIN="${SYSTEMD_TRAY_BIN//\"/\\\"}"
+    SYSTEMD_TRAY_BIN="${SYSTEMD_TRAY_BIN//%/%%}"
+    cat > "$SYSTEMD_USER_DIR/thermalwriter-tray.service" <<EOF
+[Unit]
+Description=Thermalwriter system tray controller
+Documentation=https://github.com/mgaruccio/thermalwriter
+After=graphical-session.target thermalwriter.service
+Wants=thermalwriter.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart="$SYSTEMD_TRAY_BIN"
+Restart=on-failure
+RestartSec=3
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+    chmod 0644 "$SYSTEMD_USER_DIR/thermalwriter-tray.service"
+    systemctl --user daemon-reload
+
+    # XDG autostart fallback for desktops that do not start graphical-session target units.
+    AUTOSTART_DIR="$HOME/.config/autostart"
+    mkdir -p "$AUTOSTART_DIR"
+    if [[ -f "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" ]]; then
+        sed "s|^Exec=.*|Exec=$INSTALLED_TRAY_BIN|" \
+            "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" \
+            > "$AUTOSTART_DIR/thermalwriter-tray.desktop"
+        chmod 0644 "$AUTOSTART_DIR/thermalwriter-tray.desktop"
+    fi
+
+    if systemctl --user enable --now thermalwriter-tray.service 2>/dev/null; then
+        echo "    tray service enabled (graphical-session.target)"
+    else
+        echo "    note: could not enable tray systemd unit; XDG autostart desktop entry installed"
+        echo "    start manually: $INSTALLED_TRAY_BIN &"
+    fi
+fi
+
 echo
 echo "Done. Status:"
 systemctl --user --no-pager --lines=0 status thermalwriter.service || true
+if [[ "$INSTALL_TRAY" == "1" ]]; then
+    systemctl --user --no-pager --lines=0 status thermalwriter-tray.service 2>/dev/null || true
+fi
 echo
 echo "Useful follow-ups:"
 echo "  thermalwriter ctl status"
 echo "  journalctl --user -u thermalwriter -f"
+if [[ "$INSTALL_TRAY" == "1" ]]; then
+    echo "  thermalwriter-tray          # system tray (Open Config, layouts, stream presets)"
+    echo "  INSTALL_TRAY=0 $0           # reinstall without tray"
+fi
