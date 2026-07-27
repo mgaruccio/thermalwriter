@@ -100,7 +100,7 @@ push_and_run() {
 
     # Drop any previous tray holding the binary path (avoids ETXTBSY on scp).
     ssh "${SSH_OPTS[@]}" -p "$port" qa@127.0.0.1 \
-        'pkill -9 -x thermalwriter-tray 2>/dev/null || true; rm -f /home/qa/thermalwriter-tray' || true
+        'pkill -9 -f "[/]thermalwriter-tray" 2>/dev/null || true; rm -f /home/qa/thermalwriter-tray' || true
     scp "${SSH_OPTS[@]}" -P "$port" "$LOCAL_BIN" "qa@127.0.0.1:$remote_bin"
     scp "${SSH_OPTS[@]}" -P "$port" \
         "$ROOT/scripts/release-qa/guest/tray-sni-smoke.sh" \

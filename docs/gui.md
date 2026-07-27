@@ -89,7 +89,7 @@ INSTALL_TRAY=0 ./packaging/install.sh   # daemon only
 cargo install --path tray --locked      # tray binary alone
 ```
 
-The installer writes `~/.config/systemd/user/thermalwriter-tray.service` (`WantedBy=graphical-session.target`) and an XDG autostart entry as a fallback. Start manually with `thermalwriter-tray`.
+The installer prefers `~/.config/systemd/user/thermalwriter-tray.service` (`WantedBy=graphical-session.target`). An XDG autostart `.desktop` is installed **only** if enabling that unit fails (so Hyprland/uwsm, GNOME, and KDE do not double-start the tray). The binary also takes a single-instance flock under `$XDG_RUNTIME_DIR/thermalwriter/tray.lock`. Start manually with `thermalwriter-tray`.
 
 Override the GUI launcher if it is not on `PATH`:
 

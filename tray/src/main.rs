@@ -5,11 +5,13 @@
 //! D-Bus event-driven — no timers, no WebKit.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ksni::TrayMethods;
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -1037,9 +1039,52 @@ async fn handle_action(action: Action, handle: &ksni::Handle<ThermalTray>) -> bo
     true
 }
 
+/// Exclusive lock so systemd + XDG autostart cannot both keep a tray alive.
+/// Held for the process lifetime (dropped on exit).
+fn acquire_singleton_lock() -> Result<std::fs::File> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let dir = runtime.join("thermalwriter");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create tray lock dir {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join("tray.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open tray lock {}", path.display()))?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        bail!(
+            "another thermalwriter-tray is already running ({})",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Keep the lock alive for the whole process so a second instance exits.
+    let _singleton = match acquire_singleton_lock() {
+        Ok(f) => f,
+        Err(err) => {
+            // Quiet exit for the common double-start case (systemd + autostart).
+            eprintln!("thermalwriter-tray: {err}");
+            std::process::exit(0);
+        }
+    };
 
     let (tx, mut rx): (UnboundedSender<Action>, UnboundedReceiver<Action>) =
         mpsc::unbounded_channel();

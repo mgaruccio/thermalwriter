@@ -152,20 +152,29 @@ EOF
     chmod 0644 "$SYSTEMD_USER_DIR/thermalwriter-tray.service"
     systemctl --user daemon-reload
 
-    # XDG autostart fallback for desktops that do not start graphical-session target units.
     AUTOSTART_DIR="$HOME/.config/autostart"
-    mkdir -p "$AUTOSTART_DIR"
-    if [[ -f "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" ]]; then
-        sed "s|^Exec=.*|Exec=$INSTALLED_TRAY_BIN|" \
-            "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" \
-            > "$AUTOSTART_DIR/thermalwriter-tray.desktop"
-        chmod 0644 "$AUTOSTART_DIR/thermalwriter-tray.desktop"
-    fi
+    AUTOSTART_FILE="$AUTOSTART_DIR/thermalwriter-tray.desktop"
 
+    # Prefer the systemd unit. Only install XDG autostart when enable fails —
+    # installing both double-starts the tray on Hyprland/uwsm, GNOME, KDE, etc.
+    # (The tray binary also takes a single-instance flock as a backstop.)
     if systemctl --user enable --now thermalwriter-tray.service 2>/dev/null; then
         echo "    tray service enabled (graphical-session.target)"
+        if [[ -f "$AUTOSTART_FILE" ]]; then
+            rm -f "$AUTOSTART_FILE"
+            echo "    removed XDG autostart entry (systemd owns the tray)"
+        fi
     else
-        echo "    note: could not enable tray systemd unit; XDG autostart desktop entry installed"
+        mkdir -p "$AUTOSTART_DIR"
+        if [[ -f "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" ]]; then
+            sed "s|^Exec=.*|Exec=$INSTALLED_TRAY_BIN|" \
+                "$PROJECT_DIR/packaging/thermalwriter-tray.desktop" \
+                > "$AUTOSTART_FILE"
+            chmod 0644 "$AUTOSTART_FILE"
+            echo "    note: could not enable tray systemd unit; XDG autostart desktop entry installed"
+        else
+            echo "    note: could not enable tray systemd unit and no desktop template found"
+        fi
         echo "    start manually: $INSTALLED_TRAY_BIN &"
     fi
 fi

@@ -69,7 +69,7 @@ cleanup() {
             pkill -9 -x Xvfb 2>/dev/null || true
             ;;
     esac
-    pkill -9 -x thermalwriter-tray 2>/dev/null || true
+    pkill -9 -f "[/]thermalwriter-tray" 2>/dev/null || true
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -247,7 +247,7 @@ case "$MODE" in
     kde) start_kde_host || guest_finish ;;
 esac
 
-pkill -x thermalwriter-tray 2>/dev/null || true
+pkill -f "[/]thermalwriter-tray" 2>/dev/null || true
 sleep 0.5
 
 guest_log "launching thermalwriter-tray"
