@@ -33,9 +33,14 @@ trait Display {
 }
 
 /// Embedded tray icons (ARGB32), generated once from PNG assets.
+/// Multiple sizes help hosts that pick a nearest pixmap instead of scaling.
 static ICONS: LazyLock<Vec<ksni::Icon>> = LazyLock::new(|| {
     [
+        include_bytes!("../icons/icon-16.png").as_slice(),
+        include_bytes!("../icons/icon-22.png").as_slice(),
+        include_bytes!("../icons/icon-24.png").as_slice(),
         include_bytes!("../icons/icon-32.png").as_slice(),
+        include_bytes!("../icons/icon-48.png").as_slice(),
         include_bytes!("../icons/icon-64.png").as_slice(),
     ]
     .into_iter()
@@ -192,7 +197,9 @@ impl ksni::Tray for ThermalTray {
     }
 
     fn title(&self) -> String {
-        self.status.tooltip_title()
+        // Keep a stable title so desktop tray hosts (e.g. Noctalia pin rules)
+        // can match on "Thermalwriter*". Detailed state lives in the tooltip.
+        "Thermalwriter".into()
     }
 
     fn status(&self) -> ksni::Status {
@@ -201,8 +208,21 @@ impl ksni::Tray for ThermalTray {
         } else if self.status.connected {
             ksni::Status::Active
         } else {
-            ksni::Status::Passive
+            // Still Active so hosts that hide Passive items keep showing us.
+            ksni::Status::Active
         }
+    }
+
+    // IMPORTANT (Quickshell/Noctalia): if IconName is non-empty, the host uses
+    // QIcon::fromTheme(IconName) and NEVER falls back to IconPixmap when the
+    // theme lookup fails — which produces the missing-icon placeholder. Leave
+    // IconName empty and ship pixmaps only.
+    fn icon_name(&self) -> String {
+        String::new()
+    }
+
+    fn icon_theme_path(&self) -> String {
+        String::new()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
@@ -211,10 +231,10 @@ impl ksni::Tray for ThermalTray {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
+            icon_name: String::new(),
             title: self.status.tooltip_title(),
             description: self.status.tooltip_body(),
             icon_pixmap: ICONS.clone(),
-            ..Default::default()
         }
     }
 
@@ -482,6 +502,22 @@ async fn apply_status(handle: &ksni::Handle<ThermalTray>, status: DaemonStatus) 
 }
 
 fn open_gui() {
+    if gui_already_running() {
+        info!("Config GUI already running — not launching another copy");
+        // Best-effort focus on Hyprland; ignore failures on other compositors.
+        let _ = std::process::Command::new("hyprctl")
+            .args([
+                "dispatch",
+                "focuswindow",
+                "class:^(com\\.thermalwriter\\.config|thermalwriter-gui)$",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        return;
+    }
+
     match find_gui_command() {
         Some((program, args)) => {
             info!("launching GUI: {} {:?}", program.display(), args);
@@ -504,10 +540,41 @@ fn open_gui() {
     }
 }
 
+/// True if a Config GUI process is already alive (binary or AppImage).
+fn gui_already_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for ent in entries.flatten() {
+        let pid: u32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        // Skip ourselves.
+        if pid == std::process::id() {
+            continue;
+        }
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        if cmdline.is_empty() {
+            continue;
+        }
+        // cmdline is NUL-separated args.
+        let text = String::from_utf8_lossy(&cmdline).to_ascii_lowercase();
+        if text.contains("thermalwriter-gui")
+            || (text.contains("thermalwriter") && text.contains(".appimage") && text.contains("config"))
+            || text.contains("thermalwriter config")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve the GUI launcher.
 ///
-/// Order: `THERMALWRITER_GUI` (absolute path or `cmd arg…`), then `thermalwriter-gui`
-/// on `PATH`, then common install locations.
+/// Order: `THERMALWRITER_GUI`, `thermalwriter-gui` on `PATH`, common install
+/// dirs, then AppImages under `~/Applications`, `~/Downloads`, and the
+/// thermalwriter checkout release bundle paths.
 fn find_gui_command() -> Option<(PathBuf, Vec<String>)> {
     if let Ok(raw) = std::env::var("THERMALWRITER_GUI") {
         let raw = raw.trim();
@@ -525,20 +592,74 @@ fn find_gui_command() -> Option<(PathBuf, Vec<String>)> {
     }
 
     let home = dirs_home();
-    let candidates = [
-        home.as_ref()
-            .map(|h| h.join(".cargo/bin/thermalwriter-gui")),
-        home.as_ref()
-            .map(|h| h.join(".local/bin/thermalwriter-gui")),
-        Some(PathBuf::from("/usr/bin/thermalwriter-gui")),
-        Some(PathBuf::from("/usr/local/bin/thermalwriter-gui")),
-    ];
-    for path in candidates.into_iter().flatten() {
-        if path.is_file() && is_executable(&path) {
-            return Some((path, Vec::new()));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(h) = home.as_ref() {
+        candidates.push(h.join(".cargo/bin/thermalwriter-gui"));
+        candidates.push(h.join(".local/bin/thermalwriter-gui"));
+    }
+    candidates.push(PathBuf::from("/usr/bin/thermalwriter-gui"));
+    candidates.push(PathBuf::from("/usr/local/bin/thermalwriter-gui"));
+
+    for path in &candidates {
+        if path.is_file() && is_executable(path) {
+            return Some((path.clone(), Vec::new()));
         }
     }
+
+    // AppImage / checkout bundles
+    let search_dirs: Vec<PathBuf> = home
+        .iter()
+        .flat_map(|h| {
+            [
+                h.join("Applications"),
+                h.join("Downloads"),
+                h.join(".cache/thermalwriter-qa/artifacts"),
+                h.join("code/thermalrighter/target/release"),
+                h.join("code/thermalrighter/target/release/bundle/appimage"),
+                h.join("code/thermalrighter/gui/src-tauri/target/release"),
+                h.join(
+                    "code/thermalrighter/gui/src-tauri/target/release/bundle/appimage",
+                ),
+            ]
+        })
+        .collect();
+
+    for dir in search_dirs {
+        if let Some(found) = find_gui_in_dir(&dir) {
+            return Some((found, Vec::new()));
+        }
+    }
+
     None
+}
+
+fn find_gui_in_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    // Prefer a real binary, then AppImage.
+    let exact = dir.join("thermalwriter-gui");
+    if exact.is_file() && is_executable(&exact) {
+        return Some(exact);
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut appimages = Vec::new();
+    for ent in entries.flatten() {
+        let path = ent.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !is_executable(&path) {
+            continue;
+        }
+        if name.contains("thermalwriter") && name.ends_with(".appimage") {
+            appimages.push(path);
+        }
+    }
+    appimages.sort();
+    appimages.pop() // newest-ish by name sort; any match is fine
 }
 
 fn shell_split(s: &str) -> Vec<String> {
@@ -644,15 +765,41 @@ async fn main() -> Result<()> {
         );
     }
 
-    let tray = ThermalTray {
-        status: initial,
-        tx,
+    // Retry while the desktop tray host (StatusNotifierWatcher) is starting.
+    let handle = {
+        let mut status = initial;
+        let mut last_err = None;
+        let mut handle = None;
+        for attempt in 1..=30u32 {
+            let tray = ThermalTray {
+                status: status.clone(),
+                tx: tx.clone(),
+            };
+            match tray.spawn().await {
+                Ok(h) => {
+                    handle = Some(h);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    warn!(
+                        "tray host not ready (attempt {attempt}/30): {}",
+                        last_err.as_ref().unwrap()
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    status = DaemonClient::fetch_status().await;
+                }
+            }
+        }
+        handle.ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to register StatusNotifierItem after retries: {}",
+                last_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            )
+        })?
     };
-
-    let handle = tray
-        .spawn()
-        .await
-        .context("failed to register StatusNotifierItem (is a tray host running?)")?;
 
     info!("tray registered");
 
