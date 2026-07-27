@@ -86,16 +86,10 @@ struct DaemonStatus {
 }
 
 impl DaemonStatus {
-    fn from_maps(
-        status: HashMap<String, String>,
-        layouts: Vec<String>,
-    ) -> Self {
+    fn from_maps(status: HashMap<String, String>, layouts: Vec<String>) -> Self {
         Self {
             online: true,
-            active_layout: status
-                .get("active_layout")
-                .cloned()
-                .unwrap_or_default(),
+            active_layout: status.get("active_layout").cloned().unwrap_or_default(),
             mode: status.get("mode").cloned().unwrap_or_default(),
             connected: status
                 .get("connected")
@@ -292,8 +286,7 @@ impl ksni::Tray for ThermalTray {
                 .iter()
                 .map(|name| {
                     let label = name.clone();
-                    let checked = name == &self.status.active_layout
-                        && self.status.mode != "xvfb";
+                    let checked = name == &self.status.active_layout && self.status.mode != "xvfb";
                     let layout_name = name.clone();
                     // No theme icon-name: Noctalia shows missing-icon tiles for
                     // unresolved freedesktop names. Mark the active layout in text.
@@ -430,18 +423,14 @@ fn status_header(status: &DaemonStatus) -> String {
 struct DaemonClient;
 
 impl DaemonClient {
-    async fn proxy(
-        connection: &zbus::Connection,
-    ) -> Result<DisplayProxy<'_>> {
+    async fn proxy(connection: &zbus::Connection) -> Result<DisplayProxy<'_>> {
         DisplayProxy::new(connection)
             .await
             .context("thermalwriter Display proxy")
     }
 
     async fn connection() -> Result<zbus::Connection> {
-        zbus::Connection::session()
-            .await
-            .context("session bus")
+        zbus::Connection::session().await.context("session bus")
     }
 
     async fn fetch_status() -> DaemonStatus {
@@ -463,10 +452,7 @@ impl DaemonClient {
     async fn set_layout(name: &str) -> Result<String> {
         let conn = Self::connection().await?;
         let proxy = Self::proxy(&conn).await?;
-        proxy
-            .set_layout(name)
-            .await
-            .context("set_layout")
+        proxy.set_layout(name).await.context("set_layout")
     }
 
     async fn start_stream_preset(preset: &str) -> Result<String> {
@@ -557,9 +543,7 @@ fn launch_gui_detached(program: &Path, args: &[String]) -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         inject_graphical_env_from_pid(&mut cmd, hypr_pid);
-        let status = cmd
-            .status()
-            .context("hyprctl dispatch exec")?;
+        let status = cmd.status().context("hyprctl dispatch exec")?;
         if status.success() {
             return Ok(());
         }
@@ -646,7 +630,7 @@ fn find_running_gui_pid() -> Option<u32> {
         if pid == std::process::id() {
             continue;
         }
-            // Skip zombies (state 'Z') — they still have an exe link briefly.
+        // Skip zombies (state 'Z') — they still have an exe link briefly.
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             // comm is in parentheses and may contain ')'; state is the next field.
             if let Some(idx) = stat.rfind(')') {
@@ -687,7 +671,11 @@ fn focus_gui_window(pid: u32) {
             "movetoworkspace".into(),
             format!("current,pid:{pid}"),
         ],
-        vec!["dispatch".into(), "focuswindow".into(), format!("pid:{pid}")],
+        vec![
+            "dispatch".into(),
+            "focuswindow".into(),
+            format!("pid:{pid}"),
+        ],
         vec![
             "dispatch".into(),
             "alterzorder".into(),
@@ -923,9 +911,7 @@ fn find_gui_command() -> Option<(PathBuf, Vec<String>)> {
                 h.join("code/thermalrighter/target/release"),
                 h.join("code/thermalrighter/target/release/bundle/appimage"),
                 h.join("code/thermalrighter/gui/src-tauri/target/release"),
-                h.join(
-                    "code/thermalrighter/gui/src-tauri/target/release/bundle/appimage",
-                ),
+                h.join("code/thermalrighter/gui/src-tauri/target/release/bundle/appimage"),
             ]
         })
         .collect();
