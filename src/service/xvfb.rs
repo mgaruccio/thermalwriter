@@ -234,6 +234,10 @@ fn try_start_xvfb_on(
             .args(["-fbdir", &fbdir_arg])
             .args(["-auth", &xauthority_arg])
             .args(["-nolisten", "tcp"])
+            // Stream frames go straight to the cooler LCD / GUI preview. An X
+            // pointer sprite has no input role here and shows up as a white
+            // arrow in captures (cava GIF, Stream-tab preview).
+            .arg("-nocursor")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)

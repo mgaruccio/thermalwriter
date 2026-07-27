@@ -10,7 +10,7 @@ Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Posi
 - **Shipped since v0.1.0**: dirty-frame skip, NVML worker, adaptive/layout-needed sensor prune, 2000 ms default poll, `thermalwriter-tray` StatusNotifier controller (pixmap-only icon; Hyprland/Noctalia + GNOME AppIndicator + KDE Plasma SNI hosts).
 - **Parked WIP**: MPRIS now-playing on `feature/now-playing` (draft PR #76).
 - **Product-gap backlog** (post-launch): #77–#89 (Intel iGPU, super-I/O aliases, multi-GPU pick, Xvfb test gating, font vendoring, AUR, RPM/AppStream, `thermalwriter report`, udev rule rename, MCP-bridge debug gate, …).
-- **Pre-announcement collateral still needed**: hardware photos, cava-streaming GIF. Comparison graphs vs TRCC-Linux 9.9.2 + thermalright-lcd-control 2.0.0 are done (`docs/assets/comparison/*.svg`, regenerate via `scripts/make_comparison_charts.py`).
+- **Pre-announcement collateral**: layout + cava GIFs done (`docs/assets/gallery/*.gif`, regenerate via `cargo run --release --example render_gallery_frames` + stream capture). Comparison graphs done (`docs/assets/comparison/*.svg`). **Still needed**: hardware photos of the Peerless Vision LCD.
 
 ## Architecture
 

@@ -6,7 +6,7 @@
 
 `thermalwriter` is a lightweight, Linux-native daemon for Thermalright cooler LCD displays. It renders designed sensor layouts — or any X11 app — and sends JPEG frames to the cooler over USB, with the always-on footprint of a proper background daemon instead of a desktop app.
 
-Current status: Public Beta (`v0.1.1`).
+Current status: Public Beta (`v0.1.2`).
 
 ## Why thermalwriter?
 
@@ -72,14 +72,23 @@ Only `87ad:70db` has been verified on physical hardware so far; the other IDs ar
 
 ## Features
 
+<p align="center">
+  <img src="docs/assets/gallery/neon-dash-v2.gif" width="360" alt="neon-dash-v2 default layout with anime background and Tokyo Night accents"/>
+  <br/>
+  <sub><b>neon-dash-v2</b> (default) — Tokyo Night accents over a custom background</sub>
+</p>
+
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/gallery/neon-dash-v2-480x480.png" width="290" alt="neon-dash-v2 layout"/><br/><sub><b>neon-dash-v2</b> (default)</sub></td>
-    <td align="center"><img src="docs/assets/gallery/arc-gauge-480x480.png" width="290" alt="arc-gauge layout"/><br/><sub><b>arc-gauge</b></sub></td>
+    <td align="center"><img src="docs/assets/gallery/neon-dash.gif" width="220" alt="neon-dash layout"/><br/><sub><b>neon-dash</b></sub></td>
+    <td align="center"><img src="docs/assets/gallery/arc-gauge.gif" width="220" alt="arc-gauge layout"/><br/><sub><b>arc-gauge</b></sub></td>
+    <td align="center"><img src="docs/assets/gallery/cyber-grid.gif" width="220" alt="cyber-grid layout"/><br/><sub><b>cyber-grid</b></sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/assets/gallery/cyber-grid-480x480.png" width="290" alt="cyber-grid layout"/><br/><sub><b>cyber-grid</b></sub></td>
-    <td align="center"><img src="docs/assets/gallery/neon-dash-480x480.png" width="290" alt="neon-dash layout"/><br/><sub><b>neon-dash</b></sub></td>
+    <td align="center" colspan="3">
+      <img src="docs/assets/gallery/cava-stream.gif" width="280" alt="cava audio visualizer streamed to the LCD"/><br/>
+      <sub><b>cava</b> stream preset — any X11 app via Xvfb</sub>
+    </td>
   </tr>
 </table>
 
