@@ -25,123 +25,128 @@ The MCP bridge listens on **localhost WebSocket** (`127.0.0.1:9223` by default).
 
 ```sh
 TW_REPO="$(git rev-parse --show-toplevel)"
+cargo build --manifest-path "$TW_REPO/Cargo.toml" -p thermalwriter
+TW_BIN="$TW_REPO/target/debug/thermalwriter"
 export TW_AGENT_HOME="$(mktemp -d)"
+export TW_AGENT_MODE="${TW_AGENT_MODE:-online}"  # online | offline
 export TW_REPO
 
-# Optional: note whether a live daemon was healthy before tests (sanity check after cleanup).
+# Optional sanity check: the private test bus must not affect this daemon.
 TW_LIVE_DAEMON_OK=0
 if thermalwriter ctl status >/dev/null 2>&1; then
   TW_LIVE_DAEMON_OK=1
-  echo "note: live user daemon is running — agent session uses a private bus; it will not be stopped"
+  echo "note: live user daemon is running; the private test bus leaves it untouched"
 fi
 
 TW_SESSION_PID=""
-TW_DAEMON_PID=""
-TW_GUI_PID=""
 
-tw_kill_tracked() {
-  local pid="$1"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
-      kill -0 "$pid" 2>/dev/null || return 0
-      sleep 0.2
-    done
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
+tw_agent_env() {
+  [[ -f "$TW_AGENT_HOME/dbus.env" ]] || {
+    echo "private D-Bus environment is not ready" >&2
+    return 1
+  }
+  # Generated with printf %q by the private session.
+  # shellcheck disable=SC1090
+  source "$TW_AGENT_HOME/dbus.env"
 }
 
+tw_agent_ctl() (
+  tw_agent_env
+  "$TW_BIN" ctl "$@"
+)
+
 tw_agent_cleanup() {
-  tw_kill_tracked "$TW_GUI_PID"
-  tw_kill_tracked "$TW_DAEMON_PID"
-  tw_kill_tracked "$TW_SESSION_PID"
+  # Stop only the daemon registered on the private bus.
+  if [[ -f "$TW_AGENT_HOME/dbus.env" ]]; then
+    tw_agent_ctl stop >/dev/null 2>&1 || true
+  fi
+  # Stop the tracked GUI launcher, then the private D-Bus session wrapper.
+  if [[ -f "$TW_AGENT_HOME/gui.pid" ]]; then
+    GUI_PID="$(cat "$TW_AGENT_HOME/gui.pid")"
+    kill -TERM "$GUI_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$TW_SESSION_PID" ]]; then
+    kill -TERM "$TW_SESSION_PID" 2>/dev/null || true
+    wait "$TW_SESSION_PID" 2>/dev/null || true
+  fi
   rm -rf "$TW_AGENT_HOME"
 }
 
 trap tw_agent_cleanup EXIT INT TERM
 
-# Private D-Bus + isolated config. Children inherit DBUS_SESSION_BUS_ADDRESS.
+# The inner shell, daemon, GUI, and every corroborating ctl command share this
+# private bus. TW_AGENT_MODE defaults to online; export offline for Journey 1.
 dbus-run-session -- bash -c '
   set -euo pipefail
   export TW_AGENT_HOME="'"$TW_AGENT_HOME"'"
+  export TW_AGENT_MODE="'"$TW_AGENT_MODE"'"
   export TW_REPO="'"$TW_REPO"'"
+  export TW_BIN="'"$TW_BIN"'"
   export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
   export XDG_RUNTIME_DIR="'"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"'"
   mkdir -p "$XDG_CONFIG_HOME/thermalwriter"/{layouts,backgrounds,wrappers}
 
-  # Agent corroboration from outside this shell: source this file.
-  printf "DBUS_SESSION_BUS_ADDRESS=%s\n" "$DBUS_SESSION_BUS_ADDRESS" \
+  printf "export DBUS_SESSION_BUS_ADDRESS=%q\n" "$DBUS_SESSION_BUS_ADDRESS" \
     > "$TW_AGENT_HOME/dbus.env"
-  printf "XDG_CONFIG_HOME=%s\n" "$XDG_CONFIG_HOME" \
+  printf "export XDG_CONFIG_HOME=%q\n" "$XDG_CONFIG_HOME" \
     >> "$TW_AGENT_HOME/dbus.env"
 
-  # --- offline journeys: GUI only (no daemon) ---
-  if [[ "${TW_AGENT_MODE:-offline}" == "offline" ]]; then
-    cd "$TW_REPO/gui"
-    npm run tauri:dev &
-    echo $! > "$TW_AGENT_HOME/gui.pid"
-    wait
-    exit 0
+  DAEMON_PID=""
+  GUI_PID=""
+  cleanup_children() {
+    [[ -z "$GUI_PID" ]] || kill -TERM "$GUI_PID" 2>/dev/null || true
+    [[ -z "$DAEMON_PID" ]] || kill -TERM "$DAEMON_PID" 2>/dev/null || true
+  }
+  trap cleanup_children EXIT INT TERM
+
+  if [[ "$TW_AGENT_MODE" == "online" ]]; then
+    THERMALWRITER_TRANSPORT=null "$TW_BIN" daemon \
+      > "$TW_AGENT_HOME/daemon.log" 2>&1 &
+    DAEMON_PID=$!
+    echo "$DAEMON_PID" > "$TW_AGENT_HOME/daemon.pid"
+  elif [[ "$TW_AGENT_MODE" != "offline" ]]; then
+    echo "TW_AGENT_MODE must be online or offline" >&2
+    exit 2
   fi
 
-  # --- online journeys: null-transport daemon + GUI on the same private bus ---
-  THERMALWRITER_TRANSPORT=null thermalwriter daemon &
-  echo $! > "$TW_AGENT_HOME/daemon.pid"
-
   cd "$TW_REPO/gui"
-  npm run tauri:dev &
-  echo $! > "$TW_AGENT_HOME/gui.pid"
-
-  wait
+  npm run tauri:dev > "$TW_AGENT_HOME/gui.log" 2>&1 &
+  GUI_PID=$!
+  echo "$GUI_PID" > "$TW_AGENT_HOME/gui.pid"
+  wait "$GUI_PID"
 ' &
 TW_SESSION_PID=$!
 
-# Wait for dbus.env (session ready).
-for _ in $(seq 1 50); do
-  [[ -f "$TW_AGENT_HOME/dbus.env" ]] && break
+# Wait until the private bus and GUI launcher are ready.
+for _ in $(seq 1 100); do
+  [[ -f "$TW_AGENT_HOME/dbus.env" && -f "$TW_AGENT_HOME/gui.pid" ]] && break
+  kill -0 "$TW_SESSION_PID" 2>/dev/null || break
   sleep 0.2
 done
-[[ -f "$TW_AGENT_HOME/dbus.env" ]] || { echo "agent session failed to start" >&2; exit 1; }
-
-# Track child PIDs written by the inner shell (kill only these on cleanup).
-if [[ -f "$TW_AGENT_HOME/daemon.pid" ]]; then
-  TW_DAEMON_PID="$(cat "$TW_AGENT_HOME/daemon.pid")"
-fi
-if [[ -f "$TW_AGENT_HOME/gui.pid" ]]; then
-  TW_GUI_PID="$(cat "$TW_AGENT_HOME/gui.pid")"
-fi
-```
-
-### Corroborating CLI from the agent (same private bus)
-
-Never run bare `thermalwriter ctl` during agent tests — that hits the **live** session bus.
-
-```sh
-# One-off status on the isolated bus:
-env "$(grep -v '^#' "$TW_AGENT_HOME/dbus.env" | xargs)" \
-  thermalwriter ctl status
-
-# Or wrap any ctl invocation:
-tw_agent_ctl() {
-  env "$(grep -v '^#' "$TW_AGENT_HOME/dbus.env" | xargs)" thermalwriter ctl "$@"
+[[ -f "$TW_AGENT_HOME/dbus.env" && -f "$TW_AGENT_HOME/gui.pid" ]] || {
+  echo "agent session failed to start; inspect $TW_AGENT_HOME/gui.log" >&2
+  exit 1
 }
 ```
 
-### Null-transport profiles
-
-Default null transport uses the built-in bulk 480×480 fixture (`bulk-87ad-70db-pm4-sub5-fbl72`). For a different negotiated profile, export before starting the session:
+For the offline journey, set `export TW_AGENT_MODE=offline` before running the launcher. The default, `online`, starts a null-transport daemon. To test another negotiated profile, export a valid fixture before launch:
 
 ```sh
 export THERMALWRITER_PROFILE=ly-0416-5408-pm65-sub3-fbl192
 ```
 
-Set `TW_AGENT_MODE=offline` before the launcher block when running Journey 1 without a daemon.
+### Corroborating CLI from the agent (same private bus)
+
+Never run bare `thermalwriter ctl` during agent tests: that targets the normal login-session bus. Use the wrapper created above:
+
+```sh
+tw_agent_ctl status
+tw_agent_ctl layouts
+```
 
 ### Dev GUI / MCP
 
-Inside the session, `npm run tauri:dev` starts Vite + Tauri with `devtools` + MCP on `127.0.0.1:9223` (or the next free port in 9223–9322). Connect your MCP server to that host/port from **outside** `dbus-run-session`.
-
-The plugin logs initialization on stderr, e.g. `MCP Bridge plugin initialized ... on 127.0.0.1:9223`.
+The private session runs `npm run tauri:dev`, enabling devtools and the MCP bridge on `127.0.0.1:9223` (or the next free port through 9322). Connect the MCP server from outside `dbus-run-session`; the localhost WebSocket is independent of D-Bus. Inspect `$TW_AGENT_HOME/gui.log` for the selected port and startup errors.
 
 ## MCP tools overview
 
@@ -164,7 +169,7 @@ Prefer **semantic inspection** over brittle CSS hooks:
 5. Snapshot preview region — image/canvas should update (not a blank error tile).
 6. Open **Variables**, change a text/color var, click **Apply**.
 7. Read `$TW_AGENT_HOME/.config/thermalwriter/config.toml` — confirm `[layout_vars]` entry.
-8. Restart GUI (kill tracked `TW_GUI_PID`, relaunch inside session) — values reload from disk.
+8. Reload the webview with `webview_execute_js` (`location.reload()`) — values should reload from disk.
 
 **Pass criteria**: preview renders; config file updated; no daemon required; live user daemon untouched.
 
