@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 qa_parse_version "${1:-}"
 ART_DIR="${2:-$(qa_default_artifacts_dir "$QA_TAG")}"
+qa_artifact_paths "$ART_DIR" "$QA_TAG" "$QA_VERSION"
 OUT_DIR="$(qa_default_out_dir "$QA_TAG")"
 mkdir -p "$OUT_DIR"
 REPORT="$OUT_DIR/l0-artifacts.txt"
