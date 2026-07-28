@@ -90,7 +90,6 @@ packages:
   - git
   - base-devel
   - pkgconf
-  - qemu-guest-agent
   - xorg-server-xvfb
   - fuse2
   - curl
@@ -103,7 +102,6 @@ packages:
 ssh_pwauth: false
 runcmd:
   - [ loginctl, enable-linger, qa ]
-  - [ systemctl, enable, --now, qemu-guest-agent ]
   - [ mkdir, -p, /run/user/1000 ]
   - [ chown, qa:qa, /run/user/1000 ]
   - [ chmod, 700, /run/user/1000 ]
