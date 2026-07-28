@@ -232,7 +232,7 @@ Capture `webview_screenshot` + last 50 lines of GUI stderr for failures.
 
 ## Cleanup
 
-The `trap tw_agent_cleanup EXIT` kills only **tracked** PIDs (`TW_SESSION_PID`, `TW_DAEMON_PID`, `TW_GUI_PID`) and removes `$TW_AGENT_HOME`. It does **not** call `thermalwriter ctl stop` on the live bus and does **not** use broad `pkill`.
+The cleanup traps stop the daemon through its private bus, signal the GUI launcher PID recorded in `gui.pid`, and terminate the tracked private-session wrapper (`TW_SESSION_PID`); the inner trap signals its exact daemon and GUI child PIDs. Cleanup removes `$TW_AGENT_HOME`, never calls `thermalwriter ctl stop` on the live bus, and never uses broad `pkill`.
 
 If a live daemon was healthy before tests (`TW_LIVE_DAEMON_OK=1`), verify it is still healthy after cleanup:
 
