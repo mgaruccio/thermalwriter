@@ -34,6 +34,8 @@ mkdir -p /tmp/tw-debug
 tar -C /tmp -czf tw-debug.tar.gz tw-debug
 ```
 
+Review and redact `report.txt` before attaching to a public issue (config paths, usernames, serial numbers).
+
 ## Daemon and session bus
 
 **`Could not connect to D-Bus session bus`** — run `thermalwriter ctl` from the same graphical login session as the daemon. SSH without a user bus needs `XDG_RUNTIME_DIR` and an imported session (see `scripts/release-qa/guest/common-assert.sh` for the linger pattern).
@@ -151,8 +153,10 @@ systemctl --user daemon-reload
 **Hardware-free daemon testing**:
 
 ```sh
-THERMALWRITER_TRANSPORT=null THERMALWRITER_PROFILE=grand-vision-480 cargo run -- daemon
+THERMALWRITER_TRANSPORT=null cargo run -- daemon
 ```
+
+Optional non-default fixture: `THERMALWRITER_PROFILE=bulk-87ad-70db-pm4-sub5-fbl72` (default when unset).
 
 ## Getting help
 

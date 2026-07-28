@@ -78,6 +78,10 @@ if ! INSTALL_TRAY="$(tw_resolve_install_tray "$INSTALL_TRAY_MODE")"; then
 fi
 tw_install_tray_mode_message "$INSTALL_TRAY_MODE" "$INSTALL_TRAY"
 
+if [[ "$INSTALL_TRAY" == "0" ]]; then
+    tw_remove_tray_install
+fi
+
 if [[ -x "$PREBUILT_BIN" ]]; then
     echo "==> Installing bundled thermalwriter binary..."
     mkdir -p "$CARGO_BIN"

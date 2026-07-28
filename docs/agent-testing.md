@@ -11,36 +11,62 @@ This document describes how an automated agent (or human with the [MCP Server fo
 | Rust 1.85+, Node 22 | Same as `CONTRIBUTING.md` |
 | `gui/` dependencies | `cd gui && npm ci` |
 | MCP server | `npx mcp-server-tauri` (or configured in your agent's MCP settings) |
-| Isolated config (recommended) | Separate `HOME` or `XDG_CONFIG_HOME` so tests do not mutate your live config |
+| Isolated config (required) | Separate `XDG_CONFIG_HOME` so tests do not mutate your live daemon or config |
+
+## Safe isolated setup (do not collide with a live daemon)
+
+**Never** point agent tests at your normal `~/.config/thermalwriter` while a production daemon is running on the same session bus — D-Bus names and config writes will collide.
+
+```sh
+# 1. Snapshot whether a live daemon was running (for restore).
+TW_LIVE_DAEMON=0
+if thermalwriter ctl status >/dev/null 2>&1; then
+  TW_LIVE_DAEMON=1
+  echo "warning: live daemon detected — agent tests must use isolated XDG_CONFIG_HOME"
+fi
+
+# 2. Isolated agent home (config + optional null-transport daemon).
+export TW_AGENT_HOME="$(mktemp -d)"
+export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_CONFIG_HOME/thermalwriter"/{layouts,backgrounds,wrappers}
+
+# 3. Cleanup trap — stops only the isolated daemon/GUI; restores nothing if live daemon was left alone.
+tw_agent_cleanup() {
+  XDG_CONFIG_HOME="$TW_AGENT_HOME/.config" thermalwriter ctl stop 2>/dev/null || true
+  pkill -f "XDG_CONFIG_HOME=$TW_AGENT_HOME" 2>/dev/null || true
+  pkill -f 'thermalwriter-gui' 2>/dev/null || true
+  rm -rf "$TW_AGENT_HOME"
+}
+trap tw_agent_cleanup EXIT INT TERM
+```
+
+Optional null-transport daemon (hardware-free) in a **second terminal**, sharing the isolated config:
+
+```sh
+export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+THERMALWRITER_TRANSPORT=null cargo run --release -- daemon
+```
+
+Default null transport uses the built-in bulk 480×480 fixture (`bulk-87ad-70db-pm4-sub5-fbl72`). For a different negotiated profile:
+
+```sh
+THERMALWRITER_TRANSPORT=null THERMALWRITER_PROFILE=ly-0416-5408-pm65-sub3-fbl192 cargo run --release -- daemon
+```
+
+Stop the isolated daemon with `XDG_CONFIG_HOME="$TW_AGENT_HOME/.config" thermalwriter ctl stop` (the trap above also handles this).
 
 ### Dev GUI startup
 
 ```sh
 cd gui
+export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
 # Starts Vite + Tauri with devtools + MCP bridge on 127.0.0.1:9223 (or next free port 9223–9322)
 npm run tauri:dev
 ```
 
 The plugin logs initialization on stderr, e.g. `MCP Bridge plugin initialized ... on 127.0.0.1:9223`. Connect the MCP server to that host/port.
-
-### Isolated runtime layout
-
-```sh
-export TW_AGENT_HOME="$(mktemp -d)"
-export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-mkdir -p "$XDG_CONFIG_HOME/thermalwriter"/{layouts,backgrounds,wrappers}
-```
-
-Optional null-transport daemon in another terminal:
-
-```sh
-export XDG_CONFIG_HOME="$TW_AGENT_HOME/.config"
-THERMALWRITER_TRANSPORT=null THERMALWRITER_PROFILE=grand-vision-480 \
-  cargo run --release -- daemon
-```
-
-Stop the daemon with `thermalwriter ctl stop` or `pkill -f 'thermalwriter daemon'` when finished.
 
 ## MCP tools overview
 
@@ -56,7 +82,7 @@ Prefer **semantic inspection** over brittle CSS hooks:
 
 **Goal**: layout browse, local preview, offline Apply persists to config.
 
-1. Ensure no daemon: `thermalwriter ctl status` should fail.
+1. Ensure no daemon on the isolated bus: `XDG_CONFIG_HOME="$TW_AGENT_HOME/.config" thermalwriter ctl status` should fail.
 2. Launch `npm run tauri:dev` with isolated `XDG_CONFIG_HOME`.
 3. Snapshot DOM — confirm status shows offline/daemon unavailable wording.
 4. Select a built-in layout (e.g. neon-dash-v2) via sidebar/list interaction.
@@ -71,9 +97,9 @@ Prefer **semantic inspection** over brittle CSS hooks:
 
 **Goal**: Live Apply reaches D-Bus; status reflects daemon.
 
-1. Start null-transport daemon sharing `XDG_CONFIG_HOME`.
+1. Start null-transport daemon sharing `XDG_CONFIG_HOME` (see above).
 2. Relaunch or refresh GUI — status should show online/connected semantics.
-3. Change layout from GUI — verify `thermalwriter ctl status` reports new `active_layout`.
+3. Change layout from GUI — verify `XDG_CONFIG_HOME="$TW_AGENT_HOME/.config" thermalwriter ctl status` reports new `active_layout`.
 4. Toggle a variable and **Apply** — confirm both config file and daemon state (status or preview fingerprint).
 
 ## Journey 3 — Background import and color suggestions
@@ -103,13 +129,13 @@ Prefer **semantic inspection** over brittle CSS hooks:
 
 **Goal**: start stream, live preview, stop back to layout.
 
-**Requires**: `Xvfb` on PATH, daemon running, at least one stream binary resolved (e.g. `cava`).
+**Requires**: `Xvfb` on PATH, isolated daemon running, at least one stream binary resolved (e.g. `cava`).
 
 1. Open **Stream** tab.
 2. Confirm unavailable presets are disabled (daemon `resolve_binaries` map).
 3. Start **cava** (or conky with wrapper config) at modest FPS.
 4. Poll stream preview `<img>` — JPEG bytes should update (~3 fps); preview may be rotated 180° in CSS (expected).
-5. `thermalwriter ctl status` — `mode` should reflect xvfb/stream.
+5. `XDG_CONFIG_HOME="$TW_AGENT_HOME/.config" thermalwriter ctl status` — `mode` should reflect xvfb/stream.
 6. Stop stream — returns to saved layout; preview img polling pauses when tab hidden.
 
 **Error path**: start with missing Xvfb — expect actionable error in UI or logs.
@@ -126,10 +152,12 @@ Capture `webview_screenshot` + last 50 lines of GUI stderr for failures.
 
 ## Cleanup
 
+The `trap tw_agent_cleanup EXIT` from the isolated setup section stops the isolated daemon, GUI, and temp home. **Do not** run `thermalwriter ctl stop` without `XDG_CONFIG_HOME` set to the agent home — that would stop your live daemon.
+
+If a live daemon was running before tests (`TW_LIVE_DAEMON=1`), verify it is still healthy after cleanup:
+
 ```sh
-thermalwriter ctl stop 2>/dev/null || true
-pkill -f 'thermalwriter-gui' 2>/dev/null || true
-rm -rf "$TW_AGENT_HOME"
+thermalwriter ctl status
 ```
 
 ## Result report template
@@ -141,7 +169,7 @@ rm -rf "$TW_AGENT_HOME"
 - **Branch/tag**:
 - **GUI command**: `npm run tauri:dev`
 - **MCP host:port**: 127.0.0.1:9223
-- **Isolated HOME**: yes/no
+- **Isolated XDG_CONFIG_HOME**: yes (path)
 - **Daemon**: null-transport / live hardware / offline
 
 | Journey | Result | Notes |

@@ -40,6 +40,25 @@ printf '#!/bin/sh\n' >"$HOME/Downloads/Thermalwriter-Config_test.AppImage"
 chmod +x "$HOME/Downloads/Thermalwriter-Config_test.AppImage"
 assert_eq "auto with AppImage in Downloads installs tray" "1" "$(tw_resolve_install_tray auto)"
 
+# tw_remove_tray_install is idempotent and clears prior tray artifacts.
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+AUTOSTART="$HOME/.config/autostart/thermalwriter-tray.desktop"
+mkdir -p "$SYSTEMD_DIR" "$HOME/.config/autostart" "$CARGO_HOME/bin"
+printf '[Service]\n' >"$SYSTEMD_DIR/thermalwriter-tray.service"
+printf '[Desktop Entry]\n' >"$AUTOSTART"
+install -m0755 /bin/true "$CARGO_HOME/bin/thermalwriter-tray"
+tw_remove_tray_install >/dev/null
+[[ ! -f "$SYSTEMD_DIR/thermalwriter-tray.service" ]] || fail=1
+[[ ! -f "$AUTOSTART" ]] || fail=1
+[[ ! -x "$CARGO_HOME/bin/thermalwriter-tray" ]] || fail=1
+if [[ "$fail" -eq 0 ]]; then
+    printf 'PASS  tw_remove_tray_install clears service/autostart/binary\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL  tw_remove_tray_install did not clear all tray artifacts\n' >&2
+    fail=$((fail + 1))
+fi
+
 if [[ "$fail" -ne 0 ]]; then
     printf 'RESULT: FAIL (%d pass, %d fail)\n' "$pass" "$fail" >&2
     exit 1

@@ -6,7 +6,7 @@ thermalwriter bundles or depends on the following third-party components. Full l
 
 - **Component**: DejaVu Sans Mono (embedded in daemon SVG/HTML rendering)
 - **File**: `assets/fonts/JetBrainsMono-Regular.ttf` (historical filename; contents are DejaVu Sans Mono)
-- **License**: Bitstream Vera / DejaVu Fonts License (see [DejaVu fonts](https://dejavu-fonts.github.io/License.html))
+- **License**: Bitstream Vera / DejaVu Fonts License (`assets/fonts/DejaVu-LICENSE.txt`)
 - **Usage**: Embedded via `include_bytes!` in `src/render/svg.rs` and `src/render/draw.rs` for LCD layout text rendering
 
 ## Config GUI — IBM Plex Mono

@@ -19,6 +19,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Release QA tray assertions: expect systemd **or** XDG autostart, not both; auto tray mode on clean VMs without GUI.
+- Release workflow checks out the requested tag (workflow_dispatch), validates semver tags, sets Latest/prerelease explicitly, runs L0 checks pre-publish, and keeps release notes out of SHA256SUMS.
+- Tray install skips now remove any previously installed tray service/autostart/binary.
+- MCP capabilities use `capabilities_path_pattern` (no source-tree mutation); GUI bundles ship font/OFL notices.
 
 ## [0.1.3] - 2026-07-27
 

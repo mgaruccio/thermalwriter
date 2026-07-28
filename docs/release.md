@@ -44,10 +44,11 @@ Expected bundle output directories:
 
 GitHub release automation runs on:
 
-| Trigger | Prerelease? | Notes |
-| --- | --- | --- |
-| **Tag push** (`v*`) | **No** — becomes GitHub **Latest** | Normal releases |
-| **workflow_dispatch** | Configurable (`prerelease` input) | Explicit tag + optional prerelease flag |
+| Trigger | Prerelease? | Latest? | Notes |
+| --- | --- | --- | --- |
+| **Tag push** (`vX.Y.Z`) | **No** | **Yes** | Stable release |
+| **Tag push** (`vX.Y.Z-suffix`) | **Yes** | **No** | Prerelease suffix in tag |
+| **workflow_dispatch** | Configurable (`prerelease` input) | Stable unless prerelease | Checks out the requested tag exactly |
 
 **Builder image**: `ubuntu-22.04` (glibc 2.35 baseline for prebuilt x86_64 binaries).
 
@@ -68,10 +69,12 @@ The following artifacts are compiled, packaged, hashed, and uploaded:
    - `packaging/udev/99-thermalwriter-rapl.rules`
    - `systemd/thermalwriter.service`
    - `systemd/thermalwriter-tray.service`
-   - public docs under `docs/` (including `comparison-methodology.md`, `troubleshooting.md`)
-4. **GUI Debian Package**: `*.deb`
-5. **GUI AppImage**: `*.AppImage` (bundles WebKitGTK/GTK; not fully standalone — document FUSE / `APPIMAGE_EXTRACT_AND_RUN=1`)
-6. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.
+   - public docs under `docs/` (including `comparison-methodology.md`, `troubleshooting.md`, `agent-testing.md`)
+2. **GUI Debian Package**: `*.deb`
+3. **GUI AppImage**: `*.AppImage` (bundles WebKitGTK/GTK; not fully standalone — document FUSE / `APPIMAGE_EXTRACT_AND_RUN=1`)
+4. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.
+
+CI runs `scripts/release-qa/check-artifacts.sh` against `release_dist` **before** creating/uploading the GitHub release. Release notes are written to `RELEASE_NOTES.md` at the workspace root (not uploaded).
 
 **L0 QA** (`scripts/release-qa/host/run-l0.sh`) additionally verifies GLIBC ≤ 2.35 on daemon/tray/GUI binaries and asserts release GUI artifacts contain no MCP bridge strings.
 

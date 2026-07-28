@@ -57,3 +57,53 @@ qa_assert_no_mcp_bridge_strings() {
     printf 'PASS  %s has no MCP bridge strings\n' "$(basename "$bin")"
     return 0
 }
+
+# Extract a .deb to out_dir; prints nothing on success.
+qa_extract_deb() {
+    local deb="$1"
+    local out_dir="$2"
+    deb="$(readlink -f "$deb")"
+    rm -rf "$out_dir"
+    mkdir -p "$out_dir"
+    if command -v dpkg-deb >/dev/null 2>&1; then
+        dpkg-deb -x "$deb" "$out_dir"
+        return 0
+    fi
+    if command -v ar >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        local work
+        work="$(mktemp -d)"
+        (cd "$work" && ar x "$deb" && tar -xf data.tar.* -C "$out_dir")
+        rm -rf "$work"
+        return 0
+    fi
+    printf 'error: need dpkg-deb or ar+tar to extract .deb\n' >&2
+    return 1
+}
+
+# Find thermalwriter-gui inside an extracted deb tree.
+qa_find_gui_binary() {
+    local root="$1"
+    find "$root" -type f \( -name thermalwriter-gui -o -name 'Thermalwriter Config' \) -perm -111 2>/dev/null | head -1
+}
+
+# Assert bundled GUI resources include license notices (AppImage squashfs or deb tree).
+qa_assert_gui_bundle_notices() {
+    local root="$1"
+    local label="${2:-GUI bundle}"
+    local missing=0
+    local rel
+
+    for rel in \
+        THIRD_PARTY_NOTICES.md \
+        OFL-IBMPlexMono.txt \
+        OFL-IBMPlexSans.txt \
+        OFL-MajorMonoDisplay.txt; do
+        if find "$root" -type f -name "$rel" 2>/dev/null | grep -q .; then
+            printf 'PASS  %s contains %s\n' "$label" "$rel"
+        else
+            printf 'FAIL  %s missing %s\n' "$label" "$rel" >&2
+            missing=1
+        fi
+    done
+    return "$missing"
+}

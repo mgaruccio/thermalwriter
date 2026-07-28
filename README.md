@@ -155,9 +155,9 @@ systemctl --user enable --now thermalwriter
 
 ## Install GUI Release Artifact
 
-The GUI companion app is available as a pre-compiled Debian package (`.deb`) or AppImage from the releases page. **Primary distribution** is tarball + `.deb` + AppImage; an [AUR package](https://github.com/mgaruccio/thermalwriter/issues/88) is recommended follow-up for Arch users, not a launch blocker.
+The GUI companion app is available as a pre-compiled Debian package (`.deb`) or AppImage from the releases page. **Primary distribution** is tarball + `.deb` + AppImage; an [AUR package](https://github.com/mgaruccio/thermalwriter/issues/87) is recommended follow-up for Arch users, not a launch blocker.
 
-The AppImage bundles WebKitGTK/GTK from the Tauri linuxdeploy pipeline but is **not fully standalone** — you normally need FUSE (`fuse2` / `libfuse2`). If mounting fails:
+The AppImage bundles WebKitGTK/GTK from the Tauri linuxdeploy pipeline but is **not fully standalone** — you normally need FUSE (`fuse2` / `libfuse2`). If mounting fails, use the extract-and-run fallback:
 
 ```sh
 APPIMAGE_EXTRACT_AND_RUN=1 ./Thermalwriter-Config_*_amd64.AppImage
@@ -175,6 +175,11 @@ sudo apt install ./thermalwriter-config_*_amd64.deb
 For general Linux distributions (via `.AppImage`):
 ```sh
 chmod +x ./Thermalwriter*.AppImage
+./Thermalwriter*.AppImage
+```
+
+If FUSE mounting fails:
+```sh
 APPIMAGE_EXTRACT_AND_RUN=1 ./Thermalwriter*.AppImage
 ```
 
@@ -262,7 +267,7 @@ npm run build
 npm run tauri:dev    # devtools + MCP bridge on 127.0.0.1 (dev only)
 ```
 
-Agent-driven GUI testing via the Tauri MCP bridge: [docs/agent-testing.md](../docs/agent-testing.md). **Release builds do not include the MCP bridge.**
+Agent-driven GUI testing via the Tauri MCP bridge: [docs/agent-testing.md](docs/agent-testing.md). **Release builds do not include the MCP bridge.**
 
 The GUI talks to the daemon over D-Bus and can also render local previews.
 ## RAPL Udev Rule

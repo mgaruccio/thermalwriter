@@ -22,16 +22,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: gui/package-lock.json
-
       - name: Resolve release tag
         id: tag
         run: |
@@ -40,12 +30,49 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
-            echo "error: tag must look like vX.Y.Z (got: $TAG)" >&2
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: tag must be semver vX.Y.Z with optional prerelease suffix (got: $TAG)" >&2
             exit 1
           fi
+          VERSION="${TAG#v}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.event.inputs.prerelease }}" == "true" ]]; then
+              PRERELEASE="true"
+            else
+              PRERELEASE="false"
+            fi
+          elif [[ "$VERSION" == *-* ]]; then
+            PRERELEASE="true"
+          else
+            PRERELEASE="false"
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify checkout matches tag
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          HEAD="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+          if [[ "$HEAD" != "$TAG_SHA" ]]; then
+            echo "error: checked out $HEAD but tag $TAG points to $TAG_SHA" >&2
+            exit 1
+          fi
+          echo "verified $TAG @ $HEAD"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
 
       - name: Install system dependencies (Daemon)
         run: sudo apt-get update && sudo apt-get install -y libudev-dev xvfb
@@ -64,12 +91,14 @@ jobs:
           mkdir -p "$STAGED_DIR/packaging/lib"
           mkdir -p "$STAGED_DIR/systemd"
           mkdir -p "$STAGED_DIR/docs/assets"
+          mkdir -p "$STAGED_DIR/assets/fonts"
           mkdir -p "$STAGED_DIR/skills/designing-layouts"
           cp target/release/thermalwriter "$STAGED_DIR/bin/"
           cp target/release/thermalwriter-tray "$STAGED_DIR/bin/"
           cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md "$STAGED_DIR/"
-          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md docs/troubleshooting.md "$STAGED_DIR/docs/"
+          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md docs/troubleshooting.md docs/agent-testing.md "$STAGED_DIR/docs/"
           cp -r docs/assets/. "$STAGED_DIR/docs/assets/"
+          cp assets/fonts/DejaVu-LICENSE.txt "$STAGED_DIR/assets/fonts/"
           cp skills/designing-layouts/SKILL.md "$STAGED_DIR/skills/designing-layouts/"
           cp packaging/install.sh packaging/uninstall.sh packaging/thermalwriter-tray.desktop "$STAGED_DIR/packaging/"
           cp packaging/lib/tray-install.sh "$STAGED_DIR/packaging/lib/"
@@ -89,6 +118,7 @@ jobs:
         env:
           CI: false
           NO_STRIP: 1
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: npm run tauri:build
 
       - name: Prepare release assets
@@ -107,9 +137,8 @@ jobs:
       - name: Extract changelog section for release notes
         id: notes
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
           VERSION="${{ steps.tag.outputs.version }}"
-          NOTES_FILE="release_dist/RELEASE_NOTES.md"
+          NOTES_FILE="RELEASE_NOTES.md"
           awk -v ver="$VERSION" '
             BEGIN { found=0 }
             /^## \[/ {
@@ -124,23 +153,27 @@ jobs:
           fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
+      - name: L0 artifact checks (pre-publish)
+        run: |
+          chmod +x scripts/release-qa/check-artifacts.sh
+          scripts/release-qa/check-artifacts.sh "${{ steps.tag.outputs.tag }}" release_dist
+
       - name: Create and upload release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            PRERELEASE="${{ github.event.inputs.prerelease }}"
-          else
-            PRERELEASE="false"
-          fi
-          PRERELEASE_FLAG="--prerelease=false"
+          PRERELEASE="${{ steps.tag.outputs.prerelease }}"
           if [[ "$PRERELEASE" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
+            LATEST_FLAG="--latest=false"
+          else
+            PRERELEASE_FLAG="--prerelease=false"
+            LATEST_FLAG="--latest"
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG
+            gh release edit "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG $LATEST_FLAG
           else
-            gh release create "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG
+            gh release create "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG $LATEST_FLAG
           fi
           gh release upload "$TAG" release_dist/* --clobber

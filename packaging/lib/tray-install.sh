@@ -70,6 +70,38 @@ tw_resolve_install_tray() {
     esac
 }
 
+# Disable and remove a previously installed tray (idempotent).
+tw_remove_tray_install() {
+    local cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+    local systemd_dir="$HOME/.config/systemd/user"
+    local autostart="$HOME/.config/autostart/thermalwriter-tray.desktop"
+    local removed=0
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user disable --now thermalwriter-tray.service 2>/dev/null; then
+            removed=1
+        fi
+    fi
+    if [[ -f "$systemd_dir/thermalwriter-tray.service" ]]; then
+        rm -f "$systemd_dir/thermalwriter-tray.service"
+        removed=1
+    fi
+    if [[ -f "$autostart" ]]; then
+        rm -f "$autostart"
+        removed=1
+    fi
+    if [[ -x "$cargo_bin/thermalwriter-tray" ]]; then
+        rm -f "$cargo_bin/thermalwriter-tray"
+        removed=1
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    if [[ "$removed" -eq 1 ]]; then
+        echo "==> Removed previously installed tray service/autostart/binary"
+    fi
+}
+
 tw_install_tray_mode_message() {
     local mode="${1:-auto}"
     local resolved="${2:-0}"

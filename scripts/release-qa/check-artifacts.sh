@@ -26,7 +26,7 @@ fail_item() { log_both "FAIL  $*"; fail=1; }
 source "$SCRIPT_DIR/lib/glibc-check.sh"
 
 qa_require_cmd tar sha256sum find grep sed strings objdump
-qa_artifact_paths "$ART_DIR" "$QA_TAG" "$QA_VERSION"
+[[ -d "$ART_DIR" ]] || qa_die "artifacts dir not found: $ART_DIR (run fetch-artifacts.sh first)"
 
 log_both "=== L0 artifact checks for $QA_TAG ==="
 log_both "artifacts: $ART_DIR"
@@ -60,6 +60,7 @@ expected_files=(
     bin/thermalwriter
     bin/thermalwriter-tray
     packaging/install.sh
+    packaging/lib/tray-install.sh
     packaging/uninstall.sh
     packaging/thermalwriter-tray.desktop
     packaging/udev/99-thermalwriter-rapl.rules
@@ -76,6 +77,8 @@ expected_files=(
     docs/architecture.md
     docs/comparison-methodology.md
     docs/troubleshooting.md
+    docs/agent-testing.md
+    assets/fonts/DejaVu-LICENSE.txt
     THIRD_PARTY_NOTICES.md
 )
 
@@ -118,8 +121,25 @@ if [[ -f "$QA_APPIMAGE" ]]; then
         else
             fail_item "could not find thermalwriter-gui inside AppImage"
         fi
+        qa_assert_gui_bundle_notices "$EXTRACT_MCP/squashfs-root" "AppImage" >>"$REPORT" 2>&1 || fail_item "AppImage missing license notices"
     else
         fail_item "AppImage --appimage-extract failed"
+    fi
+fi
+
+if [[ -f "$QA_DEB" ]]; then
+    EXTRACT_DEB="$OUT_DIR/deb-extract-mcp"
+    if qa_extract_deb "$QA_DEB" "$EXTRACT_DEB" >>"$REPORT" 2>&1; then
+        GUI_BIN="$(qa_find_gui_binary "$EXTRACT_DEB")"
+        if [[ -n "$GUI_BIN" ]]; then
+            qa_assert_glibc_max "$GUI_BIN" 2.35 >>"$REPORT" 2>&1 || fail_item "GUI .deb GLIBC > 2.35"
+            qa_assert_no_mcp_bridge_strings "$GUI_BIN" >>"$REPORT" 2>&1 || fail_item "GUI .deb contains MCP bridge strings"
+        else
+            fail_item "could not find thermalwriter-gui inside .deb"
+        fi
+        qa_assert_gui_bundle_notices "$EXTRACT_DEB" ".deb" >>"$REPORT" 2>&1 || fail_item ".deb missing license notices"
+    else
+        fail_item ".deb extraction failed"
     fi
 fi
 
