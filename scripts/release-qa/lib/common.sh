@@ -64,6 +64,7 @@ qa_artifact_paths() {
     local tag="${2:-${QA_TAG:-}}"
     local version="${3:-${QA_VERSION:-}}"
     [[ -d "$dir" ]] || qa_die "artifacts dir not found: $dir"
+    dir="$(cd "$dir" && pwd)"
     [[ -n "$tag" && -n "$version" ]] || qa_die "tag/version required"
 
     QA_SHA256SUMS="$dir/SHA256SUMS"
