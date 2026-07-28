@@ -344,11 +344,11 @@
     <div class="brand-mark">
       <span class="glyph">&#x25c8;</span>
       <span>Thermalwriter</span>
-      <span class="tag">// LCD HUD CONTROL</span>
+      <span class="tag">Display studio</span>
     </div>
 
     <div class="titlebar-center">
-      <span>&#x25b8; Peerless Vision · {titlebarResolution}</span>
+      <span>Peerless Vision · {titlebarResolution}</span>
       <span class="device-badge {deviceBadgeClass}">{deviceBadgeLabel}</span>
     </div>
 
@@ -507,7 +507,7 @@
                   ? "This layout declares no color variables"
                   : "Suggest overlay colors from the background's dominant colors"}
             >
-              {suggesting ? "Sampling…" : "◑ Suggest"}
+              {suggesting ? "Sampling…" : "Suggest colors"}
             </button>
             <button
               type="button"
@@ -515,7 +515,7 @@
               onclick={apply}
               disabled={applying || !selectedLayout}
             >
-              {applying ? "Applying…" : "Apply ↳"}
+              {applying ? "Applying…" : "Apply"}
             </button>
           </div>
         {/if}

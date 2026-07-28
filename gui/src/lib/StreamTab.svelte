@@ -470,7 +470,7 @@
         disabled={!canStart || starting}
         title={unavailableHint || undefined}
       >
-        {starting ? "Starting…" : "▶ Start stream"}
+        {starting ? "Starting…" : "Start stream"}
       </button>
     {:else}
       <button
@@ -479,7 +479,7 @@
         onclick={stopStream}
         disabled={stopping}
       >
-        {stopping ? "Stopping…" : "■ Stop stream"}
+        {stopping ? "Stopping…" : "Stop stream"}
       </button>
     {/if}
 
@@ -554,12 +554,10 @@
     max-width: 280px;
     height: auto;
     aspect-ratio: 1 / 1;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: #050608;
-    border: 1px solid var(--line-strong);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent),
-      0 0 24px -8px color-mix(in srgb, var(--amber) 45%, transparent);
+    border: 0;
+    box-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.95);
     display: block;
     object-fit: cover;
   }
@@ -571,8 +569,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: color-mix(in srgb, var(--bg-deep) 60%, transparent);
-    border: 1px dashed var(--line-strong);
+    background: var(--bg-elev);
+    border: 0;
     border-radius: var(--radius-md);
   }
 
@@ -615,9 +613,9 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 14px;
-    background: color-mix(in srgb, var(--red) 14%, var(--bg-elev));
-    border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+    padding: 11px 14px;
+    background: color-mix(in srgb, var(--red) 11%, var(--bg-elev));
+    border: 0;
     border-radius: var(--radius-md);
     font-family: var(--font-mono);
     font-size: 12px;
@@ -668,10 +666,9 @@
   }
 
   .preset-btn.active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent-soft) 70%, var(--bg-elev));
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-hover));
     color: var(--text-primary);
-    box-shadow: 0 0 0 1px var(--accent-soft);
+    box-shadow: none;
   }
 
   .preset-btn.unavailable {
@@ -748,10 +745,10 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 3px 8px;
-    background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    background: var(--bg-elev);
+    border: 0;
+    border-radius: 999px;
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--text-muted);
@@ -797,36 +794,27 @@
   .btn-start {
     flex: 1;
     justify-content: center;
-    background: color-mix(in srgb, var(--green) 18%, var(--bg-elev));
-    border-color: color-mix(in srgb, var(--green) 45%, transparent);
-    color: var(--green);
+    background: var(--green);
+    color: #050608;
+    font-weight: 600;
   }
 
   .btn-start:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--green) 28%, var(--bg-elev));
-    border-color: var(--green);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--green) 30%, transparent);
+    background: color-mix(in srgb, var(--green) 88%, white);
+    box-shadow: 0 12px 26px -16px color-mix(in srgb, var(--green) 55%, transparent);
   }
 
   .btn-stop {
     flex: 1;
     justify-content: center;
-    background: color-mix(in srgb, var(--red) 18%, var(--bg-elev));
-    border-color: color-mix(in srgb, var(--red) 45%, transparent);
-    color: var(--red);
-    animation: stream-pulse 2.4s ease-in-out infinite;
+    background: var(--red);
+    color: #050608;
+    font-weight: 600;
   }
 
   .btn-stop:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--red) 28%, var(--bg-elev));
-    border-color: var(--red);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--red) 30%, transparent);
-    animation: none;
-  }
-
-  @keyframes stream-pulse {
-    0%, 100% { border-color: color-mix(in srgb, var(--red) 45%, transparent); }
-    50% { border-color: color-mix(in srgb, var(--red) 80%, transparent); }
+    background: color-mix(in srgb, var(--red) 88%, white);
+    box-shadow: 0 12px 26px -16px color-mix(in srgb, var(--red) 55%, transparent);
   }
 
   .btn-refresh {
@@ -845,9 +833,9 @@
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--amber);
-    padding: 6px 10px;
-    background: color-mix(in srgb, var(--amber) 10%, var(--bg-elev));
-    border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+    padding: 7px 10px;
+    background: color-mix(in srgb, var(--amber) 9%, var(--bg-elev));
+    border: 0;
     border-radius: var(--radius-sm);
   }
 
@@ -856,9 +844,9 @@
     font-family: var(--font-mono);
     font-size: 11.5px;
     color: var(--green);
-    padding: 6px 10px;
-    background: color-mix(in srgb, var(--green) 10%, var(--bg-elev));
-    border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
+    padding: 7px 10px;
+    background: color-mix(in srgb, var(--green) 9%, var(--bg-elev));
+    border: 0;
     border-radius: var(--radius-sm);
   }
 
@@ -867,9 +855,9 @@
     font-family: var(--font-mono);
     font-size: 11.5px;
     color: var(--red);
-    padding: 6px 10px;
+    padding: 7px 10px;
     background: color-mix(in srgb, var(--red) 10%, var(--bg-elev));
-    border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+    border: 0;
     border-radius: var(--radius-sm);
   }
 
@@ -924,9 +912,6 @@
   }
 
   .section-label::after {
-    content: "";
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, var(--line-strong), transparent);
+    display: none;
   }
 </style>
