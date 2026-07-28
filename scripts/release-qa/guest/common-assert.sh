@@ -190,6 +190,34 @@ guest_cleanup_prior_install() {
     fi
 }
 
+guest_assert_tray_launch_path() {
+    local unit="$HOME/.config/systemd/user/thermalwriter-tray.service"
+    local autostart="$HOME/.config/autostart/thermalwriter-tray.desktop"
+    local has_unit=0 has_autostart=0
+
+    if [[ -f "$unit" ]]; then
+        has_unit=1
+    fi
+    if [[ -f "$autostart" ]]; then
+        has_autostart=1
+    fi
+
+    if [[ "$has_unit" -eq 1 && "$has_autostart" -eq 1 ]]; then
+        guest_fail "tray has both systemd unit and XDG autostart (expected one path)"
+        return 1
+    fi
+    if [[ "$has_unit" -eq 1 ]]; then
+        guest_pass "tray enabled via systemd user unit"
+        return 0
+    fi
+    if [[ "$has_autostart" -eq 1 ]]; then
+        guest_pass "tray enabled via XDG autostart"
+        return 0
+    fi
+    guest_fail "tray has neither systemd unit nor XDG autostart"
+    return 1
+}
+
 guest_finish() {
     if [[ "${GUEST_FAIL:-0}" -ne 0 ]]; then
         printf 'RESULT: FAIL\n'

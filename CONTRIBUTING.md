@@ -26,6 +26,8 @@ Rendering changes should also include a generated preview from:
 cargo run --example preview_layout layouts/svg/neon-dash-v2.svg
 ```
 
+GUI agent-driven testing (dev MCP bridge only): see [docs/agent-testing.md](docs/agent-testing.md).
+
 Hardware-facing changes should describe whether they were tested on real hardware. If they were not, say so directly.
 
 ## Pull Requests

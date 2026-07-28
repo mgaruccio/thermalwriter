@@ -5,10 +5,20 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish (e.g. v0.1.4)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark the GitHub release as a prerelease'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
@@ -22,6 +32,21 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
 
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+            echo "error: tag must look like vX.Y.Z (got: $TAG)" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Install system dependencies (Daemon)
         run: sudo apt-get update && sudo apt-get install -y libudev-dev xvfb
 
@@ -32,19 +57,22 @@ jobs:
 
       - name: Stage daemon archive
         run: |
-          STAGED_DIR="thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu"
+          TAG="${{ steps.tag.outputs.tag }}"
+          STAGED_DIR="thermalwriter-${TAG}-x86_64-unknown-linux-gnu"
           mkdir -p "$STAGED_DIR/bin"
           mkdir -p "$STAGED_DIR/packaging/udev"
+          mkdir -p "$STAGED_DIR/packaging/lib"
           mkdir -p "$STAGED_DIR/systemd"
           mkdir -p "$STAGED_DIR/docs/assets"
           mkdir -p "$STAGED_DIR/skills/designing-layouts"
           cp target/release/thermalwriter "$STAGED_DIR/bin/"
           cp target/release/thermalwriter-tray "$STAGED_DIR/bin/"
-          cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md "$STAGED_DIR/"
-          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md "$STAGED_DIR/docs/"
+          cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md "$STAGED_DIR/"
+          cp docs/configuration.md docs/gui.md docs/release.md docs/architecture.md docs/profiling.md docs/profiling-baselines.md docs/comparison-methodology.md docs/troubleshooting.md "$STAGED_DIR/docs/"
           cp -r docs/assets/. "$STAGED_DIR/docs/assets/"
           cp skills/designing-layouts/SKILL.md "$STAGED_DIR/skills/designing-layouts/"
           cp packaging/install.sh packaging/uninstall.sh packaging/thermalwriter-tray.desktop "$STAGED_DIR/packaging/"
+          cp packaging/lib/tray-install.sh "$STAGED_DIR/packaging/lib/"
           cp packaging/udev/99-thermalwriter-rapl.rules "$STAGED_DIR/packaging/udev/"
           cp systemd/thermalwriter.service systemd/thermalwriter-tray.service "$STAGED_DIR/systemd/"
           tar -czf "$STAGED_DIR.tar.gz" "$STAGED_DIR"
@@ -65,21 +93,54 @@ jobs:
 
       - name: Prepare release assets
         run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${{ steps.tag.outputs.version }}"
           mkdir -p release_dist
-          cp thermalwriter-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz release_dist/
+          cp "thermalwriter-${TAG}-x86_64-unknown-linux-gnu.tar.gz" release_dist/
           # Space-free asset names: GitHub rewrites spaces to dots on upload,
           # which would break SHA256SUMS verification and README install globs.
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
           cp target/release/bundle/appimage/*.AppImage "release_dist/Thermalwriter-Config_${VERSION}_amd64.AppImage"
           cp target/release/bundle/deb/*.deb "release_dist/thermalwriter-config_${VERSION}_amd64.deb"
           cd release_dist
           sha256sum * > SHA256SUMS
 
+      - name: Extract changelog section for release notes
+        id: notes
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${{ steps.tag.outputs.version }}"
+          NOTES_FILE="release_dist/RELEASE_NOTES.md"
+          awk -v ver="$VERSION" '
+            BEGIN { found=0 }
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "^## \\[" ver "\\]") found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [[ ! -s "$NOTES_FILE" ]]; then
+            echo "No CHANGELOG section for [$VERSION]; using tag line only." > "$NOTES_FILE"
+          fi
+          echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
       - name: Create and upload release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.ref_name }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes-file CHANGELOG.md --prerelease
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            PRERELEASE="false"
+          fi
+          PRERELEASE_FLAG="--prerelease=false"
+          if [[ "$PRERELEASE" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file "${{ steps.notes.outputs.path }}" $PRERELEASE_FLAG
+          fi
           gh release upload "$TAG" release_dist/* --clobber

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 #[derive(Parser, Debug)]
 #[command(
     name = "thermalwriter",
+    version,
     about = "Thermalright cooler LCD display daemon"
 )]
 pub struct Cli {

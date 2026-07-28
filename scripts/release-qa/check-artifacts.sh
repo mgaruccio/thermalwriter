@@ -22,9 +22,10 @@ fail=0
 pass() { log_both "PASS  $*"; }
 fail_item() { log_both "FAIL  $*"; fail=1; }
 
-qa_require_cmd tar sha256sum find grep sed
+# shellcheck source=lib/glibc-check.sh
+source "$SCRIPT_DIR/lib/glibc-check.sh"
 
-[[ -d "$ART_DIR" ]] || qa_die "artifacts dir not found: $ART_DIR (run fetch-artifacts.sh first)"
+qa_require_cmd tar sha256sum find grep sed strings objdump
 qa_artifact_paths "$ART_DIR" "$QA_TAG" "$QA_VERSION"
 
 log_both "=== L0 artifact checks for $QA_TAG ==="
@@ -74,6 +75,8 @@ expected_files=(
     docs/release.md
     docs/architecture.md
     docs/comparison-methodology.md
+    docs/troubleshooting.md
+    THIRD_PARTY_NOTICES.md
 )
 
 for rel in "${expected_files[@]}"; do
@@ -94,6 +97,30 @@ if [[ -x "$ROOT/bin/thermalwriter-tray" ]]; then
     pass "bin/thermalwriter-tray is executable"
 else
     fail_item "bin/thermalwriter-tray not executable"
+fi
+
+log_both "--- GLIBC compatibility (<= 2.35) ---"
+for bin in "$ROOT/bin/thermalwriter" "$ROOT/bin/thermalwriter-tray"; do
+    if [[ -f "$bin" ]]; then
+        qa_assert_glibc_max "$bin" 2.35 >>"$REPORT" 2>&1 || fail_item "$(basename "$bin") GLIBC > 2.35"
+    fi
+done
+
+if [[ -f "$QA_APPIMAGE" ]]; then
+    EXTRACT_MCP="$OUT_DIR/appimage-extract-mcp"
+    rm -rf "$EXTRACT_MCP"
+    mkdir -p "$EXTRACT_MCP"
+    if (cd "$EXTRACT_MCP" && "$QA_APPIMAGE" --appimage-extract >/dev/null 2>&1); then
+        GUI_BIN="$(find "$EXTRACT_MCP/squashfs-root" -type f -name thermalwriter-gui -perm -111 | head -1)"
+        if [[ -n "$GUI_BIN" ]]; then
+            qa_assert_glibc_max "$GUI_BIN" 2.35 >>"$REPORT" 2>&1 || fail_item "GUI AppImage GLIBC > 2.35"
+            qa_assert_no_mcp_bridge_strings "$GUI_BIN" >>"$REPORT" 2>&1 || fail_item "GUI AppImage contains MCP bridge strings"
+        else
+            fail_item "could not find thermalwriter-gui inside AppImage"
+        fi
+    else
+        fail_item "AppImage --appimage-extract failed"
+    fi
 fi
 
 if [[ -x "$ROOT/packaging/install.sh" && -x "$ROOT/packaging/uninstall.sh" ]]; then

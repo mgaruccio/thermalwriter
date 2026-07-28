@@ -13,7 +13,7 @@
 - `cargo run --example render_layout layouts/svg/neon-dash-v2.svg 15 --mock` renders to the device for 15 seconds with mock sensor data.
 - `cargo run --features blitz --example preview_blitz layouts/blitz-glass.html` exercises the experimental Blitz renderer.
 - `cargo run -p thermalwriter-tray` starts the StatusNotifier tray (needs a desktop tray host + session bus).
-- `./packaging/install.sh` installs the daemon binary, optional tray (`INSTALL_TRAY=0` to skip), user systemd services, and udev rule; it may prompt for sudo.
+- `./packaging/install.sh` installs the daemon binary, optional tray (`INSTALL_TRAY=auto|0|1`), user systemd services, and udev rule; it may prompt for sudo.
 
 ## Coding Style & Naming Conventions
 

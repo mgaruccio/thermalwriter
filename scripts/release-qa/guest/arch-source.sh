@@ -82,30 +82,43 @@ guest_assert_ctl_status thermalwriter || true
 guest_assert_udev_rule || true
 guest_assert_service_stays_up 30 || true
 
-# AppImage on Arch
+# AppImage on Arch — test self-containment before pulling host WebKitGTK.
 if [[ -f "$APPIMAGE" ]]; then
     chmod +x "$APPIMAGE"
-    guest_log "AppImage smoke on Arch"
-    # AppImage still needs host GTK/WebKit stack (not fully bundled).
-    sudo pacman -S --needed --noconfirm \
-        xorg-server-xvfb fuse2 \
-        fribidi fontconfig harfbuzz gtk3 webkit2gtk-4.1 libsoup3 \
-        2>&1 | tail -n 8 || true
+    guest_log "AppImage smoke on Arch (minimal deps first)"
+    sudo pacman -S --needed --noconfirm xorg-server-xvfb fuse2 2>&1 | tail -n 8 || true
     set +e
     if command -v xvfb-run >/dev/null 2>&1; then
-        timeout 8s xvfb-run -a "$APPIMAGE" --appimage-extract-and-run >/tmp/tw-gui-appimage.log 2>&1
+        timeout 8s xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" >/tmp/tw-gui-appimage.log 2>&1
         rc=$?
     else
-        # minimal fallback
-        timeout 8s "$APPIMAGE" --appimage-extract-and-run >/tmp/tw-gui-appimage.log 2>&1
+        timeout 8s env APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" >/tmp/tw-gui-appimage.log 2>&1
         rc=$?
     fi
     set -e
     if [[ "$rc" -eq 124 || "$rc" -eq 0 ]]; then
-        guest_pass "AppImage launched on Arch (rc=$rc)"
+        guest_pass "AppImage launched on Arch with FUSE/extract fallback (rc=$rc)"
     else
-        guest_fail "AppImage exited rc=$rc on Arch"
-        tail -n 40 /tmp/tw-gui-appimage.log 2>/dev/null | sed 's/^/      /' || true
+        guest_log "AppImage failed with minimal deps; installing host WebKitGTK stack for diagnosis"
+        sudo pacman -S --needed --noconfirm \
+            fribidi fontconfig harfbuzz gtk3 webkit2gtk-4.1 libsoup3 \
+            2>&1 | tail -n 8 || true
+        set +e
+        if command -v xvfb-run >/dev/null 2>&1; then
+            timeout 8s xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" >/tmp/tw-gui-appimage-retry.log 2>&1
+            rc=$?
+        else
+            timeout 8s env APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" >/tmp/tw-gui-appimage-retry.log 2>&1
+            rc=$?
+        fi
+        set -e
+        if [[ "$rc" -eq 124 || "$rc" -eq 0 ]]; then
+            guest_pass "AppImage launched after host graphics stack install (rc=$rc)"
+            guest_info "AppImage is not fully standalone — host WebKitGTK/GTK required"
+        else
+            guest_fail "AppImage exited rc=$rc on Arch"
+            tail -n 40 /tmp/tw-gui-appimage-retry.log 2>/dev/null | sed 's/^/      /' || true
+        fi
     fi
 else
     guest_fail "AppImage missing: $APPIMAGE"

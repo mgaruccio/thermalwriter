@@ -16,9 +16,9 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [features]
-# Enable the Tauri devtools inspector. Activated automatically by `cargo tauri dev`;
-# NOT included in default features so `cargo tauri build` (release) omits it.
-devtools = ["tauri/devtools"]
+# Dev-only: Tauri inspector + MCP bridge plugin/capability. Enabled by `npm run tauri:dev`.
+# Release builds (`npm run tauri:build`) omit this feature entirely.
+devtools = ["tauri/devtools", "dep:tauri-plugin-mcp-bridge"]
 
 [dependencies]
 thermalwriter = { path = "../..", default-features = false }
@@ -32,11 +32,8 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
-# MCP bridge plugin so the GUI can be driven from Claude Code's Tauri MCP
-# server during development. The `#[cfg(debug_assertions)]` block in
-# src/lib.rs ensures `init()` is only called in dev builds, so release builds
-# never start the WebSocket server even though the crate is linked.
-tauri-plugin-mcp-bridge = "0.11"
+# Optional dev-only MCP bridge — see the `devtools` feature.
+tauri-plugin-mcp-bridge = { version = "0.11", optional = true }
 tauri-plugin-dialog = "2"
 
 [dev-dependencies]

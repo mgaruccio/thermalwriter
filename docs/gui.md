@@ -81,15 +81,16 @@ The menu is text-only (no freedesktop theme icon names). Hosts like Noctalia/Qui
 
 ### Install
 
-Source installs enable the tray by default:
+Source installs use **`INSTALL_TRAY=auto`** (default): the tray is installed only when a Config GUI is discoverable. Force or skip:
 
 ```sh
-./packaging/install.sh          # daemon + tray
-INSTALL_TRAY=0 ./packaging/install.sh   # daemon only
-cargo install --path tray --locked      # tray binary alone
+./packaging/install.sh                   # daemon; tray if GUI found
+INSTALL_TRAY=1 ./packaging/install.sh    # force tray (GUI-less menu OK)
+INSTALL_TRAY=0 ./packaging/install.sh    # daemon only
+cargo install --path tray --locked       # tray binary alone
 ```
 
-The installer prefers `~/.config/systemd/user/thermalwriter-tray.service` (`WantedBy=graphical-session.target`). An XDG autostart `.desktop` is installed **only** if enabling that unit fails (so Hyprland/uwsm, GNOME, and KDE do not double-start the tray). The binary also takes a single-instance flock under `$XDG_RUNTIME_DIR/thermalwriter/tray.lock`. Start manually with `thermalwriter-tray`.
+The installer enables **either** `~/.config/systemd/user/thermalwriter-tray.service` (`WantedBy=graphical-session.target`) **or** an XDG autostart `.desktop` entry when systemd enable fails — never both.
 
 Override the GUI launcher if it is not on `PATH`:
 

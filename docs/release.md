@@ -42,23 +42,38 @@ Expected bundle output directories:
 
 ## Tag-Release Artifacts
 
-GitHub release automation runs on tag push (matching `v*`) or `workflow_dispatch`. The following artifacts are compiled, packaged, hashed, and uploaded to the GitHub Release:
+GitHub release automation runs on:
+
+| Trigger | Prerelease? | Notes |
+| --- | --- | --- |
+| **Tag push** (`v*`) | **No** — becomes GitHub **Latest** | Normal releases |
+| **workflow_dispatch** | Configurable (`prerelease` input) | Explicit tag + optional prerelease flag |
+
+**Builder image**: `ubuntu-22.04` (glibc 2.35 baseline for prebuilt x86_64 binaries).
+
+Release notes are extracted from the matching `CHANGELOG.md` section (`## [X.Y.Z]`), not the entire file.
+
+The following artifacts are compiled, packaged, hashed, and uploaded:
 
 1. **Daemon Tarball**: `thermalwriter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` containing:
    - `bin/thermalwriter` (release binary)
    - `bin/thermalwriter-tray` (StatusNotifier tray controller)
    - `README.md`
    - `LICENSE`
+   - `THIRD_PARTY_NOTICES.md`
    - `packaging/install.sh`
+   - `packaging/lib/tray-install.sh`
    - `packaging/uninstall.sh`
    - `packaging/thermalwriter-tray.desktop`
    - `packaging/udev/99-thermalwriter-rapl.rules`
    - `systemd/thermalwriter.service`
    - `systemd/thermalwriter-tray.service`
-   - public docs under `docs/` (including `comparison-methodology.md`)
-2. **GUI Debian Package**: `*.deb`
-3. **GUI AppImage**: `*.AppImage`
-4. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.
+   - public docs under `docs/` (including `comparison-methodology.md`, `troubleshooting.md`)
+4. **GUI Debian Package**: `*.deb`
+5. **GUI AppImage**: `*.AppImage` (bundles WebKitGTK/GTK; not fully standalone — document FUSE / `APPIMAGE_EXTRACT_AND_RUN=1`)
+6. **Checksums**: `SHA256SUMS` containing hashes of all uploaded release files.
+
+**L0 QA** (`scripts/release-qa/host/run-l0.sh`) additionally verifies GLIBC ≤ 2.35 on daemon/tray/GUI binaries and asserts release GUI artifacts contain no MCP bridge strings.
 
 ## Clean-Machine Release QA (#90)
 

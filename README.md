@@ -1,7 +1,7 @@
 # thermalwriter
 
 [![CI](https://github.com/mgaruccio/thermalwriter/actions/workflows/ci.yml/badge.svg)](https://github.com/mgaruccio/thermalwriter/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/mgaruccio/thermalwriter)](https://github.com/mgaruccio/thermalwriter/releases)
+[![Release](https://img.shields.io/github/v/release/mgaruccio/thermalwriter?include_prereleases)](https://github.com/mgaruccio/thermalwriter/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 `thermalwriter` is a lightweight, Linux-native daemon for Thermalright cooler LCD displays. It renders designed sensor layouts — or any X11 app — and sends JPEG frames to the cooler over USB, with the always-on footprint of a proper background daemon instead of a desktop app.
@@ -13,7 +13,7 @@ Current status: Public Beta (`v0.1.3`).
 A cooler screen is a background accessory — the software driving it should cost almost nothing. thermalwriter is built to sit quietly in the background of a gaming PC:
 
 - **Lightweight, and measured**: ~81 MB PSS and **0.41% of one core** at the default 2 FPS (stock neon-dash layout, NVML GPU sensors, dirty-frame skip, 2000 ms sensor poll) — full protocol in the [comparison methodology](docs/comparison-methodology.md); frame-path microbenchmarks in [profiling baselines](docs/profiling-baselines.md).
-- **A real Linux daemon**: systemd user service, D-Bus control interface, unprivileged USB access via udev, clean SIGTERM shutdown, automatic USB reconnect.
+- **A real Linux daemon**: systemd user service, D-Bus control interface, unprivileged USB access via udev, and clean SIGTERM shutdown.
 - **Designed layouts**: SVG templates with live sensors, per-layout variables surfaced as GUI controls, global background images, and an optional Tauri configuration GUI.
 - **Streams any X11 app**: conky, cava, btop — anything — captured from a hidden Xvfb framebuffer straight to the LCD.
 
@@ -103,7 +103,8 @@ Only `87ad:70db` has been verified on physical hardware so far; the other IDs ar
 ## Requirements
 
 - Linux with systemd user services and udev.
-- Rust 1.85 or newer.
+- **Prebuilt x86_64 artifacts** target glibc **≥ 2.35** (built on Ubuntu 22.04). Check with `ldd --version`. Older distros should build from source.
+- Rust 1.85 or newer (source builds).
 - A supported Thermalright LCD cooler on USB.
 - D-Bus session bus, standard on desktop Linux.
 - Optional: Node.js for GUI development.
@@ -154,7 +155,13 @@ systemctl --user enable --now thermalwriter
 
 ## Install GUI Release Artifact
 
-The GUI companion app is available as a pre-compiled Debian package (`.deb`) or standalone executable (`.AppImage`) from the releases page.
+The GUI companion app is available as a pre-compiled Debian package (`.deb`) or AppImage from the releases page. **Primary distribution** is tarball + `.deb` + AppImage; an [AUR package](https://github.com/mgaruccio/thermalwriter/issues/88) is recommended follow-up for Arch users, not a launch blocker.
+
+The AppImage bundles WebKitGTK/GTK from the Tauri linuxdeploy pipeline but is **not fully standalone** — you normally need FUSE (`fuse2` / `libfuse2`). If mounting fails:
+
+```sh
+APPIMAGE_EXTRACT_AND_RUN=1 ./Thermalwriter-Config_*_amd64.AppImage
+```
 
 *Note: Installing or launching the GUI only installs/runs the GUI itself. It does **not** install the `thermalwriter` daemon, the systemd user service, or the udev rule. You must still install the daemon separately.*
 
@@ -168,15 +175,16 @@ sudo apt install ./thermalwriter-config_*_amd64.deb
 For general Linux distributions (via `.AppImage`):
 ```sh
 chmod +x ./Thermalwriter*.AppImage
-./Thermalwriter*.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Thermalwriter*.AppImage
 ```
 
 ### System tray
 
-`thermalwriter-tray` is a tiny StatusNotifierItem helper (separate from the Tauri GUI) for opening Config, switching layouts, and starting stream presets. Left-click opens/focuses the Config GUI; right-click shows a text-only menu. Source installs enable it by default:
+`thermalwriter-tray` is a tiny StatusNotifierItem helper (separate from the Tauri GUI) for opening Config, switching layouts, and starting stream presets. Left-click opens/focuses the Config GUI; right-click shows a text-only menu. The installer uses **`INSTALL_TRAY=auto`** (default): tray is installed only when a Config GUI is discoverable (`thermalwriter-gui` on PATH or a `Thermalwriter*.AppImage` in `~/Applications` / `~/Downloads`). Force or skip explicitly:
 
 ```sh
-./packaging/install.sh                 # daemon + tray
+./packaging/install.sh                 # daemon; tray if GUI found
+INSTALL_TRAY=1 ./packaging/install.sh  # daemon + tray (GUI-less menu OK)
 INSTALL_TRAY=0 ./packaging/install.sh  # daemon only
 cargo install --path tray --locked     # tray binary alone
 thermalwriter-tray &
@@ -251,8 +259,10 @@ The optional GUI source code is in `gui/`:
 cd gui
 npm ci
 npm run build
-npm run tauri:dev
+npm run tauri:dev    # devtools + MCP bridge on 127.0.0.1 (dev only)
 ```
+
+Agent-driven GUI testing via the Tauri MCP bridge: [docs/agent-testing.md](../docs/agent-testing.md). **Release builds do not include the MCP bridge.**
 
 The GUI talks to the daemon over D-Bus and can also render local previews.
 ## RAPL Udev Rule
@@ -279,6 +289,7 @@ For more information, consult the following documentation files:
 - [CHANGELOG.md](CHANGELOG.md) - Version history and changes.
 - [Configuration Guide](docs/configuration.md) - Full details on `config.toml` structure, defaults, and ranges.
 - [GUI Guide](docs/gui.md) - Detailed guide to the Svelte/Tauri-based configuration app.
+- [Troubleshooting](docs/troubleshooting.md) - Common install, daemon, GUI, streaming, and compatibility issues.
 - [Release Guide](docs/release.md) - Procedures for publishing and creating release packages.
 - [Architecture Guide](docs/architecture.md) - Internal design of the daemon and GUI components.
 - [Performance Tuning and Profiling](docs/profiling.md) - Whole-daemon profiling harness, Criterion benches, baseline workflow, and the autoresearch loop for performance work.

@@ -17,8 +17,14 @@ INSTALLED_BIN="$CARGO_BIN/thermalwriter"
 INSTALLED_TRAY_BIN="$CARGO_BIN/thermalwriter-tray"
 PREBUILT_BIN="$PROJECT_DIR/bin/thermalwriter"
 PREBUILT_TRAY_BIN="$PROJECT_DIR/bin/thermalwriter-tray"
-# Install the lightweight StatusNotifier tray by default (set INSTALL_TRAY=0 to skip).
-INSTALL_TRAY="${INSTALL_TRAY:-1}"
+# Tray install mode: auto (default) | 0 | 1
+#   auto — install tray only when a Config GUI is discoverable
+#   1    — force tray (useful without the GUI)
+#   0    — skip tray
+INSTALL_TRAY_MODE="${INSTALL_TRAY:-auto}"
+
+# shellcheck source=lib/tray-install.sh
+source "$SCRIPT_DIR/lib/tray-install.sh"
 
 if [[ $EUID -eq 0 ]]; then
     echo "Run this as your normal user, not root. It will prompt for sudo when needed." >&2
@@ -66,6 +72,11 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
     echo "error: systemd user session is not available; run from a logged-in desktop/user session" >&2
     exit 1
 fi
+
+if ! INSTALL_TRAY="$(tw_resolve_install_tray "$INSTALL_TRAY_MODE")"; then
+    exit 1
+fi
+tw_install_tray_mode_message "$INSTALL_TRAY_MODE" "$INSTALL_TRAY"
 
 if [[ -x "$PREBUILT_BIN" ]]; then
     echo "==> Installing bundled thermalwriter binary..."
@@ -192,4 +203,6 @@ echo "  journalctl --user -u thermalwriter -f"
 if [[ "$INSTALL_TRAY" == "1" ]]; then
     echo "  thermalwriter-tray          # system tray (Open Config, layouts, stream presets)"
     echo "  INSTALL_TRAY=0 $0           # reinstall without tray"
+elif [[ "$INSTALL_TRAY_MODE" == "auto" || "$INSTALL_TRAY_MODE" == "" ]]; then
+    echo "  INSTALL_TRAY=1 $0           # install tray without the Config GUI"
 fi

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Linux release compatibility: CI builds on `ubuntu-22.04` (glibc 2.35); L0 QA asserts prebuilt daemon/tray/GUI binaries require GLIBC ≤ 2.35; README documents x86_64/glibc baseline and `APPIMAGE_EXTRACT_AND_RUN=1`.
+- Vendored GUI fonts (Major Mono Display, IBM Plex Mono/Sans) with local `gui/src/fonts.css` — release GUI makes no external font requests; `THIRD_PARTY_NOTICES.md` covers embedded DejaVu + GUI fonts.
+- `docs/troubleshooting.md` and `docs/agent-testing.md` (Tauri MCP dev bridge runbook).
+- `thermalwriter --version` CLI output.
+- Tray install `INSTALL_TRAY=auto` (default): installs tray only when a Config GUI is discoverable; `INSTALL_TRAY=1` forces, `INSTALL_TRAY=0` skips.
+
+### Changed
+- GitHub release badge includes prereleases; tag pushes create non-prerelease Latest releases with per-version CHANGELOG notes; `workflow_dispatch` can set tag + prerelease flag.
+- Tauri MCP bridge is optional behind the `devtools` feature (localhost bind `127.0.0.1`); release builds do not link the plugin or ship its ACL.
+- AppImage docs: clarify WebKitGTK/GTK bundling, FUSE requirement, and non-standalone behavior; Arch L1 QA tries minimal deps before installing host WebKitGTK.
+- README: removed public “automatic USB reconnect” marketing claim (reconnect logic unchanged).
+
+### Fixed
+- Release QA tray assertions: expect systemd **or** XDG autostart, not both; auto tray mode on clean VMs without GUI.
+
 ## [0.1.3] - 2026-07-27
 
 ### Added
