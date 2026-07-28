@@ -50,7 +50,7 @@ qa_assert_no_mcp_bridge_strings() {
         printf 'FAIL  MCP check: binary not found: %s\n' "$bin" >&2
         return 1
     fi
-    if strings "$bin" | grep -qE 'plugin:mcp-bridge|mcp-bridge:default'; then
+    if grep -aEq 'plugin:mcp-bridge|mcp-bridge:default' "$bin"; then
         printf 'FAIL  %s contains MCP bridge strings\n' "$bin" >&2
         return 1
     fi
@@ -95,6 +95,7 @@ qa_assert_gui_bundle_notices() {
 
     for rel in \
         THIRD_PARTY_NOTICES.md \
+        DejaVu-LICENSE.txt \
         OFL-IBMPlexMono.txt \
         OFL-IBMPlexSans.txt \
         OFL-MajorMonoDisplay.txt; do

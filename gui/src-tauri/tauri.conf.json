@@ -33,6 +33,7 @@
     "targets": ["appimage", "deb"],
     "resources": [
       "../../THIRD_PARTY_NOTICES.md",
+      "../../assets/fonts/DejaVu-LICENSE.txt",
       "../src/fonts/OFL-IBMPlexMono.txt",
       "../src/fonts/OFL-IBMPlexSans.txt",
       "../src/fonts/OFL-MajorMonoDisplay.txt"

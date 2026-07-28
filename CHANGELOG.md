@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - Release workflow checks out the requested tag (workflow_dispatch), validates semver tags, sets Latest/prerelease explicitly, runs L0 checks pre-publish, and keeps release notes out of SHA256SUMS.
 - Tray install skips now remove any previously installed tray service/autostart/binary.
 - MCP capabilities use `capabilities_path_pattern` (no source-tree mutation); GUI bundles ship font/OFL notices.
+- Agent-testing runbook uses `dbus-run-session` for true D-Bus isolation; MCP grep check is pipefail-safe; GUI bundles include DejaVu license.
 
 ## [0.1.3] - 2026-07-27
 
