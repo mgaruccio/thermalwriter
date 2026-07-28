@@ -29,6 +29,8 @@ RESET=0
 [[ "${1:-}" == "--reset" ]] && RESET=1
 
 mkdir -p "$VM_DIR" "$IMG_DIR"
+KNOWN_HOSTS="${THERMALWRITER_QA_KNOWN_HOSTS:-$(qa_default_vm_dir)/known_hosts}"
+mkdir -p "$(dirname "$KNOWN_HOSTS")"
 
 if [[ ! -f "$BASE_IMG" ]]; then
     qa_log "downloading Arch cloud image"
@@ -60,7 +62,11 @@ stop_vm() {
     fi
 }
 
-[[ "$RESET" -eq 1 ]] && stop_vm && rm -f "$DISK" "$SEED"
+if [[ "$RESET" -eq 1 ]]; then
+    stop_vm
+    rm -f "$DISK" "$SEED"
+    ssh-keygen -f "$KNOWN_HOSTS" -R "[127.0.0.1]:$SSH_PORT" >/dev/null 2>&1 || true
+fi
 
 # Arch cloud image uses different defaults; build a dedicated user-data.
 if [[ ! -f "$SEED" || "$RESET" -eq 1 ]]; then

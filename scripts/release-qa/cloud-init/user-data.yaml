@@ -14,7 +14,6 @@ users:
 
 package_update: true
 packages:
-  - qemu-guest-agent
   - curl
   - ca-certificates
   - tar
@@ -23,7 +22,7 @@ packages:
   - dbus
   - systemd
   - xvfb
-  - libfuse2
+  - libfuse2t64
   - fuse3
   - git
   - pkg-config
@@ -35,7 +34,6 @@ disable_root: true
 
 runcmd:
   - [ loginctl, enable-linger, qa ]
-  - [ systemctl, enable, --now, qemu-guest-agent ]
   # Ensure user runtime dir scaffolding exists after linger.
   - [ mkdir, -p, /run/user/1000 ]
   - [ chown, qa:qa, /run/user/1000 ]

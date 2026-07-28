@@ -33,7 +33,8 @@ if [[ "${1:-}" == "--reset" ]]; then
 fi
 
 mkdir -p "$VM_DIR" "$IMG_DIR"
-mkdir -p "$(dirname "${THERMALWRITER_QA_KNOWN_HOSTS:-$(qa_default_vm_dir)/known_hosts}")"
+KNOWN_HOSTS="${THERMALWRITER_QA_KNOWN_HOSTS:-$(qa_default_vm_dir)/known_hosts}"
+mkdir -p "$(dirname "$KNOWN_HOSTS")"
 
 # --- base image ---
 if [[ ! -f "$BASE_IMG" ]]; then
@@ -76,6 +77,7 @@ stop_vm() {
 if [[ "$RESET" -eq 1 ]]; then
     stop_vm
     rm -f "$DISK" "$SEED"
+    ssh-keygen -f "$KNOWN_HOSTS" -R "[127.0.0.1]:$SSH_PORT" >/dev/null 2>&1 || true
 fi
 
 # --- cloud-init seed ---
