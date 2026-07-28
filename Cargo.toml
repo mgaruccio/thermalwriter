@@ -1,6 +1,6 @@
 [package]
 name = "thermalwriter"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "Linux daemon for Thermalright cooler LCD displays"

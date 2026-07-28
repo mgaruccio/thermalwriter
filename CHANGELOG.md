@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-28
+
 ### Added
 - Linux release compatibility: CI builds on `ubuntu-22.04` (glibc 2.35); L0 QA asserts prebuilt daemon/tray/GUI binaries require GLIBC ≤ 2.35; README documents x86_64/glibc baseline and `APPIMAGE_EXTRACT_AND_RUN=1`.
 - Vendored GUI fonts (Major Mono Display, IBM Plex Mono/Sans) with local `gui/src/fonts.css` — release GUI makes no external font requests; `THIRD_PARTY_NOTICES.md` covers embedded DejaVu + GUI fonts.
@@ -12,12 +14,14 @@ All notable changes to this project will be documented in this file.
 - Tray install `INSTALL_TRAY=auto` (default): installs tray only when a Config GUI is discoverable; `INSTALL_TRAY=1` forces, `INSTALL_TRAY=0` skips.
 
 ### Changed
+- Refined the Config GUI into a quieter display-studio interface with neutral floating surfaces, clearer labels, and streamlined Stream controls.
 - GitHub release badge includes prereleases; tag pushes create non-prerelease Latest releases with per-version CHANGELOG notes; `workflow_dispatch` can set tag + prerelease flag.
 - Tauri MCP bridge is optional behind the `devtools` feature (localhost bind `127.0.0.1`); release builds do not link the plugin or ship its ACL.
 - AppImage docs: clarify WebKitGTK/GTK bundling, FUSE requirement, and non-standalone behavior; Arch L1 QA tries minimal deps before installing host WebKitGTK.
 - README: removed public “automatic USB reconnect” marketing claim (reconnect logic unchanged).
 
 ### Fixed
+- Updated locked Svelte/Vite frontend dependencies to patched releases; `npm audit` reports zero known vulnerabilities.
 - Release QA tray assertions: expect systemd **or** XDG autostart, not both; auto tray mode on clean VMs without GUI.
 - Release workflow checks out the requested tag (workflow_dispatch), validates semver tags, sets Latest/prerelease explicitly, runs L0 checks pre-publish, and keeps release notes out of SHA256SUMS.
 - Tray install skips now remove any previously installed tray service/autostart/binary.

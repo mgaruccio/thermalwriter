@@ -5,6 +5,7 @@
 .agents/
 .claude/
 .codex/
+.pi/
 gui/node_modules/
 gui/dist/
 gui/.vite/
