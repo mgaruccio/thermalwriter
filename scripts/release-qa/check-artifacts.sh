@@ -114,7 +114,7 @@ if [[ -f "$QA_APPIMAGE" ]]; then
     EXTRACT_MCP="$OUT_DIR/appimage-extract-mcp"
     rm -rf "$EXTRACT_MCP"
     mkdir -p "$EXTRACT_MCP"
-    if (cd "$EXTRACT_MCP" && "$QA_APPIMAGE" --appimage-extract >/dev/null 2>&1); then
+    if chmod +x "$QA_APPIMAGE" && (cd "$EXTRACT_MCP" && "$QA_APPIMAGE" --appimage-extract >/dev/null 2>&1); then
         GUI_BIN="$(find "$EXTRACT_MCP/squashfs-root" -type f -name thermalwriter-gui -perm -111 | head -1)"
         if [[ -n "$GUI_BIN" ]]; then
             qa_assert_glibc_max "$GUI_BIN" 2.35 >>"$REPORT" 2>&1 || fail_item "GUI AppImage GLIBC > 2.35"
