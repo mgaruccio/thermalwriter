@@ -48,9 +48,13 @@ The tray unit is `systemd/thermalwriter-tray.service` (`WantedBy=graphical-sessi
 ## Multi-cooler transport
 
 Discovery (`src/transport/discovery.rs`) scans libusb and `scsi_generic`, applies
-the configured `auto` or `VID:PID` selector, and rejects zero/ambiguous matches.
-A `TransportConnector` handshakes one selected device and returns
-`Result<(Box<dyn Transport>, DeviceInfo)>`. `DeviceInfo` stores the negotiated
+the configured `auto`, `all`, or `VID:PID` selector, and rejects zero/ambiguous
+matches for single-device selectors. `display.device = "all"` opens every
+supported display in deterministic order (VID, PID, then physical path) and
+mirrors one rendered frame to each output with aspect-preserving letterboxing.
+A `TransportConnector` handshakes the selected device(s) and returns
+`ConnectedOutputs` via `connect_all()`, or a single transport via `connect()`
+for `auto` and `VID:PID`. `DeviceInfo` stores the negotiated
 VID, PID, PM, SUB, FBL, wire protocol, and typed `DeviceProfile`. The profile
 stores native width and height, `FrameEncoding`, and the `rotate_panel`,
 `widescreen`, `encode_baseline`, `encode_base`, and `encode_invert` controls

@@ -13,12 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn parse_device_selector(s: &str) -> Result<(), String> {
     let s = s.trim();
-    if s.eq_ignore_ascii_case("auto") {
+    if s.eq_ignore_ascii_case("auto") || s.eq_ignore_ascii_case("all") {
         return Ok(());
     }
     let (vid_s, pid_s) = s
         .split_once(':')
-        .ok_or_else(|| format!("must be 'auto' or 'VID:PID', got {s:?}"))?;
+        .ok_or_else(|| format!("must be 'auto', 'all', or 'VID:PID', got {s:?}"))?;
     let parse = |part: &str| -> Result<u16, String> {
         let part = part
             .trim()
@@ -57,7 +57,7 @@ pub struct DisplayConfig {
     pub rotation: u16,
     /// Display mode: "svg", "html", or "xvfb".
     pub mode: String,
-    /// Device selector: `"auto"` or `"VID:PID"` (hex). Default auto.
+    /// Device selector: `"auto"`, `"all"`, or `"VID:PID"` (hex). Default auto.
     pub device: String,
 }
 
@@ -831,6 +831,13 @@ mod tests {
         cfg.theme.source = "garbage".to_string();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("theme.source"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_all_device_selector() {
+        let mut cfg = Config::default();
+        cfg.display.device = "all".into();
+        cfg.validate().expect("all selector must validate");
     }
 
     #[test]

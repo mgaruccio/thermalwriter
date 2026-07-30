@@ -10,7 +10,7 @@ use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
 use thermalwriter::service::tick::{
     BackgroundApply, SourceBuildRequest, SourceBuildResult, SourceRevisionApply,
 };
-use thermalwriter::transport::discovery::TransportConnector;
+use thermalwriter::transport::discovery::{OpenedDisplay, TransportConnector};
 use thermalwriter::transport::{
     DeviceInfo, EncodedFrame, Transport, WireProtocol, build_device_info,
 };
@@ -253,6 +253,7 @@ async fn run_mock_tick(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    display_count_tx: tokio::sync::watch::Sender<u32>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     mut source_revision_rx: tokio::sync::mpsc::Receiver<
         thermalwriter::service::tick::SourceRevisionApply,
@@ -269,12 +270,15 @@ async fn run_mock_tick(
         tokio::sync::watch::channel::<Option<thermalwriter::sensor::LayoutSensorRecipe>>(None);
 
     let mut hub = SensorHub::new();
-    let transport: Option<Box<dyn Transport>> = Some(Box::new(MockTransport {
-        frames_sent,
-        connected: true,
-    }));
+    let outputs = Some(vec![OpenedDisplay {
+        transport: Box::new(MockTransport {
+            frames_sent,
+            connected: true,
+        }),
+        info: bulk_info(),
+    }]);
     run_tick_loop(
-        transport,
+        outputs,
         Some(bulk_info()),
         test_connector(),
         frame_source,
@@ -293,6 +297,7 @@ async fn run_mock_tick(
         None,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         &mut source_revision_rx,
         tick_rate_rx,
@@ -314,6 +319,7 @@ fn spawn_tick(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    display_count_tx: tokio::sync::watch::Sender<u32>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     tick_rate_rx: tokio::sync::watch::Receiver<u32>,
     fps: u32,
@@ -329,6 +335,7 @@ fn spawn_tick(
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         source_revision_rx,
         tick_rate_rx,
@@ -347,6 +354,7 @@ fn spawn_tick_with_source_revision(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    display_count_tx: tokio::sync::watch::Sender<u32>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     source_revision_rx: tokio::sync::mpsc::Receiver<
         thermalwriter::service::tick::SourceRevisionApply,
@@ -374,6 +382,7 @@ fn spawn_tick_with_source_revision(
                     shutdown_rx,
                     connected_tx,
                     display_tx,
+                    display_count_tx,
                     generation_tx,
                     source_revision_rx,
                     tick_rate_rx,
@@ -453,6 +462,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, _) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(30u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -469,6 +479,7 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         tick_rate_rx,
         30,
@@ -491,6 +502,7 @@ async fn tick_loop_applies_template_updates() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -510,6 +522,7 @@ async fn tick_loop_applies_template_updates() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         tick_rate_rx,
         20,
@@ -574,6 +587,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -593,6 +607,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         tick_rate_rx,
         20,
@@ -658,6 +673,7 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, _generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -700,6 +716,7 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         source_revision_rx,
         tick_rate_rx,
@@ -764,6 +781,7 @@ async fn tick_loop_acks_stale_source_revision_apply_as_failure() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, _generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -805,6 +823,7 @@ async fn tick_loop_acks_stale_source_revision_apply_as_failure() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         source_revision_rx,
         tick_rate_rx,
@@ -854,6 +873,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -872,6 +892,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         tick_rate_rx,
         20,
@@ -950,6 +971,7 @@ async fn tick_loop_accepts_background_updates() {
     let (_bg_apply_tx, bg_apply_rx) = tokio::sync::mpsc::channel(4);
     let (connected_tx, _) = tokio::sync::watch::channel(true);
     let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(480, 480));
+    let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
     let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(0u64);
     let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(20u32);
     let (source_build_tx, source_build_rx) = tokio::sync::mpsc::channel(4);
@@ -969,6 +991,7 @@ async fn tick_loop_accepts_background_updates() {
         shutdown_rx,
         connected_tx,
         display_tx,
+        display_count_tx,
         generation_tx,
         tick_rate_rx,
         20,
@@ -1103,12 +1126,16 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
     let frames_for_loop = Arc::clone(&frames_sent);
     let handle = tokio::spawn(async move {
         let mut hub = SensorHub::new();
-        let transport: Option<Box<dyn Transport>> = Some(Box::new(MockTransport {
-            frames_sent: frames_for_loop,
-            connected: true,
-        }));
+        let outputs = Some(vec![OpenedDisplay {
+            transport: Box::new(MockTransport {
+                frames_sent: frames_for_loop,
+                connected: true,
+            }),
+            info: bulk_info(),
+        }]);
+        let (display_count_tx, _) = tokio::sync::watch::channel(1u32);
         run_tick_loop(
-            transport,
+            outputs,
             Some(bulk_info()),
             test_connector(),
             Box::new(source),
@@ -1127,6 +1154,7 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
             None,
             connected_tx,
             display_tx,
+            display_count_tx,
             generation_tx,
             &mut source_revision_rx,
             tick_rate_rx,

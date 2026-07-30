@@ -25,23 +25,33 @@ pub enum DeviceSelector {
     /// Exactly one physical LCD must be present.
     #[default]
     Auto,
+    /// Mirror every discovered supported LCD (including identical VID:PID units).
+    All,
     /// Open the unique device with this USB id.
     UsbId { vid: u16, pid: u16 },
 }
 
 impl DeviceSelector {
-    /// Parse `auto` or `VID:PID` (hex, optional `0x` prefix).
+    /// Parse `auto`, `all`, or `VID:PID` (hex, optional `0x` prefix).
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
         if s.eq_ignore_ascii_case("auto") {
             return Ok(Self::Auto);
         }
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(Self::All);
+        }
         let (vid_s, pid_s) = s.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("device selector must be 'auto' or 'VID:PID', got {s:?}")
+            anyhow::anyhow!("device selector must be 'auto', 'all', or 'VID:PID', got {s:?}")
         })?;
         let vid = parse_hex_u16(vid_s).with_context(|| format!("invalid VID in {s:?}"))?;
         let pid = parse_hex_u16(pid_s).with_context(|| format!("invalid PID in {s:?}"))?;
         Ok(Self::UsbId { vid, pid })
+    }
+
+    /// Whether this selector drives every matching display in mirror mode.
+    pub fn is_mirror_all(&self) -> bool {
+        matches!(self, Self::All)
     }
 }
 
@@ -49,6 +59,7 @@ impl fmt::Display for DeviceSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auto => write!(f, "auto"),
+            Self::All => write!(f, "all"),
             Self::UsbId { vid, pid } => write!(f, "{vid:04x}:{pid:04x}"),
         }
     }
@@ -430,9 +441,45 @@ fn resolve_usb_ancestor(sysfs_sg: &Path) -> Option<UsbAncestor> {
 
 fn selector_matches(device: &DiscoveredDevice, selector: &DeviceSelector) -> bool {
     match selector {
-        DeviceSelector::Auto => true,
+        DeviceSelector::Auto | DeviceSelector::All => true,
         DeviceSelector::UsbId { vid, pid } => device.vid == *vid && device.pid == *pid,
     }
+}
+
+fn device_path_sort_key(path: &DevicePath) -> (u8, u8, String) {
+    match path {
+        DevicePath::Usb { bus, address, .. } => (0, *bus, format!("{address:03}")),
+        DevicePath::Scsi { devnode, .. } => (1, 0, devnode.to_string_lossy().into_owned()),
+    }
+}
+
+/// Stable ordering for multi-display mirror mode (identical VID:PID units included).
+pub fn sort_discovered(devices: &mut [DiscoveredDevice]) {
+    devices.sort_by(|left, right| {
+        left.vid
+            .cmp(&right.vid)
+            .then(left.pid.cmp(&right.pid))
+            .then(device_path_sort_key(&left.path).cmp(&device_path_sort_key(&right.path)))
+    });
+}
+
+fn no_matching_device_error(
+    devices: &[DiscoveredDevice],
+    selector: &DeviceSelector,
+) -> anyhow::Error {
+    let available = if devices.is_empty() {
+        "none".to_string()
+    } else {
+        devices
+            .iter()
+            .map(|d| d.identity())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    anyhow::anyhow!(
+        "no matching LCD for selector '{selector}' (available: {available}). \
+         Check udev rules, cable access, and that the cooler is plugged in."
+    )
 }
 
 /// Select devices matching `selector`. Errors on zero or ambiguous matches.
@@ -440,27 +487,17 @@ pub fn select_devices(
     devices: &[DiscoveredDevice],
     selector: &DeviceSelector,
 ) -> Result<DiscoveredDevice> {
+    if matches!(selector, DeviceSelector::All) {
+        bail!("select_devices does not support selector 'all'; use select_all_devices instead");
+    }
+
     let matched: Vec<&DiscoveredDevice> = devices
         .iter()
         .filter(|device| selector_matches(device, selector))
         .collect();
 
     match matched.as_slice() {
-        [] => {
-            let available = if devices.is_empty() {
-                "none".to_string()
-            } else {
-                devices
-                    .iter()
-                    .map(|d| d.identity())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            };
-            bail!(
-                "no matching LCD for selector '{selector}' (available: {available}). \
-                 Check udev rules, cable access, and that the cooler is plugged in."
-            );
-        }
+        [] => Err(no_matching_device_error(devices, selector)),
         [one] => Ok((*one).clone()),
         many => {
             let list = many
@@ -470,9 +507,48 @@ pub fn select_devices(
                 .join("; ");
             bail!(
                 "ambiguous LCD selection for '{selector}': found {} devices: {list}. \
-                 Set display.device to a specific VID:PID or unplug extras.",
+                 Set display.device to a specific VID:PID, use 'all' to mirror every display, or unplug extras.",
                 many.len()
             );
+        }
+    }
+}
+
+/// Select every device matching `selector` in deterministic order.
+///
+/// For `all`, returns all supported displays (including duplicate VID:PID units).
+/// For `auto` and `usb_id`, behaves like [`select_devices`] but returns a one-element vec.
+pub fn select_all_devices(
+    devices: &[DiscoveredDevice],
+    selector: &DeviceSelector,
+) -> Result<Vec<DiscoveredDevice>> {
+    let mut matched: Vec<DiscoveredDevice> = devices
+        .iter()
+        .filter(|device| selector_matches(device, selector))
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        return Err(no_matching_device_error(devices, selector));
+    }
+
+    sort_discovered(&mut matched);
+
+    match selector {
+        DeviceSelector::All => Ok(matched),
+        DeviceSelector::Auto | DeviceSelector::UsbId { .. } => {
+            if matched.len() > 1 {
+                let list = matched
+                    .iter()
+                    .map(|d| d.identity())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                bail!(
+                    "ambiguous LCD selection for '{selector}': found {} devices: {list}. \
+                     Set display.device to a specific VID:PID, use 'all' to mirror every display, or unplug extras.",
+                    matched.len()
+                );
+            }
+            Ok(matched)
         }
     }
 }
@@ -531,6 +607,58 @@ fn hardware_or_no_device<T>(
     }
 }
 
+/// One opened display transport plus negotiated profile.
+pub struct OpenedDisplay {
+    pub transport: Box<dyn Transport>,
+    pub info: DeviceInfo,
+}
+
+/// All displays opened for the active mirror group. The first entry is primary.
+pub struct ConnectedOutputs {
+    pub outputs: Vec<OpenedDisplay>,
+}
+
+impl ConnectedOutputs {
+    pub fn primary(&self) -> &DeviceInfo {
+        &self.outputs[0].info
+    }
+
+    pub fn display_count(&self) -> u32 {
+        self.outputs.len() as u32
+    }
+
+    pub fn from_single(transport: Box<dyn Transport>, info: DeviceInfo) -> Self {
+        Self {
+            outputs: vec![OpenedDisplay { transport, info }],
+        }
+    }
+}
+
+fn open_all_discovered(devices: &[DiscoveredDevice]) -> Result<Vec<OpenedDisplay>> {
+    let mut opened = Vec::with_capacity(devices.len());
+    for device in devices {
+        match open_discovered(device) {
+            Ok((transport, info)) => {
+                info!("Selected device {}", device.identity());
+                opened.push(OpenedDisplay { transport, info });
+            }
+            Err(error) => {
+                for mut output in opened {
+                    output.transport.close();
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(opened)
+}
+
+fn null_connected_outputs(info: DeviceInfo) -> Result<ConnectedOutputs> {
+    let mut transport = NullTransport::with_profile(info.clone());
+    let _ = transport.handshake()?;
+    Ok(ConnectedOutputs::from_single(Box::new(transport), info))
+}
+
 /// Opens, handshakes, and returns a negotiated transport pair.
 pub struct TransportConnector {
     pub selector: DeviceSelector,
@@ -550,7 +678,27 @@ impl TransportConnector {
     /// `THERMALWRITER_PROFILE` is resolved first (immutable after process start).
     /// With `THERMALWRITER_TRANSPORT=null` (or profile without hardware), the
     /// fixture's `DeviceInfo` is passed to `NullTransport::with_profile`.
+    ///
+    /// For `display.device = "all"`, use [`Self::connect_all`] instead.
     pub fn connect(&self) -> Result<(Box<dyn Transport>, DeviceInfo)> {
+        if self.selector.is_mirror_all() {
+            bail!("connect() does not support selector 'all'; use connect_all() instead");
+        }
+        let connected = self.connect_all()?;
+        let OpenedDisplay { transport, info } = connected
+            .outputs
+            .into_iter()
+            .next()
+            .expect("non-all connect always returns exactly one output");
+        Ok((transport, info))
+    }
+
+    /// Discover, open, and handshake every display selected by the connector.
+    ///
+    /// Mirror mode (`all`) opens every supported device in deterministic order.
+    /// `auto` and `VID:PID` return a single output. Null transport and fixture
+    /// fallback always yield one output.
+    pub fn connect_all(&self) -> Result<ConnectedOutputs> {
         let profile_id = std::env::var("THERMALWRITER_PROFILE")
             .ok()
             .filter(|s| !s.is_empty());
@@ -570,44 +718,44 @@ impl TransportConnector {
             } else {
                 device_info_from_fixture("bulk-87ad-70db-pm4-sub5-fbl72")?
             };
-            let mut t = NullTransport::with_profile(info.clone());
-            let _ = t.handshake()?;
             if let Some(id) = &profile_id {
                 info!("Null transport with THERMALWRITER_PROFILE={id}");
             } else {
                 info!("Null transport with default bulk 480x480 fixture");
             }
-            return Ok((Box::new(t), info));
+            return null_connected_outputs(info);
         }
 
         if let Some(id) = &profile_id {
             // Prefer real hardware when present. A fixture fallback is valid only
             // after a successful scan positively establishes no selector match.
-            if let Some(pair) = hardware_or_no_device(self.connect_hardware())? {
-                return Ok(pair);
+            if let Some(connected) = hardware_or_no_device(self.connect_hardware_all())? {
+                return Ok(connected);
             }
             let info = device_info_from_fixture(id)?;
-            let mut t = NullTransport::with_profile(info.clone());
-            let _ = t.handshake()?;
             info!("THERMALWRITER_PROFILE={id}: using fixture profile without hardware");
-            return Ok((Box::new(t), info));
+            return null_connected_outputs(info);
         }
 
-        self.connect_hardware()
+        self.connect_hardware_all()
             .map_err(HardwareConnectError::into_anyhow)
     }
 
-    fn connect_hardware(
-        &self,
-    ) -> std::result::Result<(Box<dyn Transport>, DeviceInfo), HardwareConnectError> {
-        connect_scanned_with(
-            scan_devices().context("device scan failed"),
-            &self.selector,
-            |selected| {
-                info!("Selected device {}", selected.identity());
-                open_discovered(selected)
-            },
-        )
+    fn connect_hardware_all(&self) -> std::result::Result<ConnectedOutputs, HardwareConnectError> {
+        let devices = scan_devices().map_err(HardwareConnectError::Failed)?;
+        if !devices
+            .iter()
+            .any(|device| selector_matches(device, &self.selector))
+        {
+            let error = select_all_devices(&devices, &self.selector)
+                .expect_err("zero matching devices must produce a selection error");
+            return Err(HardwareConnectError::NoDevice(error));
+        }
+        let selected =
+            select_all_devices(&devices, &self.selector).map_err(HardwareConnectError::Failed)?;
+        open_all_discovered(&selected)
+            .map(|outputs| ConnectedOutputs { outputs })
+            .map_err(HardwareConnectError::Failed)
     }
 }
 
@@ -870,8 +1018,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_auto_and_usb_id() {
+    fn parse_auto_all_and_usb_id() {
         assert_eq!(DeviceSelector::parse("auto").unwrap(), DeviceSelector::Auto);
+        assert_eq!(DeviceSelector::parse("ALL").unwrap(), DeviceSelector::All);
         assert_eq!(
             DeviceSelector::parse("87AD:70DB").unwrap(),
             DeviceSelector::UsbId {
@@ -887,6 +1036,44 @@ mod tests {
             }
         );
         assert!(DeviceSelector::parse("nope").is_err());
+    }
+
+    fn sample_device(address: u8) -> DiscoveredDevice {
+        DiscoveredDevice {
+            vid: 0x87ad,
+            pid: 0x70db,
+            protocol: WireProtocol::Bulk,
+            serial: None,
+            path: DevicePath::Usb {
+                bus: 1,
+                address,
+                interface: 0,
+                ep_in: 0x81,
+                ep_out: 0x01,
+            },
+        }
+    }
+
+    #[test]
+    fn select_all_returns_every_matching_device_in_order() {
+        let devices = vec![sample_device(9), sample_device(2), sample_device(3)];
+        let selected = select_all_devices(&devices, &DeviceSelector::All).expect("all selector");
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].path, sample_device(2).path);
+        assert_eq!(selected[1].path, sample_device(3).path);
+        assert_eq!(selected[2].path, sample_device(9).path);
+    }
+
+    #[test]
+    fn select_all_includes_identical_vid_pid_units() {
+        let first = sample_device(2);
+        let second = sample_device(3);
+        let selected = select_all_devices(&[first.clone(), second.clone()], &DeviceSelector::All)
+            .expect("duplicate VID:PID units");
+        assert_eq!(selected, vec![first, second]);
+        assert!(
+            select_devices(&[sample_device(2), sample_device(3)], &DeviceSelector::Auto).is_err()
+        );
     }
 
     #[test]

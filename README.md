@@ -303,12 +303,22 @@ For more information, consult the following documentation files:
 
 ## Multi-cooler operation
 
-`display.device = "auto"` requires exactly one supported physical display. When
-multiple connected displays have distinct USB IDs, select one with an explicit
-hexadecimal `VID:PID`. Displays sharing the same `VID:PID` cannot currently be
-disambiguated; unplug extras. For hardware-free development, set
+`display.device = "auto"` requires exactly one supported physical display. Set
+`display.device = "all"` to mirror the same layout, mode, rotation, and
+background to every attached supported display (including identical `VID:PID`
+units). Mirroring renders once at the primary display's oriented canvas, then
+letterboxes each output to its own negotiated resolution. D-Bus `connected`,
+`resolution`, and status `resolution` describe the primary display only;
+`display_count` in `get_status` reports how many outputs are active.
+
+When multiple connected displays have distinct USB IDs and you want a single
+display, select one with an explicit hexadecimal `VID:PID`. Two devices
+sharing the same `VID:PID` cannot be targeted individually unless you use
+`all` or unplug extras. For hardware-free development, set
 `THERMALWRITER_TRANSPORT=null` and optionally select a negotiated fixture with
 `THERMALWRITER_PROFILE=<fixture-id>`.
+
+Independent per-screen layouts and selectors remain a planned follow-up.
 
 List native resolutions and render the visual evidence matrix:
 

@@ -87,6 +87,60 @@ pub fn rotate_pixels(
     Ok(rotated)
 }
 
+/// Aspect-preserving contain: scale `frame` to fit within `target_w`×`target_h`
+/// and center it on a black letterbox canvas.
+pub fn adapt_frame_contain(frame: &RawFrame, target_w: u32, target_h: u32) -> RawFrame {
+    if frame.width == target_w && frame.height == target_h {
+        return frame.clone();
+    }
+
+    let mut canvas = vec![0u8; (target_w * target_h * 3) as usize];
+    if frame.width == 0 || frame.height == 0 || target_w == 0 || target_h == 0 {
+        return RawFrame {
+            data: canvas,
+            width: target_w,
+            height: target_h,
+        };
+    }
+
+    let scale = f64::min(
+        f64::from(target_w) / f64::from(frame.width),
+        f64::from(target_h) / f64::from(frame.height),
+    );
+    let scaled_w = ((f64::from(frame.width) * scale).round() as u32).clamp(1, target_w);
+    let scaled_h = ((f64::from(frame.height) * scale).round() as u32).clamp(1, target_h);
+    let offset_x = (target_w - scaled_w) / 2;
+    let offset_y = (target_h - scaled_h) / 2;
+
+    let src_w = frame.width as usize;
+    let src_h = frame.height as usize;
+    let dst_w = target_w as usize;
+    let dst_h = target_h as usize;
+
+    for dst_y in 0..scaled_h as usize {
+        let src_y = (dst_y as f64 / scaled_h as f64 * src_h as f64) as usize;
+        let src_y = src_y.min(src_h.saturating_sub(1));
+        for dst_x in 0..scaled_w as usize {
+            let src_x = (dst_x as f64 / scaled_w as f64 * src_w as f64) as usize;
+            let src_x = src_x.min(src_w.saturating_sub(1));
+            let src_idx = (src_y * src_w + src_x) * 3;
+            let canvas_x = offset_x as usize + dst_x;
+            let canvas_y = offset_y as usize + dst_y;
+            if canvas_x >= dst_w || canvas_y >= dst_h {
+                continue;
+            }
+            let dst_idx = (canvas_y * dst_w + canvas_x) * 3;
+            canvas[dst_idx..dst_idx + 3].copy_from_slice(&frame.data[src_idx..src_idx + 3]);
+        }
+    }
+
+    RawFrame {
+        data: canvas,
+        width: target_w,
+        height: target_h,
+    }
+}
+
 /// Encode `frame` for `info` at the given user `rotation` and JPEG `quality`.
 ///
 /// Requires the input frame dimensions to match the user-oriented canvas
@@ -366,6 +420,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn adapt_frame_contain_letterboxes_widescreen_to_square() {
+        let frame = corner_frame(480, 240);
+        let adapted = adapt_frame_contain(&frame, 480, 480);
+        assert_eq!((adapted.width, adapted.height), (480, 480));
+        // Top and bottom bands stay black.
+        assert_eq!(&adapted.data[..3], &[0, 0, 0]);
+        let bottom_row = (480 * 479 * 3) as usize;
+        assert_eq!(&adapted.data[bottom_row..bottom_row + 3], &[0, 0, 0]);
+        // Center row should contain scaled content (not all black).
+        let mid_row = (480 * 240 * 3) as usize;
+        assert_ne!(&adapted.data[mid_row..mid_row + 3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn adapt_frame_contain_preserves_square_without_copy_when_matching() {
+        let frame = solid_frame(320, 320, [10, 20, 30]);
+        let adapted = adapt_frame_contain(&frame, 320, 320);
+        assert_eq!(adapted.data, frame.data);
     }
 
     #[test]

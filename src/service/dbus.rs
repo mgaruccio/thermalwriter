@@ -97,6 +97,8 @@ pub struct ServiceState {
     pub mode: String,
     pub connected: bool,
     pub resolution: (u32, u32),
+    /// Number of active mirrored displays (0 when disconnected).
+    pub display_count: u32,
     pub tick_rate: u32,
     pub jpeg_quality: u8,
     pub shutdown_tx: watch::Sender<bool>,
@@ -742,6 +744,7 @@ impl DisplayInterface {
             "resolution".to_string(),
             format!("{}x{}", state.resolution.0, state.resolution.1),
         );
+        status.insert("display_count".to_string(), state.display_count.to_string());
         status.insert("tick_rate".to_string(), state.tick_rate.to_string());
         status
     }
@@ -1303,6 +1306,7 @@ accent_color: color = "#ff0000" "Accent"
             mode: "svg".to_string(),
             connected: true,
             resolution: (480, 480),
+            display_count: 1,
             tick_rate: display_tick_rate,
             jpeg_quality: 85,
             shutdown_tx,

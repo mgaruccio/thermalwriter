@@ -24,8 +24,7 @@ use thermalwriter::service::tick::{
 };
 use thermalwriter::theme::ThemePalette;
 use thermalwriter::transport::DeviceInfo;
-use thermalwriter::transport::Transport;
-use thermalwriter::transport::discovery::{DeviceSelector, TransportConnector};
+use thermalwriter::transport::discovery::{DeviceSelector, OpenedDisplay, TransportConnector};
 
 // Heap allocation profiling, behind the `dhat-heap` feature (never enabled in
 // the shipped default build). The global allocator swap applies to the whole
@@ -206,34 +205,39 @@ async fn main() -> Result<()> {
             );
             TransportConnector::new(DeviceSelector::Auto)
         });
-    let (transport, device_info, connected, display): (
-        Option<Box<dyn Transport>>,
+    let (initial_outputs, device_info, connected, display, display_count): (
+        Option<Vec<OpenedDisplay>>,
         Option<DeviceInfo>,
         bool,
         RuntimeDisplayDimensions,
-    ) = match connector.connect() {
-        Ok((t, info)) => {
+        u32,
+    ) = match connector.connect_all() {
+        Ok(connected) => {
+            let primary = connected.primary().clone();
+            let count = connected.display_count();
             info!(
-                "Device: {}x{}, PM={}, SUB={}, FBL={}, protocol={}, encoding={}",
-                info.width(),
-                info.height(),
-                info.pm,
-                info.sub,
-                info.fbl,
-                info.protocol,
-                info.encoding()
+                "Device: {} display(s), primary {}x{}, PM={}, SUB={}, FBL={}, protocol={}, encoding={}",
+                count,
+                primary.width(),
+                primary.height(),
+                primary.pm,
+                primary.sub,
+                primary.fbl,
+                primary.protocol,
+                primary.encoding()
             );
             (
-                Some(t),
-                Some(info.clone()),
+                Some(connected.outputs),
+                Some(primary.clone()),
                 true,
-                RuntimeDisplayDimensions::new(info.width(), info.height()),
+                RuntimeDisplayDimensions::new(primary.width(), primary.height()),
+                count,
             )
         }
         Err(e) => {
             warn!("Display unavailable at startup: {e:#}; daemon will keep running and retry");
             // Disconnected publishes (0,0); 480×480 is internal-only for layout authoring.
-            (None, None, false, RuntimeDisplayDimensions::new(0, 0))
+            (None, None, false, RuntimeDisplayDimensions::new(0, 0), 0)
         }
     };
 
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (connected_tx, _) = watch::channel(connected);
     let (display_tx, _) = watch::channel(display);
+    let (display_count_tx, _) = watch::channel(display_count);
     let (template_tx, template_rx) = watch::channel(String::new());
     // Background watch channel: mode-change listener → tick loop (immediate apply)
     let (background_tx, background_rx) =
@@ -401,6 +406,7 @@ async fn main() -> Result<()> {
         mode: config.display.mode.clone(),
         connected,
         resolution: (display.width(), display.height()),
+        display_count,
         tick_rate: config.display.tick_rate,
         jpeg_quality: config.display.jpeg_quality,
         shutdown_tx,
@@ -440,6 +446,17 @@ async fn main() -> Result<()> {
             while display_rx.changed().await.is_ok() {
                 let display = *display_rx.borrow_and_update();
                 state_for_display.lock().await.resolution = (display.width(), display.height());
+            }
+        });
+    }
+
+    {
+        let mut display_count_rx = display_count_tx.subscribe();
+        let state_for_display_count = Arc::clone(&state);
+        tokio::spawn(async move {
+            while display_count_rx.changed().await.is_ok() {
+                let count = *display_count_rx.borrow_and_update();
+                state_for_display_count.lock().await.display_count = count;
             }
         });
     }
@@ -881,7 +898,7 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         res = tick::run_tick_loop(
-            transport,
+            initial_outputs,
             device_info,
             connector,
             initial_frame_source,
@@ -900,6 +917,7 @@ async fn main() -> Result<()> {
             Some(Arc::clone(&sensor_descriptors)),
             connected_tx,
             display_tx,
+            display_count_tx,
             generation_tx,
             &mut source_revision_rx,
             tick_rate_rx,

@@ -16,9 +16,9 @@ use crate::sensor::SensorHub;
 use crate::sensor::history::SensorHistory;
 use crate::service::frame_dump;
 use crate::service::mode_handler::RuntimeDisplayDimensions;
-use crate::transport::discovery::TransportConnector;
-use crate::transport::encode::encode_frame;
-use crate::transport::{DeviceInfo, EncodedFrame, Transport};
+use crate::transport::discovery::{ConnectedOutputs, OpenedDisplay, TransportConnector};
+use crate::transport::encode::{adapt_frame_contain, encode_frame};
+use crate::transport::{DeviceInfo, EncodedFrame};
 
 pub use crate::transport::encode::rotate_pixels;
 
@@ -64,15 +64,23 @@ pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u
 
 struct PendingConnection {
     generation: u64,
-    transport: Box<dyn Transport>,
-    info: DeviceInfo,
+    outputs: Vec<OpenedDisplay>,
     requested_at: Instant,
 }
 
 struct ActiveConnection {
     generation: u64,
-    transport: Box<dyn Transport>,
-    info: DeviceInfo,
+    outputs: Vec<OpenedDisplay>,
+}
+
+fn close_outputs(outputs: &mut [OpenedDisplay]) {
+    for output in outputs.iter_mut() {
+        output.transport.close();
+    }
+}
+
+fn try_connect(connector: &TransportConnector) -> Result<ConnectedOutputs> {
+    connector.connect_all()
 }
 
 /// Run the tick loop. Blocks until `shutdown` is signaled.
@@ -85,8 +93,8 @@ struct ActiveConnection {
 /// 4. Fatal send publishes `(0,0),false`, drops the generation, reconnects
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_loop(
-    mut transport: Option<Box<dyn Transport>>,
-    mut device_info: Option<DeviceInfo>,
+    mut initial_outputs: Option<Vec<OpenedDisplay>>,
+    mut primary_info: Option<DeviceInfo>,
     connector: TransportConnector,
     mut frame_source: Box<dyn FrameSource>,
     source_build_tx: tokio::sync::mpsc::Sender<SourceBuildRequest>,
@@ -105,6 +113,7 @@ pub async fn run_tick_loop(
     sensor_catalog: Option<crate::service::SharedSensorCatalog>,
     connected_tx: tokio::sync::watch::Sender<bool>,
     display_tx: tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    display_count_tx: tokio::sync::watch::Sender<u32>,
     generation_tx: tokio::sync::watch::Sender<u64>,
     source_revision_rx: &mut tokio::sync::mpsc::Receiver<SourceRevisionApply>,
     mut tick_rate_rx: tokio::sync::watch::Receiver<u32>,
@@ -129,12 +138,14 @@ pub async fn run_tick_loop(
     // frame (no keepalive required). Invalidated on source/template/bg swap.
     let mut last_frame_fingerprint: Option<u64> = None;
 
-    // Startup: if we already have a transport+info, the caller built the source
-    // at negotiated dimensions — commit ActiveConnection immediately.
-    match (transport.take(), device_info.take()) {
-        (Some(t), Some(info)) => {
+    // Startup: if we already have outputs+primary, the caller built the source
+    // at the primary oriented dimensions — commit ActiveConnection immediately.
+    match (initial_outputs.take(), primary_info.take()) {
+        (Some(outputs), Some(info)) if !outputs.is_empty() => {
             generation = 1;
+            let count = outputs.len() as u32;
             let _ = display_tx.send(RuntimeDisplayDimensions::new(info.width(), info.height()));
+            let _ = display_count_tx.send(count);
             let _ = connected_tx.send(true);
             let _ = generation_tx.send(generation);
             if let Some(bg) = &cached_background {
@@ -142,12 +153,12 @@ pub async fn run_tick_loop(
             }
             active = Some(ActiveConnection {
                 generation,
-                transport: t,
-                info,
+                outputs,
             });
         }
         _ => {
             let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+            let _ = display_count_tx.send(0);
             let _ = connected_tx.send(false);
             let _ = generation_tx.send(0);
             next_reconnect_at = Some(Instant::now());
@@ -204,18 +215,19 @@ pub async fn run_tick_loop(
             source_revision = apply.revision;
             if apply.reset_connection {
                 if let Some(mut connection) = pending.take() {
-                    connection.transport.close();
+                    close_outputs(&mut connection.outputs);
                 }
                 if let Some(mut connection) = active.take() {
-                    connection.transport.close();
+                    close_outputs(&mut connection.outputs);
                 }
                 let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                let _ = display_count_tx.send(0);
                 let _ = connected_tx.send(false);
                 let _ = generation_tx.send(0);
                 next_reconnect_at = Some(Instant::now());
             } else if let Some(mut connection) = pending.take() {
                 debug!("Invalidating pending source build at source revision {source_revision}");
-                connection.transport.close();
+                close_outputs(&mut connection.outputs);
                 next_reconnect_at = Some(Instant::now());
             }
             let _ = apply.ack.send(Ok(()));
@@ -230,6 +242,7 @@ pub async fn run_tick_loop(
                 &mut frame_source,
                 &cached_background,
                 &display_tx,
+                &display_count_tx,
                 &connected_tx,
                 &generation_tx,
                 &mut source_revision,
@@ -303,20 +316,23 @@ pub async fn run_tick_loop(
                 .map(|t| Instant::now() >= t)
                 .unwrap_or(true);
             if due {
-                match tokio::task::block_in_place(|| connector.connect()) {
-                    Ok((t, info)) => {
+                match tokio::task::block_in_place(|| try_connect(&connector)) {
+                    Ok(connected) => {
                         generation = generation.saturating_add(1);
+                        let primary = connected.primary().clone();
+                        let count = connected.display_count();
                         info!(
-                            "Device negotiated (pending gen {generation}): {}x{} PM={} SUB={} FBL={} {} {}",
-                            info.width(),
-                            info.height(),
-                            info.pm,
-                            info.sub,
-                            info.fbl,
-                            info.protocol,
-                            info.encoding()
+                            "Device negotiated (pending gen {generation}, {count} display(s)): {}x{} PM={} SUB={} FBL={} {} {}",
+                            primary.width(),
+                            primary.height(),
+                            primary.pm,
+                            primary.sub,
+                            primary.fbl,
+                            primary.protocol,
+                            primary.encoding()
                         );
-                        let (display_width, display_height) = info.oriented_dimensions(rotation)?;
+                        let (display_width, display_height) =
+                            primary.oriented_dimensions(rotation)?;
                         let req = SourceBuildRequest {
                             generation,
                             width: display_width,
@@ -326,12 +342,14 @@ pub async fn run_tick_loop(
                             warn!(
                                 "Failed to request source rebuild for generation {generation}; retrying"
                             );
+                            for mut output in connected.outputs {
+                                output.transport.close();
+                            }
                             next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                         } else {
                             pending = Some(PendingConnection {
                                 generation,
-                                transport: t,
-                                info,
+                                outputs: connected.outputs,
                                 requested_at: Instant::now(),
                             });
                             next_reconnect_at = None;
@@ -396,26 +414,45 @@ pub async fn run_tick_loop(
                 debug!("Skipping unchanged frame (fingerprint match)");
             } else {
                 let rendered = tokio::task::block_in_place(|| {
-                    let frame = frame_source.render(sensors)?;
-                    let encoded = encode_frame(&frame, &conn.info, rotation, jpeg_quality)?;
-                    Ok::<_, anyhow::Error>((frame, encoded))
+                    let frame = match frame_source.render(sensors) {
+                        Ok(frame) => frame,
+                        Err(error) => return Err((false, error)),
+                    };
+                    let mut fatal_disconnect = false;
+                    let mut send_error = None;
+                    for output in &mut conn.outputs {
+                        let (target_w, target_h) = match output.info.oriented_dimensions(rotation) {
+                            Ok(dimensions) => dimensions,
+                            Err(error) => return Err((false, error)),
+                        };
+                        let adapted = adapt_frame_contain(&frame, target_w, target_h);
+                        let encoded =
+                            match encode_frame(&adapted, &output.info, rotation, jpeg_quality) {
+                                Ok(encoded) => encoded,
+                                Err(error) => return Err((false, error)),
+                            };
+                        if let Err(error) = output.transport.send_frame(&encoded) {
+                            if !output.transport.is_connected() {
+                                fatal_disconnect = true;
+                            }
+                            send_error = Some(error);
+                            break;
+                        }
+                    }
+                    if let Some(error) = send_error {
+                        return Err((fatal_disconnect, error));
+                    }
+                    Ok(frame)
                 });
                 match rendered {
-                    Ok((frame, encoded)) => {
-                        debug!(
-                            "Frame encoded: {} bytes ({})",
-                            encoded.data.len(),
-                            encoded.encoding
-                        );
+                    Ok(frame) => {
+                        debug!("Frame rendered for {} display(s)", conn.outputs.len());
 
                         if frame_source.is_streaming() {
                             match frame_dump::frame_dir() {
                                 Ok(dir) => {
-                                    let dump_bytes = if encoded.encoding.is_jpeg() {
-                                        encoded.data.clone()
-                                    } else {
-                                        encode_jpeg(&frame, jpeg_quality, 0).unwrap_or_default()
-                                    };
+                                    let dump_bytes = encode_jpeg(&frame, jpeg_quality, rotation)
+                                        .unwrap_or_default();
                                     if !dump_bytes.is_empty()
                                         && let Err(e) = tokio::task::block_in_place(|| {
                                             frame_dump::write_frame_atomic(&dir, &dump_bytes)
@@ -428,28 +465,28 @@ pub async fn run_tick_loop(
                             }
                         }
 
-                        let send_result =
-                            tokio::task::block_in_place(|| conn.transport.send_frame(&encoded));
-                        if let Err(e) = send_result {
-                            warn!("Failed to send frame: {e}");
-                            if !conn.transport.is_connected() {
-                                warn!(
-                                    "Fatal send — dropping generation {} and reconnecting",
-                                    conn.generation
-                                );
-                                let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                                let _ = connected_tx.send(false);
-                                let _ = generation_tx.send(0);
-                                active = None;
-                                pending = None;
-                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
-                                last_frame_fingerprint = None;
-                            }
+                        last_frame_fingerprint = fingerprint;
+                    }
+                    Err((fatal_disconnect, error)) => {
+                        if fatal_disconnect {
+                            warn!("Failed to send mirrored frame: {error:#}");
+                            warn!(
+                                "Fatal send — dropping generation {} and reconnecting mirror group",
+                                conn.generation
+                            );
+                            close_outputs(&mut conn.outputs);
+                            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                            let _ = display_count_tx.send(0);
+                            let _ = connected_tx.send(false);
+                            let _ = generation_tx.send(0);
+                            active = None;
+                            pending = None;
+                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                            last_frame_fingerprint = None;
                         } else {
-                            last_frame_fingerprint = fingerprint;
+                            warn!("Render/encode/send failed: {error:#}");
                         }
                     }
-                    Err(e) => warn!("Render/encode failed: {e:#}"),
                 }
             }
         }
@@ -483,10 +520,10 @@ pub async fn run_tick_loop(
         }
     }
     if let Some(mut conn) = active.take() {
-        conn.transport.close();
+        close_outputs(&mut conn.outputs);
     }
-    if let Some(mut p) = pending.take() {
-        p.transport.close();
+    if let Some(mut pending_conn) = pending.take() {
+        close_outputs(&mut pending_conn.outputs);
     }
 
     Ok(())
@@ -500,6 +537,7 @@ fn handle_source_result(
     frame_source: &mut Box<dyn FrameSource>,
     cached_background: &Option<Arc<BackgroundImage>>,
     display_tx: &tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
+    display_count_tx: &tokio::sync::watch::Sender<u32>,
     connected_tx: &tokio::sync::watch::Sender<bool>,
     generation_tx: &tokio::sync::watch::Sender<u64>,
     current_source_revision: &mut u64,
@@ -537,6 +575,7 @@ fn handle_source_result(
                 if pending_match {
                     let _ = pending.take();
                     let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                    let _ = display_count_tx.send(0);
                     let _ = connected_tx.send(false);
                     let _ = generation_tx.send(0);
                     *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
@@ -566,24 +605,30 @@ fn handle_source_result(
             *last_frame_fingerprint = None;
             if pending_match {
                 let connection = pending.take().expect("pending_match");
+                let primary = connection
+                    .outputs
+                    .first()
+                    .map(|output| &output.info)
+                    .expect("pending connection must have outputs");
                 info!(
-                    "ActiveConnection generation {}: {}x{} {} {}",
+                    "ActiveConnection generation {}: {} display(s), primary {}x{} {} {}",
                     connection.generation,
-                    connection.info.width(),
-                    connection.info.height(),
-                    connection.info.protocol,
-                    connection.info.encoding()
+                    connection.outputs.len(),
+                    primary.width(),
+                    primary.height(),
+                    primary.protocol,
+                    primary.encoding()
                 );
                 let _ = display_tx.send(RuntimeDisplayDimensions::new(
-                    connection.info.width(),
-                    connection.info.height(),
+                    primary.width(),
+                    primary.height(),
                 ));
+                let _ = display_count_tx.send(connection.outputs.len() as u32);
                 let _ = connected_tx.send(true);
                 let _ = generation_tx.send(connection.generation);
                 *active = Some(ActiveConnection {
                     generation: connection.generation,
-                    transport: connection.transport,
-                    info: connection.info,
+                    outputs: connection.outputs,
                 });
                 *next_reconnect_at = None;
             } else {
@@ -602,6 +647,7 @@ fn handle_source_result(
                 );
                 *pending = None;
                 let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                let _ = display_count_tx.send(0);
                 let _ = connected_tx.send(false);
                 let _ = generation_tx.send(0);
                 *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));

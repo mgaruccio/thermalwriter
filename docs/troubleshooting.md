@@ -55,7 +55,7 @@ lsusb | grep -iE '87ad|87cd|0402|0416|0418'
 
 **Permission denied opening USB** — udev `uaccess` tags require a active session. Log out/in after install, or replug the device.
 
-**Wrong cooler when multiple displays share a VID:PID** — set `display.device = "VID:PID"` in `config.toml` (hex, lowercase). Distinct IDs can be selected explicitly; identical IDs cannot be disambiguated yet.
+**Wrong cooler when multiple displays share a VID:PID** — use `display.device = "all"` to mirror every attached unit, or unplug extras. To drive a single display when IDs differ, set `display.device = "VID:PID"` in `config.toml` (hex, lowercase).
 
 ## RAPL / CPU power group
 
