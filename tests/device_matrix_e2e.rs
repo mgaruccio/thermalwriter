@@ -467,6 +467,11 @@ fn e2e_ly_fixture_publishes_switches_captures_and_stops() {
 }
 
 #[test]
+fn e2e_ordered_686_inch_fixture_publishes_switches_captures_and_stops() {
+    run_fixture_capture("hid2-0416-5302-pm68-sub0-fbl192", "jpeg", 1280, 480);
+}
+
+#[test]
 fn e2e_scsi_fixture_publishes_switches_captures_and_stops() {
     run_fixture_capture("scsi-87cd-70db-pm100-sub0-fbl100", "rgb565-be", 320, 320);
 }

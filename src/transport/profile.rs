@@ -722,6 +722,19 @@ const FIXTURES: &[FixtureProfile] = &[
         sub: 3,
         fbl: 192,
     },
+    // HID2 PM68 1280×480 wide — the upstream fingerprint for the ordered
+    // Thermalright Trofeo Vision 6.86-inch panel. The shared VID:PID and
+    // PM68/FBL192 path are fixture-covered; SUB, wire angle, and firmware
+    // quirks remain capture-pending on this physical unit.
+    FixtureProfile {
+        id: "hid2-0416-5302-pm68-sub0-fbl192",
+        protocol: WireProtocol::HidType2,
+        vid: 0x0416,
+        pid: 0x5302,
+        pm: 68,
+        sub: 0,
+        fbl: 192,
+    },
     FixtureProfile {
         id: "ly-0416-5409-pm50-sub0-fbl50",
         protocol: WireProtocol::Ly,

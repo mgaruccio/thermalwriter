@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Tracked the ordered Thermalright Trofeo Vision 6.86-inch IPS 1280×480 panel as capture-pending, with a hardware-free HID Type 2 (`0416:5302`) PM68/FBL192 profile fixture.
+
 ## [0.1.4] - 2026-07-28
 
 ### Added

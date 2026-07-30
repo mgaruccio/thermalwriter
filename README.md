@@ -60,15 +60,16 @@ Source installs, the GUI, and full details below.
 
 | Status | USB ID | Transport / notes |
 | --- | --- | --- |
+| **Ordered; capture pending** | `0416:5302` (shared) | Thermalright Trofeo Vision 6.86-inch IPS, 1280×480. Upstream identifies HID Type 2 with PM68/FBL192; this unit's SUB, orientation, and firmware quirks will be recorded before marking it hardware-verified. |
 | **Hardware-smoked** | `87ad:70db` | Raw bulk Grand Vision family; negotiated PM/FBL selects native geometry and JPEG/RGB565 |
 | **Fixture-verified** | `87cd:70db`, `0402:3922` | SCSI LCD over `scsi_generic` |
 | **Fixture-verified** | `0416:5302` | HID LCD Type 2 |
 | **Fixture-verified** | `0418:5303`, `0418:5304` | HID LCD Type 3 |
-| **Fixture-verified** | `0416:5408`, `0416:5409` | LY bulk / Trofeo Vision family |
+| **Fixture-verified** | `0416:5408`, `0416:5409` | LY bulk / larger Trofeo Vision family |
 | **Fixture-verified** | `0416:5406` | Dual-shape Winbond device: vendor bulk preferred, SCSI fallback |
 | **Not supported** | Other IDs / non-Linux hosts | Unknown devices are rejected rather than guessed |
 
-Only `87ad:70db` has been verified on physical hardware so far; the other IDs are implemented against protocol fixtures derived from real captures. **Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
+Only `87ad:70db` has been verified on physical hardware so far; the other IDs are implemented against protocol fixtures derived from real captures. The ordered 6.86-inch panel is an inventory entry, not a support claim, until its USB handshake is captured. **Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
 
 ## Features
 

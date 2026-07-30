@@ -176,6 +176,18 @@ fn fixture_ids_and_lookup() {
 }
 
 #[test]
+fn ordered_686_inch_1280x480_profile_has_a_fixture() {
+    let fixture = fixture_by_id("hid2-0416-5302-pm68-sub0-fbl192").unwrap();
+    let info = device_info_from_fixture(fixture.id).unwrap();
+    assert_eq!((info.width(), info.height()), (1280, 480));
+    assert_eq!(info.protocol, WireProtocol::HidType2);
+    assert_eq!((info.vid, info.pid), (0x0416, 0x5302));
+    assert_eq!(info.pm, 68);
+    assert_eq!(info.fbl, 192);
+    assert_eq!(info.encoding(), FrameEncoding::Jpeg);
+}
+
+#[test]
 fn supported_resolutions_include_matrix() {
     let res = supported_resolutions();
     for want in [
