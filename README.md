@@ -222,6 +222,8 @@ Config lives at `~/.config/thermalwriter/config.toml`. Built-in layouts are seed
 
 Streaming commands run as your user through the session daemon. Generic mirror launches use structured argv, not a shell, and `argv[0]` must be an absolute executable path; built-in presets resolve executables from the daemon's `PATH`.
 
+For a hardware-validated playable streaming example, see [Playing Doom 3 on the LCD](docs/doom3-streaming.md). The guide covers the exact dhewm3 launch, 480×480 llvmpipe workarounds, 60 FPS mode, VNC limitations, and controller bindings.
+
 ## Preview Without Hardware
 
 Render a layout preview PNG:
@@ -297,6 +299,7 @@ For more information, consult the following documentation files:
 - [Configuration Guide](docs/configuration.md) - Full details on `config.toml` structure, defaults, and ranges.
 - [GUI Guide](docs/gui.md) - Detailed guide to the Svelte/Tauri-based configuration app.
 - [Troubleshooting](docs/troubleshooting.md) - Common install, daemon, GUI, streaming, and compatibility issues.
+- [Doom 3 Streaming Guide](docs/doom3-streaming.md) - Run the original Doom 3 through Xvfb with working gamepad controls.
 - [Release Guide](docs/release.md) - Procedures for publishing and creating release packages.
 - [Architecture Guide](docs/architecture.md) - Internal design of the daemon and GUI components.
 - [Performance Tuning and Profiling](docs/profiling.md) - Whole-daemon profiling harness, Criterion benches, baseline workflow, and the autoresearch loop for performance work.

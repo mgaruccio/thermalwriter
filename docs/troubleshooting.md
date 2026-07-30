@@ -122,6 +122,8 @@ thermalwriter ctl status
 
 **Stream not restored after reboot** — streaming is session-only by design; the daemon boots from the saved layout in `config.toml`.
 
+**Doom 3 has corrupt shadows, spinning VNC mouse input, or an unbound controller** — use the hardware-validated [Doom 3 streaming guide](doom3-streaming.md). Its launch disables llvmpipe's broken stencil-shadow path, keeps VNC in absolute-pointer mode, and installs explicit dhewm3 gamepad bindings.
+
 ## glibc compatibility
 
 If a prebuilt binary fails with `version 'GLIBC_2.36' not found` (or similar), your distro glibc is older than the build baseline. Options:
