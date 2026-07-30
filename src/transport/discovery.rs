@@ -569,6 +569,7 @@ impl HardwareConnectError {
     }
 }
 
+#[cfg(test)]
 fn select_scanned_device(
     scan: Result<Vec<DiscoveredDevice>>,
     selector: &DeviceSelector,
@@ -585,6 +586,7 @@ fn select_scanned_device(
     select_devices(&devices, selector).map_err(HardwareConnectError::Failed)
 }
 
+#[cfg(test)]
 fn connect_scanned_with<T, F>(
     scan: Result<Vec<DiscoveredDevice>>,
     selector: &DeviceSelector,

@@ -69,6 +69,7 @@ Source installs, the GUI, and full details below.
 | **Fixture-verified** | `0416:5406` | Dual-shape Winbond device: vendor bulk preferred, SCSI fallback |
 | **Not supported** | Other IDs / non-Linux hosts | Unknown devices are rejected rather than guessed |
 
+The pre-arrival Trofeo Vision mapping is corroborated by upstream's [reference device registry](https://github.com/Lexonight1/thermalright-trcc-linux/blob/main/doc/REFERENCE_DEVICES.md) and a [6.86-inch hardware report](https://github.com/Lexonight1/thermalright-trcc-linux/issues/213).
 Only `87ad:70db` has been verified on physical hardware so far; the other IDs are implemented against protocol fixtures derived from real captures. The ordered 6.86-inch panel is an inventory entry, not a support claim, until its USB handshake is captured. **Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
 
 ## Features
@@ -319,6 +320,8 @@ sharing the same `VID:PID` cannot be targeted individually unless you use
 `THERMALWRITER_PROFILE=<fixture-id>`.
 
 Independent per-screen layouts and selectors remain a planned follow-up.
+
+Mirror membership is evaluated when the group connects. Plugging in an additional screen while another is already active currently requires a daemon restart. A fatal write/disconnect resets the whole mirror group; the daemon then reconnects the displays still present, so the surviving screen may pause briefly.
 
 List native resolutions and render the visual evidence matrix:
 

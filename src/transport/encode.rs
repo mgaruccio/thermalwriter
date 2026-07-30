@@ -89,18 +89,28 @@ pub fn rotate_pixels(
 
 /// Aspect-preserving contain: scale `frame` to fit within `target_w`×`target_h`
 /// and center it on a black letterbox canvas.
-pub fn adapt_frame_contain(frame: &RawFrame, target_w: u32, target_h: u32) -> RawFrame {
+pub fn adapt_frame_contain(frame: &RawFrame, target_w: u32, target_h: u32) -> Result<RawFrame> {
+    validate_raw_rgb(&frame.data, frame.width, frame.height)?;
     if frame.width == target_w && frame.height == target_h {
-        return frame.clone();
+        return Ok(frame.clone());
     }
 
-    let mut canvas = vec![0u8; (target_w * target_h * 3) as usize];
+    let canvas_len = usize::try_from(target_w)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(target_h)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("target RGB frame size overflow")?;
+    let mut canvas = vec![0u8; canvas_len];
     if frame.width == 0 || frame.height == 0 || target_w == 0 || target_h == 0 {
-        return RawFrame {
+        return Ok(RawFrame {
             data: canvas,
             width: target_w,
             height: target_h,
-        };
+        });
     }
 
     let scale = f64::min(
@@ -134,11 +144,11 @@ pub fn adapt_frame_contain(frame: &RawFrame, target_w: u32, target_h: u32) -> Ra
         }
     }
 
-    RawFrame {
+    Ok(RawFrame {
         data: canvas,
         width: target_w,
         height: target_h,
-    }
+    })
 }
 
 /// Encode `frame` for `info` at the given user `rotation` and JPEG `quality`.
@@ -425,7 +435,7 @@ mod tests {
     #[test]
     fn adapt_frame_contain_letterboxes_widescreen_to_square() {
         let frame = corner_frame(480, 240);
-        let adapted = adapt_frame_contain(&frame, 480, 480);
+        let adapted = adapt_frame_contain(&frame, 480, 480).unwrap();
         assert_eq!((adapted.width, adapted.height), (480, 480));
         // Top and bottom bands stay black.
         assert_eq!(&adapted.data[..3], &[0, 0, 0]);
@@ -439,7 +449,7 @@ mod tests {
     #[test]
     fn adapt_frame_contain_preserves_square_without_copy_when_matching() {
         let frame = solid_frame(320, 320, [10, 20, 30]);
-        let adapted = adapt_frame_contain(&frame, 320, 320);
+        let adapted = adapt_frame_contain(&frame, 320, 320).unwrap();
         assert_eq!(adapted.data, frame.data);
     }
 

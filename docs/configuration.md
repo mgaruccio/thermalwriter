@@ -121,3 +121,5 @@ selector with optional `0x` prefixes, for example `"87ad:70db"` or
 individually except via `"all"`. Unknown, absent, and ambiguous selections fail
 explicitly rather than choosing an arbitrary device. Per-screen independent
 configuration is not available in this release.
+
+Mirror membership is refreshed on daemon startup and after a group reconnect; hot-plugging an additional display while another remains active requires restarting the daemon. A fatal output disconnect briefly resets the group before reconnecting the displays still present.

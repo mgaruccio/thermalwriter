@@ -425,7 +425,10 @@ pub async fn run_tick_loop(
                             Ok(dimensions) => dimensions,
                             Err(error) => return Err((false, error)),
                         };
-                        let adapted = adapt_frame_contain(&frame, target_w, target_h);
+                        let adapted = match adapt_frame_contain(&frame, target_w, target_h) {
+                            Ok(frame) => frame,
+                            Err(error) => return Err((false, error)),
+                        };
                         let encoded =
                             match encode_frame(&adapted, &output.info, rotation, jpeg_quality) {
                                 Ok(encoded) => encoded,

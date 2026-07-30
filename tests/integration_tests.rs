@@ -19,6 +19,10 @@ fn bulk_info() -> DeviceInfo {
     build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).unwrap()
 }
 
+fn hid2_1280_info() -> DeviceInfo {
+    build_device_info(WireProtocol::HidType2, 0x0416, 0x5302, 68, 0, Some(192)).unwrap()
+}
+
 struct MockTransport {
     frames_sent: Arc<AtomicU32>,
     connected: bool,
@@ -490,6 +494,92 @@ async fn tick_loop_sends_frames_and_stops_on_shutdown() {
     handle.await.unwrap();
     helper.abort();
     assert!(frames_sent.load(Ordering::Relaxed) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tick_loop_mirrors_to_two_different_display_profiles() {
+    use thermalwriter::sensor::SensorHub;
+    use thermalwriter::service::tick::run_tick_loop;
+
+    let primary_frames = Arc::new(AtomicU32::new(0));
+    let secondary_frames = Arc::new(AtomicU32::new(0));
+    let outputs = vec![
+        OpenedDisplay {
+            transport: Box::new(MockTransport {
+                frames_sent: Arc::clone(&primary_frames),
+                connected: true,
+            }),
+            info: bulk_info(),
+        },
+        OpenedDisplay {
+            transport: Box::new(MockTransport {
+                frames_sent: Arc::clone(&secondary_frames),
+                connected: true,
+            }),
+            info: hid2_1280_info(),
+        },
+    ];
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (_template_tx, template_rx) = tokio::sync::watch::channel(String::new());
+    let (_bg_tx, bg_rx) = tokio::sync::watch::channel(None);
+    let (_bg_apply_tx, mut bg_apply_rx) = tokio::sync::mpsc::channel(4);
+    let (connected_tx, _) = tokio::sync::watch::channel(false);
+    let (display_tx, _) = tokio::sync::watch::channel(RuntimeDisplayDimensions::new(0, 0));
+    let (display_count_tx, display_count_rx) = tokio::sync::watch::channel(0u32);
+    let (generation_tx, _) = tokio::sync::watch::channel(0u64);
+    let (_tick_tx, tick_rate_rx) = tokio::sync::watch::channel(30u32);
+    let (source_build_tx, _source_build_rx) = tokio::sync::mpsc::channel(4);
+    let (_source_result_tx, mut source_result_rx) = tokio::sync::mpsc::channel(4);
+    let (_source_revision_tx, mut source_revision_rx) = tokio::sync::mpsc::channel(4);
+    let (_needed_tx, needed_rx) =
+        tokio::sync::watch::channel::<Option<std::collections::HashSet<String>>>(None);
+    let (_recipe_tx, recipe_rx) =
+        tokio::sync::watch::channel::<Option<thermalwriter::sensor::LayoutSensorRecipe>>(None);
+
+    let task = tokio::spawn(async move {
+        let mut hub = SensorHub::new();
+        run_tick_loop(
+            Some(outputs),
+            Some(bulk_info()),
+            test_connector(),
+            Box::new(MockFrameSource),
+            source_build_tx,
+            &mut source_result_rx,
+            &mut hub,
+            30,
+            85,
+            0,
+            template_rx,
+            bg_rx,
+            &mut bg_apply_rx,
+            shutdown_rx,
+            None,
+            std::time::Duration::from_millis(500),
+            None,
+            connected_tx,
+            display_tx,
+            display_count_tx,
+            generation_tx,
+            &mut source_revision_rx,
+            tick_rate_rx,
+            needed_rx,
+            recipe_rx,
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(*display_count_rx.borrow(), 2);
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("mirrored tick loop shutdown")
+        .unwrap();
+
+    assert!(primary_frames.load(Ordering::Relaxed) > 0);
+    assert!(secondary_frames.load(Ordering::Relaxed) > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
