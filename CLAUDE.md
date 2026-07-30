@@ -1,16 +1,16 @@
 # thermalwriter
 
-Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Positioning: the minimal always-on alternative (small footprint, systemd/D-Bus plumbing, X11 app streaming) — NOT a breadth play; [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux) (Python/Qt, ~138⭐, Tom's Hardware coverage 2026-03) owns device breadth/LED/video and is credited in the README as the upstream source of the protocol tables. Never claim "first/only"; comparisons must be measured (the old "400MB" figure is the official *Windows* vendor app, not TRCC-Linux).
+Lightweight, Linux-native Rust daemon for Thermalright cooler LCD displays. Positioning: the minimal always-on alternative (small footprint, systemd/D-Bus plumbing, X11 app streaming) — NOT a breadth play; [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux) (Python/Qt, ~138⭐, Tom's Hardware coverage 2026-02-07 by Aaron Klotz; TRCC's README is openly Claude-assisted — precedent that AI-assistance doesn't block niche coverage) owns device breadth/LED/video and is credited in the README as the upstream source of the protocol tables. Never claim "first/only"; comparisons must be measured (the old "400MB" figure is the official *Windows* vendor app, not TRCC-Linux).
 
 ## Project State
 
-- **Latest release**: `v0.1.3` (tray single-instance + gallery GIFs + Xvfb `-nocursor`; see `CHANGELOG.md`). Prior: `v0.1.2` (tray package), `v0.1.1` (CPU/sensor), `v0.1.0` (initial public beta). Repo: https://github.com/mgaruccio/thermalwriter
+- **Latest release**: `v0.1.4` (2026-07-28, first non-prerelease "Latest" — glibc 2.35 CI baseline, vendored GUI fonts, MCP bridge gated to `devtools` builds, tray auto-install; see `CHANGELOG.md`). Prior: `v0.1.3` (tray single-instance + gallery GIFs + Xvfb `-nocursor`), `v0.1.2` (tray package), `v0.1.1` (CPU/sensor), `v0.1.0` (initial public beta). Repo: https://github.com/mgaruccio/thermalwriter
 - **Footprint (measured, `docs/comparison-methodology.md` + README charts)**: **0.41% of one core** and ~81 MB PSS at default 2 FPS (stock neon-dash, NVML, dirty-frame skip, 2000 ms poll); ~20 MB release daemon binary. Frame-path micros in `docs/profiling-baselines.md`.
 - **Closed announcement gates**: #91 (CPU under TRCC default) and #90 (clean-machine multi-distro L0/L1 install QA). Release process: `docs/release.md` + `scripts/release-qa/`.
 - **Shipped since v0.1.0**: dirty-frame skip, NVML worker, adaptive/layout-needed sensor prune, 2000 ms default poll, `thermalwriter-tray` StatusNotifier controller (pixmap-only icon; Hyprland/Noctalia + GNOME AppIndicator + KDE Plasma SNI hosts).
 - **Parked WIP**: MPRIS now-playing on `feature/now-playing` (draft PR #76).
 - **Product-gap backlog** (post-launch): #77–#89 (Intel iGPU, super-I/O aliases, multi-GPU pick, Xvfb test gating, font vendoring, AUR, RPM/AppStream, `thermalwriter report`, udev rule rename, MCP-bridge debug gate, …).
-- **Pre-announcement collateral**: layout + cava GIFs done (`docs/assets/gallery/*.gif`, regenerate via `cargo run --release --example render_gallery_frames` + stream capture). Comparison graphs done (`docs/assets/comparison/*.svg`). **Still needed**: hardware photos of the Peerless Vision LCD.
+- **Pre-announcement collateral**: layout + cava GIFs done (`docs/assets/gallery/*.gif`, regenerate via `cargo run --release --example render_gallery_frames` + stream capture). Comparison graphs done (`docs/assets/comparison/*.svg`). **Announcement plan**: `docs/brainstorms/2026-07-29-announcement-brainstorm.md` (staged rollout Reddit → press; channel AI-policy research done; playable Doom-on-cooler clip validated — doomretro + x11vnc, `env -u WAYLAND_DISPLAY` required; case lighting `openrgb -d 2 -m static -c 7A2BF7`). **Still needed**: AUR (#87), hardware photo/video shoot, README hero reorder, post/pitch drafts.
 
 ## Architecture
 
