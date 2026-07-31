@@ -21,6 +21,7 @@ pub mod hid_report;
 pub mod ly_lcd;
 pub mod scsi_lcd;
 pub mod type2_policy;
+pub mod validation_report;
 
 use anyhow::Result;
 
@@ -49,6 +50,14 @@ pub use usb_fingerprint::{
     DerivedBulkPair, HidInterruptIn, UsbDirection, UsbEndpointCapability, UsbFingerprint,
     UsbInterfaceShape, UsbRunIdentity, UsbTransferKind, derive_bulk_pair, derive_vendor_bulk_pair,
     format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
+};
+pub use validation_report::{
+    CheckField, CheckStatus, DescriptorCaptureStatus, HardwareValidationReport,
+    HidBackendProvenance, HidReadEvidence, HidReportEvidence, HidWriteChunkEvidence,
+    HidWriteErrorKind, HidWriteFailureEvidence, NegotiatedProfile, ReportEndpointCapability,
+    ReportFingerprint, ReportHidOutputRoute, ReportInterfaceShape, ReportPreHandshakePolicy,
+    SCHEMA_VERSION, SanitizedText, UPSTREAM_REVIEWED_COMMIT, ValidationChecks, ValidationErrorLink,
+    ValidationFailure, ValidationResult, ValidationStage, sanitize_free_text,
 };
 
 /// Encoded payload ready for the wire — dimensions match the device native
