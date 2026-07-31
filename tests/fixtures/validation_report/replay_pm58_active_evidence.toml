@@ -1,15 +1,14 @@
 schema = 1
-origin = "physical"
+origin = "replay"
 scope = "full"
-result = "pass"
 shareable = true
 upstream_reviewed_commit = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
 pre_handshake_policy = "hid407_read_only_probe"
 
 [build]
 version = "0.1.4"
-commit = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
-dirty = false
+commit = "placeholder"
+dirty = true
 
 [fingerprint]
 vid = "0416"
@@ -33,7 +32,14 @@ max_packet_size = 8
 interval = 1
 
 [hid_report]
-descriptor_status = "unknown"
+descriptor_status = "captured"
+logical_output_report_bytes = 512
+report_id = 0
+protocol_chunk_bytes = 512
+userspace_submit_bytes = 513
+transport_return_bytes = 513
+endpoint_max_packet_size = 8
+active_write_authorized = true
 
 [hid_report.backend]
 backend = "linux-hidraw-syscall"
@@ -63,13 +69,3 @@ width = 240
 height = 320
 
 [checks]
-enumerated = "pass"
-exclusive_owner = "pass"
-handshake = "pass"
-target_marker = "pass"
-second_display_unchanged = "pass"
-orientation = "pass"
-colors = "pass"
-soak = "pass"
-reconnect = "pass"
-daemon_restored = "pass"

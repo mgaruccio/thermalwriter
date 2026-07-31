@@ -33,8 +33,8 @@ fn git_head_path() -> Option<PathBuf> {
 }
 
 fn git_dirty() -> bool {
-    git(&["diff-index", "--quiet", "HEAD", "--"])
-        .map(|output| !output.status.success())
+    git(&["status", "--porcelain", "--untracked-files=normal"])
+        .map(|output| !output.stdout.is_empty())
         .unwrap_or(true)
 }
 

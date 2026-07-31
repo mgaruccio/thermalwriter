@@ -4,13 +4,13 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 
 use super::hid_report::{
     HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportWriteError,
-    LINUX_HIDRAW_BACKEND_CONTRACT,
+    KERNEL_HIDRAW_DOC_REF, LINUX_HIDRAW_BACKEND_CONTRACT, REVIEWED_HIDAPI_EVIDENCE_COMMIT,
 };
 use super::profile::{DeviceInfo, WireProtocol, build_device_info};
 use super::type2_policy::{
@@ -108,6 +108,8 @@ pub struct ValidationChecks {
     reconnect: Option<CheckStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     daemon_restored: Option<CheckStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_write: Option<CheckStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +118,7 @@ pub enum CheckField {
     PassiveAllowlist,
     ExclusiveOwner,
     Handshake,
+    ActiveWrite,
     TargetMarker,
     SecondDisplayUnchanged,
     Orientation,
@@ -136,6 +139,7 @@ impl ValidationChecks {
             CheckField::PassiveAllowlist => self.passive_allowlist,
             CheckField::ExclusiveOwner => self.exclusive_owner,
             CheckField::Handshake => self.handshake,
+            CheckField::ActiveWrite => self.active_write,
             CheckField::TargetMarker => self.target_marker,
             CheckField::SecondDisplayUnchanged => self.second_display_unchanged,
             CheckField::Orientation => self.orientation,
@@ -152,6 +156,7 @@ impl ValidationChecks {
             CheckField::PassiveAllowlist => self.passive_allowlist = Some(status),
             CheckField::ExclusiveOwner => self.exclusive_owner = Some(status),
             CheckField::Handshake => self.handshake = Some(status),
+            CheckField::ActiveWrite => self.active_write = Some(status),
             CheckField::TargetMarker => self.target_marker = Some(status),
             CheckField::SecondDisplayUnchanged => self.second_display_unchanged = Some(status),
             CheckField::Orientation => self.orientation = Some(status),
@@ -165,8 +170,10 @@ impl ValidationChecks {
     fn mandatory_full_fields() -> &'static [CheckField] {
         &[
             CheckField::Enumerated,
+            CheckField::PassiveAllowlist,
             CheckField::ExclusiveOwner,
             CheckField::Handshake,
+            CheckField::ActiveWrite,
             CheckField::TargetMarker,
             CheckField::SecondDisplayUnchanged,
             CheckField::Orientation,
@@ -328,7 +335,8 @@ pub struct HidWriteChunkEvidence {
     logical_output_report_bytes: Option<usize>,
     report_id: u8,
     userspace_submit_bytes: usize,
-    transport_return_bytes: isize,
+    /// `None` when no transport return was observed; `Some(0)` when zero bytes returned.
+    transport_return_bytes: Option<isize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     endpoint_max_packet_size: Option<u16>,
 }
@@ -426,8 +434,8 @@ pub struct BuildProvenance {
     dirty: bool,
 }
 
-/// Sanitized free-form text; only constructible via [`sanitize_free_text`] or safe constants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Sanitized free-form text; hostile input is redacted at construction and rejected on deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 struct SafeMessage(String);
 
@@ -439,6 +447,18 @@ impl SafeMessage {
 
     fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SafeMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if contains_privacy_signal(&value) {
+            return Err(DeError::custom(
+                "hostile or sensitive string rejected in report message field",
+            ));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -493,6 +513,9 @@ pub enum FinalizeError {
     WrongScope,
     WrongOrigin,
     NotShareable,
+    ConservativeStopProfile,
+    InvariantViolation,
+    AlreadyFinalized,
 }
 
 impl fmt::Display for FinalizeError {
@@ -507,9 +530,75 @@ impl fmt::Display for FinalizeError {
             Self::WrongScope => write!(f, "scope mismatch for finalization"),
             Self::WrongOrigin => write!(f, "origin not eligible for this finalization"),
             Self::NotShareable => write!(f, "report marked non-shareable"),
+            Self::ConservativeStopProfile => {
+                write!(f, "negotiated profile blocks active full pass")
+            }
+            Self::InvariantViolation => write!(f, "report semantic invariants violated"),
+            Self::AlreadyFinalized => write!(f, "report is already finalized"),
         }
     }
 }
+
+/// Returned when mutating a report that already has a terminal result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportMutationError {
+    AlreadyFinalized,
+}
+
+impl fmt::Display for ReportMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyFinalized => write!(f, "report is already finalized"),
+        }
+    }
+}
+
+impl std::error::Error for ReportMutationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemanticError {
+    ResultStageMismatch,
+    MissingFailureDetails,
+    UnexpectedFailureDetails,
+    MissingFingerprint,
+    MissingNegotiated,
+    MissingMandatoryChecks,
+    ConservativeStopProfile,
+    MissingNegotiatedRoute,
+    MissingHidEvidence,
+    HidWriteNotAuthorized,
+    IncompleteHidWriteEvidence,
+    InvalidHidWriteReturn,
+    RedactionBlocksShareable,
+    ShareableStringViolation,
+    HostileString,
+}
+
+impl fmt::Display for SemanticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResultStageMismatch => write!(f, "result/failed_step/failure are inconsistent"),
+            Self::MissingFailureDetails => write!(f, "terminal result missing failure details"),
+            Self::UnexpectedFailureDetails => write!(f, "in-progress report has failure details"),
+            Self::MissingFingerprint => write!(f, "fingerprint missing"),
+            Self::MissingNegotiated => write!(f, "negotiated profile missing"),
+            Self::MissingMandatoryChecks => write!(f, "mandatory checks incomplete"),
+            Self::ConservativeStopProfile => {
+                write!(f, "conservative-stop profile blocks full pass")
+            }
+            Self::MissingNegotiatedRoute => write!(f, "negotiated output route missing"),
+            Self::MissingHidEvidence => write!(f, "HID report evidence missing"),
+            Self::HidWriteNotAuthorized => write!(f, "HID active write not authorized"),
+            Self::IncompleteHidWriteEvidence => write!(f, "HID write evidence incomplete"),
+            Self::InvalidHidWriteReturn => write!(f, "HID write transport return invalid"),
+            Self::RedactionBlocksShareable => write!(f, "redaction permanently blocks shareable"),
+            Self::ShareableStringViolation => write!(f, "shareable string field invalid"),
+            Self::HostileString => write!(f, "hostile string in serialized field"),
+        }
+    }
+}
+
+impl std::error::Error for SemanticError {}
 
 impl HardwareValidationReport {
     pub fn new_in_progress(origin: EvidenceOrigin, scope: ValidationScope) -> Self {
@@ -578,31 +667,53 @@ impl HardwareValidationReport {
         &self.doc.build
     }
 
+    fn ensure_mutable(&self) -> Result<(), ReportMutationError> {
+        if self.doc.result.is_some() {
+            Err(ReportMutationError::AlreadyFinalized)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn set_fingerprint(
         &mut self,
         fingerprint: &UsbFingerprint,
         serial_present: bool,
         hidraw_correlated: Option<bool>,
-    ) {
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         self.doc.fingerprint = Some(ReportFingerprint::from_usb_fingerprint(
             fingerprint,
             serial_present,
             hidraw_correlated,
         ));
+        Ok(())
     }
 
-    pub fn set_pre_handshake_policy(&mut self, policy: Type2PreHandshakePolicy) {
+    pub fn set_pre_handshake_policy(
+        &mut self,
+        policy: Type2PreHandshakePolicy,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         self.doc.pre_handshake_policy = Some(ReportPreHandshakePolicy::from(policy));
+        Ok(())
     }
 
-    pub fn record_check(&mut self, field: CheckField, status: CheckStatus) {
+    pub fn record_check(
+        &mut self,
+        field: CheckField,
+        status: CheckStatus,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         self.doc.checks.set(field, status);
+        Ok(())
     }
 
     pub fn record_negotiated_type2(
         &mut self,
         observation: &Type2NegotiatedObservation,
     ) -> Result<()> {
+        self.ensure_mutable().context("report already finalized")?;
         let device_info = build_device_info(
             WireProtocol::HidType2,
             WINBOND_HID2_VID,
@@ -616,32 +727,49 @@ impl HardwareValidationReport {
         Ok(())
     }
 
+    /// Record negotiated profile for bulk/SCSI/HID3/LY devices from resolved [`DeviceInfo`].
     pub fn record_negotiated_device(
         &mut self,
         device_info: &DeviceInfo,
-        observation: &Type2NegotiatedObservation,
+        route: NegotiatedOutputRoute,
+        response_bytes: usize,
     ) -> Result<()> {
+        self.ensure_mutable().context("report already finalized")?;
         ensure!(
-            device_info.pm == observation.pm() && device_info.sub == observation.sub(),
-            "DeviceInfo PM/SUB does not match negotiated observation"
+            !matches!(device_info.protocol, WireProtocol::HidType2),
+            "use record_negotiated_type2 for HID Type2"
         );
-        self.doc.negotiated = Some(NegotiatedProfile::from_type2(observation, device_info)?);
+        self.doc.negotiated = Some(NegotiatedProfile::from_device_info(
+            device_info,
+            route,
+            response_bytes,
+        )?);
         Ok(())
     }
 
-    pub fn set_hid_backend_contract(&mut self, contract: HidReportBackendContract) {
+    pub fn set_hid_backend_contract(
+        &mut self,
+        contract: HidReportBackendContract,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self
             .doc
             .hid_report
             .get_or_insert_with(|| HidReportEvidence::empty_with_backend(contract));
         evidence.backend = HidBackendProvenance::from(contract);
+        Ok(())
     }
 
-    pub fn record_hid_read(&mut self, observation: &HidReadObservation) {
+    pub fn record_hid_read(
+        &mut self,
+        observation: &HidReadObservation,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self.doc.hid_report.get_or_insert_with(|| {
             HidReportEvidence::empty_with_backend(LINUX_HIDRAW_BACKEND_CONTRACT)
         });
         evidence.read = Some(HidReadEvidence::from(observation));
+        Ok(())
     }
 
     pub fn record_hid_read_failure(
@@ -651,7 +779,8 @@ impl HardwareValidationReport {
         transport_return_bytes: Option<isize>,
         error_kind: HidReadErrorKind,
         message: &str,
-    ) {
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let (message, safe) = SafeMessage::from_raw(message);
         if !safe {
             self.mark_redacted();
@@ -666,20 +795,31 @@ impl HardwareValidationReport {
             error_kind,
             message,
         });
+        Ok(())
     }
 
-    pub fn set_hid_descriptor_status(&mut self, status: DescriptorCaptureStatus) {
+    pub fn set_hid_descriptor_status(
+        &mut self,
+        status: DescriptorCaptureStatus,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self.doc.hid_report.get_or_insert_with(|| {
             HidReportEvidence::empty_with_backend(LINUX_HIDRAW_BACKEND_CONTRACT)
         });
         evidence.descriptor_status = status;
+        Ok(())
     }
 
-    pub fn set_hid_active_write_authorized(&mut self, authorized: bool) {
+    pub fn set_hid_active_write_authorized(
+        &mut self,
+        authorized: bool,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self.doc.hid_report.get_or_insert_with(|| {
             HidReportEvidence::empty_with_backend(LINUX_HIDRAW_BACKEND_CONTRACT)
         });
         evidence.active_write_authorized = Some(authorized);
+        Ok(())
     }
 
     pub fn record_hid_write_observation(
@@ -688,9 +828,10 @@ impl HardwareValidationReport {
         logical_output_report_bytes: Option<usize>,
         report_id: u8,
         userspace_submit_bytes: usize,
-        transport_return_bytes: isize,
+        transport_return_bytes: Option<isize>,
         endpoint_max_packet_size: Option<u16>,
-    ) {
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self.doc.hid_report.get_or_insert_with(|| {
             HidReportEvidence::empty_with_backend(LINUX_HIDRAW_BACKEND_CONTRACT)
         });
@@ -698,11 +839,16 @@ impl HardwareValidationReport {
         evidence.logical_output_report_bytes = logical_output_report_bytes;
         evidence.report_id = Some(report_id);
         evidence.userspace_submit_bytes = Some(userspace_submit_bytes);
-        evidence.transport_return_bytes = Some(transport_return_bytes);
+        evidence.transport_return_bytes = transport_return_bytes;
         evidence.endpoint_max_packet_size = endpoint_max_packet_size;
+        Ok(())
     }
 
-    pub fn record_hid_chunked_write_failure(&mut self, failure: &HidChunkedWriteFailure) {
+    pub fn record_hid_chunked_write_failure(
+        &mut self,
+        failure: &HidChunkedWriteFailure,
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
         let evidence = self.doc.hid_report.get_or_insert_with(|| {
             HidReportEvidence::empty_with_backend(LINUX_HIDRAW_BACKEND_CONTRACT)
         });
@@ -711,32 +857,46 @@ impl HardwareValidationReport {
         if !safe {
             self.mark_redacted();
         }
+        Ok(())
     }
 
-    pub fn fail_at(&mut self, stage: ValidationStage, errors: &[&str]) {
-        self.doc.result = Some(ValidationResult::Fail);
+    pub fn fail_at(
+        &mut self,
+        stage: ValidationStage,
+        errors: &[(ValidationErrorKind, &str)],
+    ) -> Result<(), ReportMutationError> {
+        self.record_terminal(ValidationResult::Fail, stage, errors)
+    }
+
+    pub fn abort_at(
+        &mut self,
+        stage: ValidationStage,
+        errors: &[(ValidationErrorKind, &str)],
+    ) -> Result<(), ReportMutationError> {
+        self.record_terminal(ValidationResult::Aborted, stage, errors)
+    }
+
+    fn record_terminal(
+        &mut self,
+        result: ValidationResult,
+        stage: ValidationStage,
+        errors: &[(ValidationErrorKind, &str)],
+    ) -> Result<(), ReportMutationError> {
+        self.ensure_mutable()?;
+        self.doc.result = Some(result);
         self.doc.failed_step = Some(stage);
-        let (failure, safe) = ValidationFailure::from_messages(stage, errors);
+        let (failure, safe) = ValidationFailure::from_typed_messages(stage, errors);
         self.doc.failure = Some(failure);
         if !safe {
             self.mark_redacted();
         }
-    }
-
-    pub fn abort_at(&mut self, stage: ValidationStage, errors: &[&str]) {
-        self.doc.result = Some(ValidationResult::Aborted);
-        self.doc.failed_step = Some(stage);
-        let (failure, safe) = ValidationFailure::from_messages(stage, errors);
-        self.doc.failure = Some(failure);
-        if !safe {
-            self.mark_redacted();
-        }
+        Ok(())
     }
 
     pub fn finalize_passive_pass(&mut self) -> Result<(), FinalizeError> {
         ensure_scope(self, ValidationScope::Passive)?;
         if self.doc.result.is_some() {
-            return Err(FinalizeError::PriorFailure);
+            return Err(FinalizeError::AlreadyFinalized);
         }
         if self.doc.fingerprint.is_none() {
             return Err(FinalizeError::MissingFingerprint);
@@ -749,6 +909,8 @@ impl HardwareValidationReport {
             return Err(FinalizeError::MissingMandatoryChecks);
         }
         self.doc.result = Some(ValidationResult::Pass);
+        validate_semantics(&self.doc, self.redaction_permanent)
+            .map_err(|_| FinalizeError::InvariantViolation)?;
         Ok(())
     }
 
@@ -758,7 +920,7 @@ impl HardwareValidationReport {
             return Err(FinalizeError::WrongOrigin);
         }
         if self.doc.result.is_some() {
-            return Err(FinalizeError::PriorFailure);
+            return Err(FinalizeError::AlreadyFinalized);
         }
         if self.doc.fingerprint.is_none() {
             return Err(FinalizeError::MissingFingerprint);
@@ -773,6 +935,13 @@ impl HardwareValidationReport {
         {
             return Err(FinalizeError::MissingMandatoryChecks);
         }
+        if let Some(negotiated) = &self.doc.negotiated {
+            if negotiated.profile_policy == ProfilePolicyLabel::ObservedPm68ConservativeStop
+                || !negotiated.active_writes_allowed
+            {
+                return Err(FinalizeError::ConservativeStopProfile);
+            }
+        }
         if !build_commit_known(&self.doc.build.commit) {
             return Err(FinalizeError::UnknownCommit);
         }
@@ -782,7 +951,13 @@ impl HardwareValidationReport {
         if !self.shareable() {
             return Err(FinalizeError::NotShareable);
         }
+        validate_full_pass_evidence(&self.doc).map_err(|err| match err {
+            SemanticError::ConservativeStopProfile => FinalizeError::ConservativeStopProfile,
+            _ => FinalizeError::InvariantViolation,
+        })?;
         self.doc.result = Some(ValidationResult::Pass);
+        validate_semantics(&self.doc, self.redaction_permanent)
+            .map_err(|_| FinalizeError::InvariantViolation)?;
         Ok(())
     }
 
@@ -791,19 +966,11 @@ impl HardwareValidationReport {
         self.doc.origin == EvidenceOrigin::Physical
             && self.doc.scope == ValidationScope::Full
             && matches!(self.doc.result, Some(ValidationResult::Pass))
-            && self.doc.failed_step.is_none()
-            && self.doc.failure.is_none()
-            && self.doc.fingerprint.is_some()
-            && self.doc.negotiated.is_some()
-            && self
-                .doc
-                .checks
-                .all_mandatory_pass(ValidationChecks::mandatory_full_fields())
+            && validate_semantics(&self.doc, self.redaction_permanent).is_ok()
+            && validate_full_pass_evidence(&self.doc).is_ok()
             && build_commit_known(&self.doc.build.commit)
             && !self.doc.build.dirty
             && self.shareable()
-            && self.doc.shareable
-            && self.text_fields_are_safe()
     }
 
     pub fn to_private_toml(&self) -> Result<String, toml::ser::Error> {
@@ -813,7 +980,10 @@ impl HardwareValidationReport {
     }
 
     pub fn to_shareable_toml(&self) -> Result<String> {
-        self.validate_shareable()?;
+        validate_semantics(&self.doc, self.redaction_permanent)
+            .context("report failed semantic validation")?;
+        ensure!(self.shareable(), "report is not shareable");
+        validate_shareable_strings(&self.doc).context("shareable string validation failed")?;
         self.to_private_toml()
             .map_err(|err| anyhow::anyhow!("shareable serialization failed: {err}"))
     }
@@ -828,74 +998,23 @@ impl HardwareValidationReport {
                 doc.schema
             )));
         }
-        Ok(Self {
+        let report = Self {
             doc,
             redaction_permanent: false,
-        })
-    }
-
-    /// Test-only mutation hooks for eligibility fixtures (integration tests).
-    #[doc(hidden)]
-    pub fn doc_result_override_for_test(&mut self, result: Option<ValidationResult>) {
-        self.doc.result = result;
-    }
-
-    #[doc(hidden)]
-    pub fn doc_checks_clear_for_test(&mut self) {
-        self.doc.checks = ValidationChecks::default();
-    }
-
-    #[doc(hidden)]
-    pub fn doc_build_dirty_for_test(&mut self, dirty: bool) {
-        self.doc.build.dirty = dirty;
-    }
-
-    #[doc(hidden)]
-    pub fn doc_build_commit_for_test(&mut self, commit: &str) {
-        self.doc.build.commit = commit.to_string();
-    }
-
-    fn validate_shareable(&self) -> Result<()> {
-        ensure!(self.shareable(), "report is not shareable");
-        ensure!(
-            self.text_fields_are_safe(),
-            "report contains unsafe free-form text"
-        );
-        if let Some(fingerprint) = &self.doc.fingerprint {
-            ensure!(
-                validate_shareable_fingerprint(fingerprint),
-                "fingerprint contains unsafe values"
-            );
+        };
+        if report.doc.result.is_some() {
+            validate_semantics(&report.doc, report.redaction_permanent).map_err(|err| {
+                toml::de::Error::custom(format!(
+                    "completed report failed semantic validation: {err}"
+                ))
+            })?;
         }
-        Ok(())
+        Ok(report)
     }
 
     fn mark_redacted(&mut self) {
         self.redaction_permanent = true;
         self.doc.shareable = false;
-    }
-
-    fn text_fields_are_safe(&self) -> bool {
-        if let Some(failure) = &self.doc.failure {
-            for link in &failure.errors {
-                if contains_privacy_signal(link.message.as_str()) {
-                    return false;
-                }
-            }
-        }
-        if let Some(hid) = &self.doc.hid_report {
-            if let Some(write_failure) = &hid.write_failure {
-                if contains_privacy_signal(write_failure.message.as_str()) {
-                    return false;
-                }
-            }
-            if let Some(read_failure) = &hid.read_failure {
-                if contains_privacy_signal(read_failure.message.as_str()) {
-                    return false;
-                }
-            }
-        }
-        true
     }
 }
 
@@ -938,6 +1057,171 @@ fn ensure_scope(
     } else {
         Err(FinalizeError::WrongScope)
     }
+}
+
+fn validate_semantics(
+    doc: &ReportDocument,
+    redaction_permanent: bool,
+) -> Result<(), SemanticError> {
+    if doc.shareable && redaction_permanent {
+        return Err(SemanticError::RedactionBlocksShareable);
+    }
+
+    match doc.result {
+        None => {
+            if doc.failed_step.is_some() || doc.failure.is_some() {
+                return Err(SemanticError::UnexpectedFailureDetails);
+            }
+        }
+        Some(ValidationResult::Pass) => {
+            if doc.failed_step.is_some() || doc.failure.is_some() {
+                return Err(SemanticError::ResultStageMismatch);
+            }
+            if doc.fingerprint.is_none() {
+                return Err(SemanticError::MissingFingerprint);
+            }
+            match doc.scope {
+                ValidationScope::Passive => {
+                    if !doc
+                        .checks
+                        .all_mandatory_pass(ValidationChecks::mandatory_passive_fields())
+                    {
+                        return Err(SemanticError::MissingMandatoryChecks);
+                    }
+                }
+                ValidationScope::Full => {
+                    if doc.negotiated.is_none() {
+                        return Err(SemanticError::MissingNegotiated);
+                    }
+                    if !doc
+                        .checks
+                        .all_mandatory_pass(ValidationChecks::mandatory_full_fields())
+                    {
+                        return Err(SemanticError::MissingMandatoryChecks);
+                    }
+                    validate_full_pass_evidence(doc)?;
+                }
+            }
+        }
+        Some(ValidationResult::Fail) | Some(ValidationResult::Aborted) => {
+            let stage = doc
+                .failed_step
+                .ok_or(SemanticError::MissingFailureDetails)?;
+            let failure = doc
+                .failure
+                .as_ref()
+                .ok_or(SemanticError::MissingFailureDetails)?;
+            if failure.stage != stage {
+                return Err(SemanticError::ResultStageMismatch);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError> {
+    let negotiated = doc
+        .negotiated
+        .as_ref()
+        .ok_or(SemanticError::MissingNegotiated)?;
+
+    if negotiated.profile_policy == ProfilePolicyLabel::ObservedPm68ConservativeStop
+        || !negotiated.active_writes_allowed
+    {
+        return Err(SemanticError::ConservativeStopProfile);
+    }
+
+    if !doc.checks.passed(CheckField::ActiveWrite) {
+        return Err(SemanticError::MissingMandatoryChecks);
+    }
+
+    let route = negotiated
+        .negotiated_output_route
+        .ok_or(SemanticError::MissingNegotiatedRoute)?;
+
+    match route {
+        NegotiatedOutputRoute::HidReport => {
+            let hid = doc
+                .hid_report
+                .as_ref()
+                .ok_or(SemanticError::MissingHidEvidence)?;
+            if hid.active_write_authorized != Some(true) {
+                return Err(SemanticError::HidWriteNotAuthorized);
+            }
+            if hid.protocol_chunk_bytes.is_none()
+                || hid.userspace_submit_bytes.is_none()
+                || hid.transport_return_bytes.is_none()
+            {
+                return Err(SemanticError::IncompleteHidWriteEvidence);
+            }
+            let returned = hid.transport_return_bytes.unwrap();
+            if returned <= 0 {
+                return Err(SemanticError::InvalidHidWriteReturn);
+            }
+        }
+        NegotiatedOutputRoute::LegacyBulk => {}
+    }
+
+    Ok(())
+}
+
+fn validate_shareable_strings(doc: &ReportDocument) -> Result<(), SemanticError> {
+    if doc.upstream_reviewed_commit != UPSTREAM_REVIEWED_COMMIT {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    if contains_privacy_signal(&doc.build.version) || contains_privacy_signal(&doc.build.commit) {
+        return Err(SemanticError::HostileString);
+    }
+    if let Some(fingerprint) = &doc.fingerprint {
+        if contains_privacy_signal(&fingerprint.bcd_device) {
+            return Err(SemanticError::HostileString);
+        }
+    }
+    if let Some(hid) = &doc.hid_report {
+        validate_shareable_hid_backend(&hid.backend)?;
+        for link in hid
+            .read_failure
+            .iter()
+            .map(|failure| failure.message.as_str())
+        {
+            if contains_privacy_signal(link) {
+                return Err(SemanticError::HostileString);
+            }
+        }
+        if let Some(write_failure) = &hid.write_failure {
+            if contains_privacy_signal(write_failure.message.as_str()) {
+                return Err(SemanticError::HostileString);
+            }
+        }
+    }
+    if let Some(failure) = &doc.failure {
+        for link in &failure.errors {
+            if contains_privacy_signal(link.message.as_str()) {
+                return Err(SemanticError::HostileString);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_shareable_hid_backend(backend: &HidBackendProvenance) -> Result<(), SemanticError> {
+    if backend.backend != LINUX_HIDRAW_BACKEND_CONTRACT.backend {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    if backend.kernel_hidraw_doc_ref != KERNEL_HIDRAW_DOC_REF {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    if backend.reviewed_hidapi_semantics_commit != REVIEWED_HIDAPI_EVIDENCE_COMMIT {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    if contains_privacy_signal(&backend.backend)
+        || contains_privacy_signal(&backend.kernel_hidraw_doc_ref)
+        || contains_privacy_signal(&backend.reviewed_hidapi_semantics_commit)
+    {
+        return Err(SemanticError::HostileString);
+    }
+    Ok(())
 }
 
 pub fn current_build_provenance() -> BuildProvenance {
@@ -986,6 +1270,13 @@ fn contains_privacy_signal(input: &str) -> bool {
         "serial:",
         "serial ",
         "i serial",
+        "bus=",
+        "bus:",
+        "address=/",
+        "addr=/",
+        "user=",
+        "username=",
+        "uid=",
     ];
     if HOSTILE.iter().any(|pattern| lower.contains(pattern)) {
         return true;
@@ -994,10 +1285,6 @@ fn contains_privacy_signal(input: &str) -> bool {
         return true;
     }
     false
-}
-
-fn validate_shareable_fingerprint(fingerprint: &ReportFingerprint) -> bool {
-    !contains_privacy_signal(&fingerprint.bcd_device)
 }
 
 impl ReportDocument {
@@ -1182,6 +1469,46 @@ impl NegotiatedProfile {
             portrait_native: policy.portrait_native(),
         })
     }
+
+    fn from_device_info(
+        device_info: &DeviceInfo,
+        route: NegotiatedOutputRoute,
+        response_bytes: usize,
+    ) -> Result<Self> {
+        let native = DisplayDimensions {
+            width: device_info.width(),
+            height: device_info.height(),
+        };
+        let (wire_w, wire_h) = device_info.wire_dimensions()?;
+        let wire = DisplayDimensions {
+            width: wire_w,
+            height: wire_h,
+        };
+        let profile_policy = match device_info.protocol {
+            WireProtocol::Bulk => ProfilePolicyLabel::LegacyBulk,
+            WireProtocol::Scsi | WireProtocol::HidType3 | WireProtocol::Ly => {
+                ProfilePolicyLabel::ActivePmSub {
+                    pm: device_info.pm,
+                    sub: device_info.sub,
+                }
+            }
+            WireProtocol::HidType2 => bail!("use record_negotiated_type2 for HID Type2"),
+        };
+        Ok(Self {
+            response_bytes,
+            protocol_family: ProtocolFamily::from(device_info.protocol),
+            pm: device_info.pm,
+            sub: device_info.sub,
+            fbl: device_info.fbl,
+            native_dimensions: native,
+            wire_dimensions: wire,
+            profile_policy,
+            negotiated_output_route: Some(route),
+            active_writes_allowed: true,
+            keep_single_session: false,
+            portrait_native: device_info.profile.rotate_panel,
+        })
+    }
 }
 
 fn validate_negotiated_dimensions(pm: u8, fbl: u8, wire: &DisplayDimensions) -> Result<()> {
@@ -1220,17 +1547,20 @@ fn profile_policy_label(policy: Type2NegotiatedPolicy, pm: u8, sub: u8) -> Profi
 }
 
 impl ValidationFailure {
-    fn from_messages(stage: ValidationStage, errors: &[&str]) -> (Self, bool) {
+    fn from_typed_messages(
+        stage: ValidationStage,
+        errors: &[(ValidationErrorKind, &str)],
+    ) -> (Self, bool) {
         let mut safe = true;
         let errors = errors
             .iter()
-            .map(|message| {
+            .map(|(kind, message)| {
                 let (message, provably_safe) = SafeMessage::from_raw(message);
                 if !provably_safe {
                     safe = false;
                 }
                 ValidationErrorLink {
-                    kind: ValidationErrorKind::Error,
+                    kind: *kind,
                     message,
                 }
             })
@@ -1290,7 +1620,7 @@ impl HidWriteChunkEvidence {
             logical_output_report_bytes: observation.logical_output_report_bytes,
             report_id: observation.report_id,
             userspace_submit_bytes: observation.userspace_submit_bytes,
-            transport_return_bytes: observation.transport_return_bytes,
+            transport_return_bytes: Some(observation.transport_return_bytes),
             endpoint_max_packet_size: observation.endpoint_max_packet_size,
         }
     }
@@ -1385,6 +1715,14 @@ impl NegotiatedProfile {
     pub fn wire_dimensions(&self) -> DisplayDimensions {
         self.wire_dimensions
     }
+
+    pub fn negotiated_output_route(&self) -> Option<NegotiatedOutputRoute> {
+        self.negotiated_output_route
+    }
+
+    pub fn active_writes_allowed(&self) -> bool {
+        self.active_writes_allowed
+    }
 }
 
 impl ValidationFailure {
@@ -1396,6 +1734,10 @@ impl ValidationFailure {
 impl ValidationErrorLink {
     pub fn message(&self) -> &str {
         self.message.as_str()
+    }
+
+    pub fn kind(&self) -> ValidationErrorKind {
+        self.kind
     }
 }
 
@@ -1456,7 +1798,7 @@ impl HidWriteFailureEvidence {
 }
 
 impl HidWriteChunkEvidence {
-    pub fn transport_return_bytes(&self) -> isize {
+    pub fn transport_return_bytes(&self) -> Option<isize> {
         self.transport_return_bytes
     }
 }
@@ -1464,10 +1806,22 @@ impl HidWriteChunkEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::type2_policy::Type2PreHandshakePolicy;
+    use crate::transport::type2_policy::{Type2PreHandshakePolicy, negotiate_type2_policy};
     use crate::transport::usb_fingerprint::{
         UsbDirection, UsbEndpointCapability, UsbInterfaceShape, UsbTransferKind,
     };
+
+    const KNOWN_COMMIT: &str = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447";
+
+    #[cfg(test)]
+    fn with_clean_build(
+        mut report: HardwareValidationReport,
+        commit: &str,
+    ) -> HardwareValidationReport {
+        report.doc.build.commit = commit.to_string();
+        report.doc.build.dirty = false;
+        report
+    }
 
     #[test]
     fn from_toml_rejects_unknown_root_field() {
@@ -1484,12 +1838,79 @@ mod tests {
             EvidenceOrigin::Physical,
             ValidationScope::Passive,
         );
-        report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-        report.set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe);
-        report.record_check(CheckField::Enumerated, CheckStatus::Pass);
-        report.record_check(CheckField::PassiveAllowlist, CheckStatus::Pass);
+        report
+            .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+            .expect("fingerprint");
+        report
+            .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+            .expect("policy");
+        report
+            .record_check(CheckField::Enumerated, CheckStatus::Pass)
+            .expect("check");
+        report
+            .record_check(CheckField::PassiveAllowlist, CheckStatus::Pass)
+            .expect("check");
         report.finalize_passive_pass().expect("passive pass");
         report
+    }
+
+    fn full_physical_pass_report() -> HardwareValidationReport {
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &short_pm58_response(),
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .expect("pm58");
+
+        let mut report = HardwareValidationReport::new_in_progress(
+            EvidenceOrigin::Physical,
+            ValidationScope::Full,
+        );
+        report
+            .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+            .expect("fingerprint");
+        report
+            .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+            .expect("policy");
+        report.record_negotiated_type2(&obs).expect("negotiated");
+        report
+            .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+            .expect("backend");
+        report
+            .set_hid_descriptor_status(DescriptorCaptureStatus::Captured)
+            .expect("descriptor");
+        report
+            .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
+            .expect("write");
+        report
+            .set_hid_active_write_authorized(true)
+            .expect("authorized");
+        for field in [
+            CheckField::Enumerated,
+            CheckField::PassiveAllowlist,
+            CheckField::ExclusiveOwner,
+            CheckField::Handshake,
+            CheckField::ActiveWrite,
+            CheckField::TargetMarker,
+            CheckField::SecondDisplayUnchanged,
+            CheckField::Orientation,
+            CheckField::Colors,
+            CheckField::Soak,
+            CheckField::Reconnect,
+            CheckField::DaemonRestored,
+        ] {
+            report
+                .record_check(field, CheckStatus::Pass)
+                .expect("check");
+        }
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        report.finalize_full_pass().expect("full pass");
+        report
+    }
+
+    fn short_pm58_response() -> Vec<u8> {
+        vec![0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00]
     }
 
     fn hid_in_fingerprint() -> UsbFingerprint {
@@ -1524,7 +1945,7 @@ mod tests {
     #[test]
     fn sanitize_hostile_paths_fully_redacts() {
         let outcome = sanitize_free_text(
-            "opened /dev/hidraw3 on busnum=1 devnum=4 serial=ABC /home/mike/sys/class/hidraw/hidraw3",
+            "opened /dev/hidraw3 on busnum=1 devnum=4 serial=ABC /home/mike/sys/class/hidraw/hidraw3 bus=1 address=/dev/foo user=alice uid=1000",
         );
         assert!(!outcome.provably_safe);
         assert_eq!(outcome.text, REDACTED);
@@ -1540,21 +1961,41 @@ mod tests {
     #[test]
     fn build_commit_known_rejects_unknown() {
         assert!(!build_commit_known("unknown"));
-        assert!(build_commit_known(
-            "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
-        ));
+        assert!(build_commit_known(KNOWN_COMMIT));
     }
 
     #[test]
     fn passive_finalize_never_tested_eligible() {
-        let mut report = HardwareValidationReport::new_in_progress(
-            EvidenceOrigin::Physical,
-            ValidationScope::Passive,
-        );
-        report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-        report.record_check(CheckField::Enumerated, CheckStatus::Pass);
-        report.record_check(CheckField::PassiveAllowlist, CheckStatus::Pass);
-        report.finalize_passive_pass().expect("passive pass");
+        let report = passive_physical_report();
         assert!(!report.eligible_for_tested());
+    }
+
+    #[test]
+    fn eligible_for_tested_only_on_complete_clean_physical_full_pass() {
+        let report = full_physical_pass_report();
+        assert!(report.eligible_for_tested());
+        assert!(report.to_shareable_toml().is_ok());
+    }
+
+    #[test]
+    fn mutation_after_finalize_rejected() {
+        let report = passive_physical_report();
+        let mut report = report;
+        assert_eq!(
+            report
+                .record_check(CheckField::Enumerated, CheckStatus::Pass)
+                .unwrap_err(),
+            ReportMutationError::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn completed_report_with_contradictory_failure_rejected_on_load() {
+        let mut toml = passive_physical_report()
+            .to_private_toml()
+            .expect("serialize");
+        toml = toml.replace("result = \"pass\"", "result = \"fail\"");
+        let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+        assert!(error.to_string().contains("semantic validation"));
     }
 }

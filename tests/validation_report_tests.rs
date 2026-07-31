@@ -6,6 +6,7 @@ use thermalwriter::transport::hid_report::{
     HidWriteObservation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
     USERSPACE_SUBMIT_BYTES,
 };
+use thermalwriter::transport::profile::{WireProtocol, build_device_info};
 use thermalwriter::transport::type2_policy::{
     Type2PreHandshakePolicy, WINBOND_HID2_PID, WINBOND_HID2_VID, negotiate_type2_policy,
 };
@@ -14,11 +15,10 @@ use thermalwriter::transport::usb_fingerprint::{
 };
 use thermalwriter::transport::validation_report::{
     CheckField, CheckStatus, DescriptorCaptureStatus, DisplayDimensions, EvidenceOrigin,
-    FinalizeError, HardwareValidationReport, HidReadErrorKind, ProfilePolicyLabel,
-    ValidationResult, ValidationScope, ValidationStage, build_commit_known, sanitize_free_text,
+    FinalizeError, HardwareValidationReport, HidReadErrorKind, NegotiatedOutputRoute,
+    ProfilePolicyLabel, ReportMutationError, ValidationErrorKind, ValidationResult,
+    ValidationScope, ValidationStage, sanitize_free_text,
 };
-
-const KNOWN_COMMIT: &str = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447";
 
 fn hid_in_fingerprint() -> UsbFingerprint {
     UsbFingerprint {
@@ -62,10 +62,18 @@ fn passive_physical_report() -> HardwareValidationReport {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-    report.set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe);
-    report.record_check(CheckField::Enumerated, CheckStatus::Pass);
-    report.record_check(CheckField::PassiveAllowlist, CheckStatus::Pass);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report
+        .record_check(CheckField::Enumerated, CheckStatus::Pass)
+        .expect("check");
+    report
+        .record_check(CheckField::PassiveAllowlist, CheckStatus::Pass)
+        .expect("check");
     report.finalize_passive_pass().expect("passive pass");
     report
 }
@@ -73,8 +81,10 @@ fn passive_physical_report() -> HardwareValidationReport {
 fn full_mandatory_checks(report: &mut HardwareValidationReport) {
     for field in [
         CheckField::Enumerated,
+        CheckField::PassiveAllowlist,
         CheckField::ExclusiveOwner,
         CheckField::Handshake,
+        CheckField::ActiveWrite,
         CheckField::TargetMarker,
         CheckField::SecondDisplayUnchanged,
         CheckField::Orientation,
@@ -83,13 +93,43 @@ fn full_mandatory_checks(report: &mut HardwareValidationReport) {
         CheckField::Reconnect,
         CheckField::DaemonRestored,
     ] {
-        report.record_check(field, CheckStatus::Pass);
+        report
+            .record_check(field, CheckStatus::Pass)
+            .expect("check");
     }
 }
 
-fn full_physical_report_from_toml() -> HardwareValidationReport {
-    let input = include_str!("fixtures/validation_report/full_physical_pass.toml");
-    HardwareValidationReport::from_toml(input).expect("parse full physical fixture")
+fn replay_pm58_active_report() -> HardwareValidationReport {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &short_pm58_response(),
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm58");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+    report
+        .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+        .expect("backend");
+    report
+        .set_hid_descriptor_status(DescriptorCaptureStatus::Captured)
+        .expect("descriptor");
+    report
+        .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
+        .expect("write");
+    report
+        .set_hid_active_write_authorized(true)
+        .expect("authorized");
+    report
 }
 
 #[test]
@@ -119,26 +159,27 @@ fn golden_passive_in_only_hid_interrupt_without_out() {
 }
 
 #[test]
+fn golden_replay_pm58_active_evidence_in_progress() {
+    let report = replay_pm58_active_report();
+    let toml = report.to_private_toml().expect("serialize");
+
+    let expected = include_str!("fixtures/validation_report/replay_pm58_active_evidence.toml");
+    assert_eq!(
+        normalize_build_section(&toml),
+        normalize_build_section(expected)
+    );
+
+    assert!(toml.contains("origin = \"replay\""));
+    assert!(toml.contains("profile_policy = \"upstream_pm58_407\""));
+    assert!(toml.contains("pm = 58"));
+    assert!(toml.contains("fbl = 58"));
+    assert!(!toml.contains("result = "));
+    assert!(!report.eligible_for_tested());
+}
+
+#[test]
 fn golden_pm58_active_negotiated_policy() {
-    let obs = negotiate_type2_policy(
-        WINBOND_HID2_VID,
-        WINBOND_HID2_PID,
-        &short_pm58_response(),
-        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
-    )
-    .expect("pm58");
-
-    let mut report =
-        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-    report.set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe);
-    report.record_negotiated_type2(&obs).expect("negotiated");
-    report.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
-    report.set_hid_descriptor_status(DescriptorCaptureStatus::Captured);
-    report.record_hid_write_observation(512, Some(512), 0, 513, 513, Some(8));
-    report.set_hid_active_write_authorized(true);
-    report.record_check(CheckField::Handshake, CheckStatus::Pass);
-
+    let report = replay_pm58_active_report();
     let negotiated = report.negotiated().expect("negotiated profile");
     assert_eq!(negotiated.pm(), 58);
     assert_eq!(negotiated.fbl(), 58);
@@ -155,10 +196,6 @@ fn golden_pm58_active_negotiated_policy() {
     );
 
     let toml = report.to_private_toml().expect("serialize");
-    assert!(toml.contains("profile_policy = \"upstream_pm58_407\""));
-    assert!(toml.contains("pm = 58"));
-    assert!(toml.contains("fbl = 58"));
-    assert!(toml.contains("response_bytes = 8"));
     assert!(toml.contains("userspace_submit_bytes = 513"));
     assert!(toml.contains("protocol_chunk_bytes = 512"));
     assert!(toml.contains("runtime_route = \"kernel_managed_hidraw\""));
@@ -180,13 +217,22 @@ fn golden_pm68_conservative_stop_before_active_write() {
 
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
     report.record_negotiated_type2(&obs).expect("negotiated");
-    report.record_check(CheckField::Handshake, CheckStatus::Pass);
-    report.fail_at(
-        ValidationStage::ActiveWrite,
-        &["PM68 observed; active output not evidenced"],
-    );
+    report
+        .record_check(CheckField::Handshake, CheckStatus::Pass)
+        .expect("check");
+    report
+        .fail_at(
+            ValidationStage::ActiveWrite,
+            &[(
+                ValidationErrorKind::Policy,
+                "PM68 observed; active output not evidenced",
+            )],
+        )
+        .expect("fail");
 
     let negotiated = report.negotiated().expect("negotiated");
     assert_eq!(negotiated.fbl(), 192);
@@ -207,8 +253,44 @@ fn golden_pm68_conservative_stop_before_active_write() {
     assert!(toml.contains("active_writes_allowed = false"));
     assert!(toml.contains("result = \"fail\""));
     assert!(toml.contains("failed_step = \"active_write\""));
+    assert!(toml.contains("kind = \"policy\""));
     assert!(toml.contains("fbl = 192"));
     assert!(!report.eligible_for_tested());
+}
+
+#[test]
+fn pm68_cannot_finalize_full_pass() {
+    let mut resp = short_pm58_response();
+    resp[5] = 68;
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &resp,
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm68");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+    full_mandatory_checks(&mut report);
+    report
+        .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+        .expect("backend");
+    report
+        .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
+        .expect("write");
+    report
+        .set_hid_active_write_authorized(true)
+        .expect("authorized");
+
+    assert_eq!(
+        report.finalize_full_pass().unwrap_err(),
+        FinalizeError::ConservativeStopProfile
+    );
 }
 
 #[test]
@@ -217,14 +299,20 @@ fn golden_direct_hidraw_short_read_count() {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-    report.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
-    report.record_hid_read(&HidReadObservation {
-        read_capacity_bytes: 512,
-        read_timeout_ms: 500,
-        transport_return_bytes: 8,
-        protocol_response_bytes: 8,
-    });
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+        .expect("backend");
+    report
+        .record_hid_read(&HidReadObservation {
+            read_capacity_bytes: 512,
+            read_timeout_ms: 500,
+            transport_return_bytes: 8,
+            protocol_response_bytes: 8,
+        })
+        .expect("read");
 
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("read_capacity_bytes = 512"));
@@ -244,18 +332,22 @@ fn golden_hid_read_failure_distinguishes_none_from_zero() {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.record_hid_read_failure(512, 500, None, HidReadErrorKind::Timeout, "read timed out");
+    report
+        .record_hid_read_failure(512, 500, None, HidReadErrorKind::Timeout, "read timed out")
+        .expect("read failure");
 
     let toml = report.to_private_toml().expect("serialize");
     assert!(!toml.contains("transport_return_bytes"));
 
-    report.record_hid_read_failure(
-        512,
-        500,
-        Some(0),
-        HidReadErrorKind::ShortCount,
-        "short read",
-    );
+    report
+        .record_hid_read_failure(
+            512,
+            500,
+            Some(0),
+            HidReadErrorKind::ShortCount,
+            "short read",
+        )
+        .expect("read failure");
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("transport_return_bytes = 0"));
 }
@@ -276,15 +368,22 @@ fn golden_partial_chunk_write_failure() {
 
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-    report.record_hid_chunked_write_failure(&failure);
-    report.fail_at(
-        ValidationStage::ActiveWrite,
-        &["unexpected HID write count"],
-    );
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .record_hid_chunked_write_failure(&failure)
+        .expect("write failure");
+    report
+        .fail_at(
+            ValidationStage::ActiveWrite,
+            &[(ValidationErrorKind::Transport, "unexpected HID write count")],
+        )
+        .expect("fail");
 
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("error_kind = \"unexpected_count\""));
+    assert!(toml.contains("kind = \"transport\""));
     assert!(toml.contains("completed_chunks"));
     assert!(toml.contains("failing_chunk"));
     assert!(toml.contains("transport_return_bytes = 513"));
@@ -294,15 +393,29 @@ fn golden_partial_chunk_write_failure() {
     assert_eq!(write_failure.completed_chunks().len(), 1);
     assert_eq!(
         write_failure.completed_chunks()[0].transport_return_bytes(),
-        513
+        Some(513)
     );
     assert_eq!(
         write_failure
             .failing_chunk()
             .unwrap()
             .transport_return_bytes(),
-        8
+        Some(8)
     );
+}
+
+#[test]
+fn write_observation_allows_missing_transport_return() {
+    let mut report = HardwareValidationReport::new_in_progress(
+        EvidenceOrigin::Physical,
+        ValidationScope::Passive,
+    );
+    report
+        .record_hid_write_observation(512, Some(512), 0, 513, None, Some(8))
+        .expect("write");
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(!toml.contains("transport_return_bytes"));
 }
 
 #[test]
@@ -311,9 +424,18 @@ fn aborted_result_serializes_incrementally() {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.set_fingerprint(&hid_in_fingerprint(), true, None);
-    report.record_check(CheckField::Enumerated, CheckStatus::Pass);
-    report.abort_at(ValidationStage::Selection, &["ambiguous duplicate VID:PID"]);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), true, None)
+        .expect("fingerprint");
+    report
+        .record_check(CheckField::Enumerated, CheckStatus::Pass)
+        .expect("check");
+    report
+        .abort_at(
+            ValidationStage::Selection,
+            &[(ValidationErrorKind::Device, "ambiguous duplicate VID:PID")],
+        )
+        .expect("abort");
 
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("result = \"aborted\""));
@@ -331,10 +453,15 @@ fn hostile_error_fully_redacts_and_blocks_shareable() {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.fail_at(
-        ValidationStage::HidrawCorrelation,
-        &["correlation failed for /dev/hidraw3 busnum=2 devnum=7 /home/mike/sys"],
-    );
+    report
+        .fail_at(
+            ValidationStage::HidrawCorrelation,
+            &[(
+                ValidationErrorKind::Error,
+                "correlation failed for /dev/hidraw3 busnum=2 devnum=7 /home/mike/sys",
+            )],
+        )
+        .expect("fail");
 
     assert!(!report.shareable());
     let message = report.failure().unwrap().errors()[0].message();
@@ -348,7 +475,7 @@ fn hostile_error_fully_redacts_and_blocks_shareable() {
 #[test]
 fn sanitize_hostile_redaction_golden() {
     let outcome = sanitize_free_text(
-        "opened /dev/hidraw3 busnum=1 devnum=4 serial=SECRET /home/mike/.config",
+        "opened /dev/hidraw3 busnum=1 devnum=4 serial=SECRET /home/mike/.config bus=1 user=mike uid=1000",
     );
     assert!(!outcome.provably_safe);
     assert_eq!(outcome.text, "[redacted]");
@@ -360,7 +487,9 @@ fn sanitize_hostile_redaction_golden() {
 fn missing_checks_never_count_as_pass() {
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
-    report.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
     let obs = negotiate_type2_policy(
         WINBOND_HID2_VID,
         WINBOND_HID2_PID,
@@ -369,14 +498,27 @@ fn missing_checks_never_count_as_pass() {
     )
     .unwrap();
     report.record_negotiated_type2(&obs).unwrap();
-    report.record_check(CheckField::Enumerated, CheckStatus::Pass);
+    report
+        .record_check(CheckField::Enumerated, CheckStatus::Pass)
+        .expect("check");
 
     assert!(report.checks().passed(CheckField::Enumerated));
     assert!(!report.checks().passed(CheckField::Handshake));
-    assert!(!report.checks().passed(CheckField::Soak));
+    assert!(!report.checks().passed(CheckField::ActiveWrite));
     assert_eq!(
         report.finalize_full_pass().unwrap_err(),
         FinalizeError::MissingMandatoryChecks
+    );
+}
+
+#[test]
+fn mutation_after_finalize_is_rejected() {
+    let mut report = passive_physical_report();
+    assert_eq!(
+        report
+            .record_check(CheckField::Enumerated, CheckStatus::Pass)
+            .unwrap_err(),
+        ReportMutationError::AlreadyFinalized
     );
 }
 
@@ -386,9 +528,15 @@ fn endpoint_packet_size_not_serialized_as_report_length() {
         EvidenceOrigin::Physical,
         ValidationScope::Passive,
     );
-    report.set_fingerprint(&hid_in_fingerprint(), false, None);
-    report.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
-    report.record_hid_write_observation(512, Some(512), 0, 513, 513, Some(8));
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, None)
+        .expect("fingerprint");
+    report
+        .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+        .expect("backend");
+    report
+        .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
+        .expect("write");
 
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("max_packet_size = 8"));
@@ -430,14 +578,37 @@ fn rejects_unknown_fields() {
 }
 
 #[test]
-fn eligible_for_tested_only_on_complete_clean_physical_full_pass() {
+fn hostile_message_rejected_on_deserialize() {
+    let mut report = HardwareValidationReport::new_in_progress(
+        EvidenceOrigin::Physical,
+        ValidationScope::Passive,
+    );
+    report
+        .fail_at(
+            ValidationStage::Inventory,
+            &[(ValidationErrorKind::Error, "benign inventory error")],
+        )
+        .expect("fail");
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("benign inventory error", "/dev/hidraw0 leaked");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("hostile"));
+}
+
+#[test]
+fn eligible_for_tested_rejects_replay_and_synthetic_origins() {
     let passive = passive_physical_report();
     assert!(!passive.eligible_for_tested());
+
+    let replay = replay_pm58_active_report();
+    assert!(!replay.eligible_for_tested());
 
     let mut synthetic =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Synthetic, ValidationScope::Full);
     full_mandatory_checks(&mut synthetic);
-    synthetic.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
+    synthetic
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
     let obs = negotiate_type2_policy(
         WINBOND_HID2_VID,
         WINBOND_HID2_PID,
@@ -446,43 +617,44 @@ fn eligible_for_tested_only_on_complete_clean_physical_full_pass() {
     )
     .unwrap();
     synthetic.record_negotiated_type2(&obs).unwrap();
-    synthetic.doc_result_override_for_test(Some(ValidationResult::Pass));
+    synthetic
+        .set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT)
+        .expect("backend");
+    synthetic
+        .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
+        .expect("write");
+    synthetic
+        .set_hid_active_write_authorized(true)
+        .expect("authorized");
+    assert_eq!(
+        synthetic.finalize_full_pass().unwrap_err(),
+        FinalizeError::WrongOrigin
+    );
     assert!(!synthetic.eligible_for_tested());
-
-    let mut incomplete = full_physical_report_from_toml();
-    incomplete.doc_checks_clear_for_test();
-    assert!(!incomplete.eligible_for_tested());
-
-    let mut failed = full_physical_report_from_toml();
-    failed.fail_at(ValidationStage::Soak, &["soak failed"]);
-    assert!(!failed.eligible_for_tested());
-
-    let mut dirty = full_physical_report_from_toml();
-    dirty.doc_build_dirty_for_test(true);
-    assert!(!dirty.eligible_for_tested());
-
-    let mut unknown_commit = full_physical_report_from_toml();
-    unknown_commit.doc_build_commit_for_test("unknown");
-    assert!(!unknown_commit.eligible_for_tested());
-
-    let clean = full_physical_report_from_toml();
-    assert!(clean.shareable());
-    assert!(build_commit_known(clean.build_provenance().commit()));
-    assert!(!clean.build_provenance().dirty());
-    assert!(clean.eligible_for_tested());
 }
 
 #[test]
-fn shareable_toml_rejects_deserialized_hostile_message() {
-    let mut report = HardwareValidationReport::new_in_progress(
-        EvidenceOrigin::Physical,
-        ValidationScope::Passive,
+fn record_negotiated_device_supports_bulk_87ad70db() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .record_negotiated_device(&device_info, NegotiatedOutputRoute::LegacyBulk, 64)
+        .expect("negotiated");
+
+    let negotiated = report.negotiated().expect("negotiated");
+    assert_eq!(negotiated.pm(), 4);
+    assert_eq!(negotiated.fbl(), 72);
+    assert_eq!(negotiated.profile_policy(), ProfilePolicyLabel::LegacyBulk);
+    assert_eq!(
+        negotiated.negotiated_output_route(),
+        Some(NegotiatedOutputRoute::LegacyBulk)
     );
-    report.fail_at(ValidationStage::Inventory, &["benign inventory error"]);
-    let mut toml = report.to_private_toml().expect("serialize");
-    toml = toml.replace("benign inventory error", "/dev/hidraw0 leaked");
-    let loaded = HardwareValidationReport::from_toml(&toml).expect("parse");
-    assert!(loaded.to_shareable_toml().is_err());
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(toml.contains("protocol_family = \"bulk\""));
+    assert!(toml.contains("negotiated_output_route = \"legacy_bulk\""));
 }
 
 /// Strip volatile `[build]` lines so golden fixtures stay stable across commits.
@@ -496,44 +668,6 @@ fn normalize_build_section(toml: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[test]
-#[ignore = "one-shot fixture generator"]
-fn write_golden_fixtures() {
-    use std::fs;
-    use std::path::PathBuf;
-
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation_report");
-    fs::create_dir_all(&dir).expect("mkdir");
-
-    let passive = passive_physical_report();
-    fs::write(
-        dir.join("passive_in_only.toml"),
-        passive.to_private_toml().expect("passive"),
-    )
-    .expect("write passive");
-
-    let obs = negotiate_type2_policy(
-        WINBOND_HID2_VID,
-        WINBOND_HID2_PID,
-        &short_pm58_response(),
-        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
-    )
-    .expect("pm58");
-    let mut full =
-        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
-    full.set_fingerprint(&hid_in_fingerprint(), false, Some(true));
-    full.set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe);
-    full.record_negotiated_type2(&obs).expect("negotiated");
-    full.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
-    full_mandatory_checks(&mut full);
-    full.doc_build_commit_for_test(KNOWN_COMMIT);
-    full.doc_build_dirty_for_test(false);
-    full.doc_result_override_for_test(Some(ValidationResult::Pass));
-    fs::write(
-        dir.join("full_physical_pass.toml"),
-        full.to_private_toml().expect("full"),
-    )
-    .expect("write full");
+        .trim_end_matches('\n')
+        .to_string()
 }

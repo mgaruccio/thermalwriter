@@ -57,10 +57,10 @@ pub use validation_report::{
     HidReadErrorKind, HidReadEvidence, HidReadFailureEvidence, HidReportEvidence,
     HidWriteChunkEvidence, HidWriteErrorKind, HidWriteFailureEvidence, NegotiatedOutputRoute,
     NegotiatedProfile, ProfilePolicyLabel, ProtocolFamily, ReportEndpointCapability,
-    ReportFingerprint, ReportInterfaceShape, ReportPreHandshakePolicy, RuntimeBackendRoute,
-    SCHEMA_VERSION, SanitizedText, UPSTREAM_REVIEWED_COMMIT, ValidationChecks, ValidationErrorKind,
-    ValidationErrorLink, ValidationFailure, ValidationResult, ValidationScope, ValidationStage,
-    build_commit_known, current_build_provenance, sanitize_free_text,
+    ReportFingerprint, ReportInterfaceShape, ReportMutationError, ReportPreHandshakePolicy,
+    RuntimeBackendRoute, SCHEMA_VERSION, SanitizedText, UPSTREAM_REVIEWED_COMMIT, ValidationChecks,
+    ValidationErrorKind, ValidationErrorLink, ValidationFailure, ValidationResult, ValidationScope,
+    ValidationStage, build_commit_known, current_build_provenance, sanitize_free_text,
 };
 
 /// Encoded payload ready for the wire — dimensions match the device native
