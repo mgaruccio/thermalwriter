@@ -241,9 +241,6 @@ pub fn resolve_known_lcd_route(
                     "SCSI route missing mass-storage bulk IN+OUT pair for {vid:04x}:{pid:04x}"
                 )
             })?;
-            if bulk_claimed && (vid, pid) != DUAL_PATH_LCD_ID {
-                bail!("SCSI-only {vid:04x}:{pid:04x} must not claim vendor bulk");
-            }
             Ok((WireProtocol::Scsi, LcdTransportRoute::ScsiCommand))
         }
         WireProtocol::HidType3 | WireProtocol::Ly => {
@@ -925,6 +922,7 @@ fn open_discovered(dev: &DiscoveredDevice) -> Result<(Box<dyn Transport>, Device
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::usb_fingerprint::{UsbEndpointCapability, UsbInterfaceShape};
 
     fn udev_hex_attr(line: &str, attr: &str) -> Option<u16> {
         let prefix = format!("ATTRS{{{attr}}}==\"");
@@ -1106,6 +1104,80 @@ mod tests {
         assert!(dual_usb_rule.contains("TAG+=\"uaccess\""));
         let dual_sg_rule = udev_rule(udev_rules, "scsi_generic", dual_vid, dual_pid);
         assert!(dual_sg_rule.contains("TAG+=\"uaccess\""));
+    }
+
+    fn scsi_only_fingerprint_with_unrelated_vendor_bulk() -> UsbFingerprint {
+        UsbFingerprint {
+            vid: 0x87cd,
+            pid: 0x70db,
+            bcd_device: "1.00".to_string(),
+            interfaces: vec![
+                UsbInterfaceShape {
+                    number: 0,
+                    alternate_setting: 0,
+                    class: USB_CLASS_MASS_STORAGE,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        UsbEndpointCapability {
+                            address: 0x01,
+                            direction: UsbDirection::Out,
+                            transfer: UsbTransferKind::Bulk,
+                            max_packet_size: 512,
+                            interval: 0,
+                        },
+                        UsbEndpointCapability {
+                            address: 0x81,
+                            direction: UsbDirection::In,
+                            transfer: UsbTransferKind::Bulk,
+                            max_packet_size: 512,
+                            interval: 0,
+                        },
+                    ],
+                },
+                UsbInterfaceShape {
+                    number: 1,
+                    alternate_setting: 0,
+                    class: 0xff,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        UsbEndpointCapability {
+                            address: 0x02,
+                            direction: UsbDirection::Out,
+                            transfer: UsbTransferKind::Bulk,
+                            max_packet_size: 512,
+                            interval: 0,
+                        },
+                        UsbEndpointCapability {
+                            address: 0x82,
+                            direction: UsbDirection::In,
+                            transfer: UsbTransferKind::Bulk,
+                            max_packet_size: 512,
+                            interval: 0,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn resolve_known_lcd_route_scsi_only_ignores_unrelated_vendor_bulk() {
+        let fingerprint = scsi_only_fingerprint_with_unrelated_vendor_bulk();
+        assert!(
+            vendor_bulk_endpoints(derive_vendor_bulk_pair(&fingerprint)).is_some(),
+            "fixture must include an unrelated vendor bulk pair"
+        );
+        assert!(
+            mass_storage_bulk_pair(&fingerprint).is_some(),
+            "fixture must include a mass-storage bulk pair"
+        );
+
+        let (protocol, route) =
+            resolve_known_lcd_route(0x87cd, 0x70db, &fingerprint).expect("SCSI-only route");
+        assert_eq!(protocol, WireProtocol::Scsi);
+        assert_eq!(route, LcdTransportRoute::ScsiCommand);
     }
 
     fn udev_hidraw_ids(rules: &'static str) -> Vec<(u16, u16)> {
