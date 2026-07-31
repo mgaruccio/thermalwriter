@@ -1005,6 +1005,101 @@ mod tests {
         assert!(dual_sg_rule.contains("TAG+=\"uaccess\""));
     }
 
+    fn udev_hidraw_ids(rules: &'static str) -> Vec<(u16, u16)> {
+        let mut ids = Vec::new();
+        for line in rules
+            .lines()
+            .filter(|line| line.trim_start().starts_with("SUBSYSTEM==\"hidraw\""))
+        {
+            assert!(
+                line.contains("TAG+=\"uaccess\""),
+                "hidraw udev rule does not grant active-session access: {line}"
+            );
+            assert!(
+                line.contains("ATTRS{idVendor}"),
+                "hidraw rule must use parent-scoped ATTRS, not ATTR: {line}"
+            );
+            assert!(
+                line.contains("ATTRS{idProduct}"),
+                "hidraw rule must use parent-scoped ATTRS, not ATTR: {line}"
+            );
+            assert!(
+                !line.contains("MODE="),
+                "hidraw rule must not use world-writable MODE: {line}"
+            );
+            let vid = udev_hex_attr(line, "idVendor")
+                .unwrap_or_else(|| panic!("hidraw udev rule lacks a valid vendor: {line}"));
+            let pid = udev_hex_attr(line, "idProduct")
+                .unwrap_or_else(|| panic!("hidraw udev rule lacks a valid product: {line}"));
+            ids.push((vid, pid));
+        }
+        ids
+    }
+
+    #[test]
+    fn hid2_udev_hidraw_rule_scoped_to_0416_5302() {
+        const HID2_ID: (u16, u16) = (0x0416, 0x5302);
+
+        let udev_rules = include_str!("../../packaging/udev/99-thermalwriter-rapl.rules");
+        let hidraw_ids = udev_hidraw_ids(udev_rules);
+        assert_eq!(
+            hidraw_ids,
+            vec![HID2_ID],
+            "only 0416:5302 may receive hidraw uaccess"
+        );
+
+        let hidraw_rule = udev_rule(udev_rules, "hidraw", HID2_ID.0, HID2_ID.1);
+        assert!(hidraw_rule.contains("ATTRS{idVendor}"));
+        assert!(hidraw_rule.contains("ATTRS{idProduct}"));
+        assert!(hidraw_rule.contains("TAG+=\"uaccess\""));
+        assert!(
+            !hidraw_rule.contains("MODE="),
+            "hidraw rule must not loosen permissions via MODE: {hidraw_rule}"
+        );
+
+        let usb_rule = udev_rule(udev_rules, "usb", HID2_ID.0, HID2_ID.1);
+        assert!(usb_rule.contains(r#"ATTR{power/control}="auto""#));
+        assert!(usb_rule.contains(r#"ATTR{power/autosuspend_delay_ms}="10000""#));
+        assert!(usb_rule.contains("TAG+=\"uaccess\""));
+
+        let unrelated_usb_ids = [
+            (0x87ad, 0x70db),
+            (0x87cd, 0x70db),
+            (0x0402, 0x3922),
+            DUAL_PATH_LCD_ID,
+            (0x0418, 0x5303),
+            (0x0418, 0x5304),
+            (0x0416, 0x5408),
+            (0x0416, 0x5409),
+        ];
+        for (vid, pid) in unrelated_usb_ids {
+            assert!(
+                !udev_rules.contains(&format!(
+                    "SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{vid:04x}\", ATTRS{{idProduct}}==\"{pid:04x}\""
+                )),
+                "{vid:04x}:{pid:04x} must not inherit hidraw uaccess"
+            );
+        }
+
+        // SCSI matrix from the companion test must still hold.
+        let mut udev_scsi_ids = Vec::new();
+        for line in udev_rules
+            .lines()
+            .filter(|line| line.trim_start().starts_with("SUBSYSTEM==\"scsi_generic\""))
+        {
+            let vid = udev_hex_attr(line, "idVendor").unwrap();
+            let pid = udev_hex_attr(line, "idProduct").unwrap();
+            udev_scsi_ids.push((vid, pid));
+        }
+        udev_scsi_ids.sort_unstable();
+        let mut expected_scsi_ids = [(0x87cd, 0x70db), (0x0402, 0x3922), DUAL_PATH_LCD_ID].to_vec();
+        expected_scsi_ids.sort_unstable();
+        assert_eq!(
+            udev_scsi_ids, expected_scsi_ids,
+            "existing SCSI udev rules must remain intact"
+        );
+    }
+
     #[test]
     fn parse_auto_all_and_usb_id() {
         assert_eq!(DeviceSelector::parse("auto").unwrap(), DeviceSelector::Auto);

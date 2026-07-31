@@ -2,9 +2,11 @@
 # allow only the thermalreader group to read Intel-RAPL energy counters.
 #
 # The LCD daemon runs as a normal user service. Raw bulk / HID / LY libusb paths
-# receive TAG+="uaccess"; SCSI-only USB parents retain power-management settings
-# without direct device access, while their scsi_generic nodes receive uaccess.
-# This keeps each known display accessible only through the protocol it uses.
+# receive TAG+="uaccess" on the USB parent; HID Type 2 (0416:5302) also needs a
+# parent-scoped hidraw rule for direct Linux hidraw syscalls (no HIDAPI package).
+# SCSI-only USB parents retain power-management settings without direct device
+# access, while their scsi_generic nodes receive uaccess. This keeps each known
+# display accessible only through the protocol it uses.
 #
 # 0416:5406 is dual-shape (vendor bulk preferred, else scsi_generic). Both access
 # paths are listed.
@@ -33,8 +35,9 @@ SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="0402", ATTRS{idProduct}=="3922", TA
 SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5406", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
 SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5406", TAG+="uaccess"
 
-# --- HID Type 2 ---
+# --- HID Type 2 (direct Linux hidraw syscalls; no HIDAPI package) ---
 SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5302", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5302", TAG+="uaccess"
 
 # --- HID Type 3 ---
 SUBSYSTEM=="usb", ATTR{idVendor}=="0418", ATTR{idProduct}=="5303", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
