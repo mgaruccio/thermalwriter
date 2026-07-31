@@ -25,9 +25,10 @@ pub mod type2_policy;
 use anyhow::Result;
 
 pub use hid_report::{
-    HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract, HidWriteObservation,
-    HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
-    REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress, correlate_hidraw_to_usb,
+    HIDAPI_CRATE_VERSION, HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract,
+    HidWriteObservation, HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
+    PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
+    correlate_hidraw_to_usb,
 };
 pub use profile::{
     DeviceInfo, DeviceProfile, DisplayShape, FixtureProfile, FrameEncoding, KNOWN_FBL_CODES,

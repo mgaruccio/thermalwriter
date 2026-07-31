@@ -14,9 +14,10 @@ use std::time::Duration;
 #[cfg(feature = "daemon")]
 pub use super::hid_report::linux::{LinuxHidReportIo, open_correlated_session};
 pub use super::hid_report::{
-    HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract, HidWriteObservation,
-    HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
-    REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress, correlate_hidraw_to_usb,
+    HIDAPI_CRATE_VERSION, HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract,
+    HidWriteObservation, HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
+    PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
+    correlate_hidraw_to_usb,
 };
 
 use super::profile::{WireProtocol, build_device_info};

@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 /// HIDAPI source commit pinned for Linux return-count contract evidence.
 pub const HIDAPI_EVIDENCE_COMMIT: &str = "518fbd18796b0ef376f47796d1ee8dd63cc9315a";
 
+/// Exact `hidapi` crate version whose Linux backend contract is claimed below.
+pub const HIDAPI_CRATE_VERSION: &str = "2.6.6";
+
 /// Protocol payload per HID report chunk (upstream Type 2 fixed chunk size).
 pub const PROTOCOL_CHUNK_BYTES: usize = 512;
 
@@ -30,6 +33,7 @@ pub const EXPECTED_TRANSPORT_RETURN_BYTES: usize = USERSPACE_SUBMIT_BYTES;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidReportBackendContract {
     pub hidapi_commit: &'static str,
+    pub hidapi_crate_version: &'static str,
     pub backend: &'static str,
     pub expected_return_bytes: usize,
 }
@@ -37,6 +41,7 @@ pub struct HidReportBackendContract {
 /// Current Linux hidraw backend contract (statically linked via `linux-static-hidraw`).
 pub const LINUX_HIDRAW_BACKEND_CONTRACT: HidReportBackendContract = HidReportBackendContract {
     hidapi_commit: HIDAPI_EVIDENCE_COMMIT,
+    hidapi_crate_version: HIDAPI_CRATE_VERSION,
     backend: "linux-static-hidraw",
     expected_return_bytes: EXPECTED_TRANSPORT_RETURN_BYTES,
 };
@@ -59,6 +64,7 @@ pub struct HidWriteObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidReadObservation {
     pub read_capacity_bytes: usize,
+    pub read_timeout_ms: u32,
     pub transport_return_bytes: isize,
     pub protocol_response_bytes: usize,
 }
@@ -136,6 +142,22 @@ fn resolve_usb_bus_address_from_hidraw_sysfs(
     None
 }
 
+/// Validate a hidraw sysfs node name before constructing `/dev/<name>`.
+fn validate_hidraw_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty() && !name.contains('/') && !name.contains('\0'),
+        "invalid hidraw name {name:?}"
+    );
+    let Some(suffix) = name.strip_prefix("hidraw") else {
+        bail!("invalid hidraw name {name:?}: expected hidraw prefix");
+    };
+    ensure!(
+        !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()),
+        "invalid hidraw name {name:?}: suffix must be decimal digits"
+    );
+    Ok(())
+}
+
 /// Correlate hidraw candidates to exactly one node whose USB ancestor matches
 /// `selector`. Returns an error when zero or multiple nodes match.
 pub fn correlate_hidraw_to_usb(
@@ -145,6 +167,7 @@ pub fn correlate_hidraw_to_usb(
 ) -> Result<HidrawCorrelation> {
     let mut matches = Vec::new();
     for candidate in candidates {
+        validate_hidraw_name(&candidate.name)?;
         let Some(resolved) = resolve_usb_bus_address_from_hidraw_sysfs(&candidate.sysfs_path, fs)
         else {
             continue;
@@ -162,6 +185,7 @@ pub fn correlate_hidraw_to_usb(
         ),
         1 => {
             let selected = matches.remove(0);
+            validate_hidraw_name(&selected.name)?;
             Ok(HidrawCorrelation {
                 devnode: PathBuf::from(format!("/dev/{}", selected.name)),
                 selected,
@@ -178,7 +202,8 @@ pub fn correlate_hidraw_to_usb(
 /// Injectable HID report I/O (HIDAPI/hidraw semantics without hardware).
 pub trait HidReportIo: Send {
     fn write(&mut self, data: &[u8]) -> Result<isize>;
-    fn read(&mut self, buf: &mut [u8]) -> Result<isize>;
+    /// Read with an explicit millisecond timeout (0 = immediate return when no data).
+    fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<isize>;
 }
 
 /// One open HID report session. Errors stop further I/O; no automatic reopen.
@@ -274,14 +299,15 @@ impl<Io: HidReportIo> HidReportSession<Io> {
         if payload.is_empty() {
             bail!("HID report chunked write requires non-empty payload");
         }
+        if payload.len() % PROTOCOL_CHUNK_BYTES != 0 {
+            bail!(
+                "HID report payload length {} is not a multiple of {PROTOCOL_CHUNK_BYTES}",
+                payload.len()
+            );
+        }
+
         let mut observations = Vec::new();
         for chunk in payload.chunks(PROTOCOL_CHUNK_BYTES) {
-            if chunk.len() != PROTOCOL_CHUNK_BYTES {
-                bail!(
-                    "HID report payload length {} is not a multiple of {PROTOCOL_CHUNK_BYTES}",
-                    payload.len()
-                );
-            }
             observations.push(self.write_protocol_chunk(
                 chunk,
                 logical_output_report_bytes,
@@ -291,8 +317,13 @@ impl<Io: HidReportIo> HidReportSession<Io> {
         Ok(observations)
     }
 
-    /// Read up to `capacity` bytes; record capacity, transport return, and protocol length separately.
-    pub fn read_bounded(&mut self, capacity: usize) -> Result<(HidReadObservation, Vec<u8>)> {
+    /// Read up to `capacity` bytes with a finite `timeout_ms`; record capacity,
+    /// timeout, transport return, and protocol length separately.
+    pub fn read_bounded(
+        &mut self,
+        capacity: usize,
+        timeout_ms: u32,
+    ) -> Result<(HidReadObservation, Vec<u8>)> {
         if self.stopped {
             bail!("HID report session stopped after prior error");
         }
@@ -301,7 +332,7 @@ impl<Io: HidReportIo> HidReportSession<Io> {
         }
 
         let mut buf = vec![0_u8; capacity];
-        let returned = match self.io.read(&mut buf) {
+        let returned = match self.io.read_timeout(&mut buf, timeout_ms) {
             Ok(value) => value,
             Err(error) => {
                 self.stop_on_error();
@@ -315,9 +346,15 @@ impl<Io: HidReportIo> HidReportSession<Io> {
         }
 
         let returned_usize = returned as usize;
+        if returned_usize > capacity {
+            self.stop_on_error();
+            bail!("HID report read returned {returned_usize} bytes, exceeding capacity {capacity}");
+        }
+
         buf.truncate(returned_usize);
         let observation = HidReadObservation {
             read_capacity_bytes: capacity,
+            read_timeout_ms: timeout_ms,
             transport_return_bytes: returned,
             protocol_response_bytes: returned_usize,
         };
@@ -354,8 +391,13 @@ pub mod linux {
             isize::try_from(count).context("hidapi write count overflow")
         }
 
-        fn read(&mut self, buf: &mut [u8]) -> Result<isize> {
-            let count = self.device.read(buf).context("hidapi read")?;
+        fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<isize> {
+            let timeout = i32::try_from(timeout_ms)
+                .context("HID read timeout exceeds i32::MAX milliseconds")?;
+            let count = self
+                .device
+                .read_timeout(buf, timeout)
+                .context("hidapi read_timeout")?;
             isize::try_from(count).context("hidapi read count overflow")
         }
     }
@@ -419,6 +461,7 @@ mod tests {
         write_returns: std::collections::VecDeque<Result<isize>>,
         read_returns: std::collections::VecDeque<Result<isize>>,
         read_data: std::collections::VecDeque<Vec<u8>>,
+        read_timeouts: Vec<u32>,
         writes: Vec<Vec<u8>>,
         reads: Vec<usize>,
         fail_after_write: bool,
@@ -430,6 +473,7 @@ mod tests {
                 write_returns: std::collections::VecDeque::new(),
                 read_returns: std::collections::VecDeque::new(),
                 read_data: std::collections::VecDeque::new(),
+                read_timeouts: Vec::new(),
                 writes: Vec::new(),
                 reads: Vec::new(),
                 fail_after_write: false,
@@ -454,7 +498,8 @@ mod tests {
                 .unwrap_or(Ok(data.len() as isize))
         }
 
-        fn read(&mut self, buf: &mut [u8]) -> Result<isize> {
+        fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<isize> {
+            self.read_timeouts.push(timeout_ms);
             self.reads.push(buf.len());
             let data = self
                 .read_data
@@ -577,6 +622,22 @@ mod tests {
     }
 
     #[test]
+    fn chunked_write_rejects_non_multiple_payload_without_partial_writes() {
+        let mut io = MemHidReportIo::new();
+        io.write_returns.push_back(Ok(513));
+        io.write_returns.push_back(Ok(513));
+        let mut session = HidReportSession::new(io, LINUX_HIDRAW_BACKEND_CONTRACT);
+        let error = session
+            .write_chunked(&vec![0; 1025], None, None)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a multiple of 512"),
+            "{error:#}"
+        );
+        assert_eq!(session.io.writes.len(), 0);
+    }
+
+    #[test]
     fn chunked_write_rejects_non_multiple_payload() {
         let mut session =
             HidReportSession::new(MemHidReportIo::new(), LINUX_HIDRAW_BACKEND_CONTRACT);
@@ -596,12 +657,46 @@ mod tests {
             .push_back(vec![0xDA, 0xDB, 0xDC, 0xDD, 0, 0x3A, 0, 0]);
         io.read_returns.push_back(Ok(8));
         let mut session = HidReportSession::new(io, LINUX_HIDRAW_BACKEND_CONTRACT);
-        let (obs, data) = session.read_bounded(512).unwrap();
+        let (obs, data) = session.read_bounded(512, 250).unwrap();
         assert_eq!(obs.read_capacity_bytes, 512);
+        assert_eq!(obs.read_timeout_ms, 250);
         assert_eq!(obs.transport_return_bytes, 8);
         assert_eq!(obs.protocol_response_bytes, 8);
         assert_eq!(data.len(), 8);
         assert_eq!(session.io.reads, vec![512]);
+        assert_eq!(session.io.read_timeouts, vec![250]);
+    }
+
+    #[test]
+    fn read_timeout_zero_returns_without_data() {
+        let mut io = MemHidReportIo::new();
+        io.read_returns.push_back(Ok(0));
+        let mut session = HidReportSession::new(io, LINUX_HIDRAW_BACKEND_CONTRACT);
+        let (obs, data) = session.read_bounded(64, 0).unwrap();
+        assert_eq!(obs.read_timeout_ms, 0);
+        assert_eq!(obs.transport_return_bytes, 0);
+        assert_eq!(obs.protocol_response_bytes, 0);
+        assert_eq!(data.len(), 0);
+        assert_eq!(session.io.read_timeouts, vec![0]);
+    }
+
+    #[test]
+    fn read_rejects_return_count_larger_than_capacity() {
+        let mut io = MemHidReportIo::new();
+        io.read_data.push_back(vec![0xAA; 100]);
+        io.read_returns.push_back(Ok(100));
+        let mut session = HidReportSession::new(io, LINUX_HIDRAW_BACKEND_CONTRACT);
+        let error = session.read_bounded(64, 100).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeding capacity"),
+            "{error:#}"
+        );
+        assert!(session.is_stopped());
+        let follow_up = session.read_bounded(64, 100).unwrap_err();
+        assert!(
+            follow_up.to_string().contains("session stopped"),
+            "{follow_up:#}"
+        );
     }
 
     #[test]
@@ -609,7 +704,7 @@ mod tests {
         let mut io = MemHidReportIo::new();
         io.read_returns.push_back(Ok(-1));
         let mut session = HidReportSession::new(io, LINUX_HIDRAW_BACKEND_CONTRACT);
-        let error = session.read_bounded(64).unwrap_err();
+        let error = session.read_bounded(64, 50).unwrap_err();
         assert!(
             error.to_string().contains("read returned error"),
             "{error:#}"
@@ -721,11 +816,38 @@ mod tests {
     }
 
     #[test]
-    fn backend_contract_pins_hidapi_commit() {
+    fn correlate_hidraw_rejects_malformed_name() {
+        let fs = MapSysfs::default();
+        let candidates = vec![HidrawCandidate {
+            name: "../hidraw3".into(),
+            sysfs_path: PathBuf::from("/sys/class/hidraw/../hidraw3"),
+        }];
+        let error = correlate_hidraw_to_usb(
+            UsbBusAddress {
+                bus: 1,
+                address: 14,
+            },
+            &candidates,
+            &fs,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid hidraw name"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn backend_contract_pins_hidapi_commit_and_crate_version() {
         assert_eq!(
             LINUX_HIDRAW_BACKEND_CONTRACT.hidapi_commit,
             HIDAPI_EVIDENCE_COMMIT
         );
+        assert_eq!(
+            LINUX_HIDRAW_BACKEND_CONTRACT.hidapi_crate_version,
+            HIDAPI_CRATE_VERSION
+        );
+        assert_eq!(HIDAPI_CRATE_VERSION, "2.6.6");
         assert_eq!(
             LINUX_HIDRAW_BACKEND_CONTRACT.expected_return_bytes,
             EXPECTED_TRANSPORT_RETURN_BYTES
