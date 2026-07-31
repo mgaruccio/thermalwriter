@@ -714,9 +714,9 @@ fn hid_type2_407_read_only_probe_performs_no_writes() {
     let pre = hid_lcd::Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
     let obs =
         hid_lcd::handshake_type2_read_only_probe_with_io(&mut io, 0x0416, 0x5302, pre).unwrap();
-    assert_eq!(obs.pm, 58);
-    assert_eq!(obs.sub, 0);
-    assert!(obs.policy.active_writes_allowed);
+    assert_eq!(obs.pm(), 58);
+    assert_eq!(obs.sub(), 0);
+    assert!(obs.policy().active_writes_allowed());
     assert_eq!(
         io.log,
         vec![IoOp::Read(hid_lcd::TYPE2_PROBE_READ_BOUND)],
@@ -779,7 +779,7 @@ fn hid_type2_with_policy_legacy_matches_existing_handshake() {
     let pre = hid_lcd::Type2PreHandshakePolicy::LegacyBulkInit;
     let (info, obs) = hid_lcd::handshake_type2_with_policy(&mut io, 0x0416, 0x5302, pre).unwrap();
     assert_eq!((info.width(), info.height()), (320, 240));
-    assert!(obs.policy.active_writes_allowed);
+    assert!(obs.policy().active_writes_allowed());
     assert_eq!(
         io.log,
         expected_hid_handshake_schedule(hid_lcd::build_init_packet_type2(), 512, 1)

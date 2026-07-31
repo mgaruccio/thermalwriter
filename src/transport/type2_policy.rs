@@ -51,10 +51,10 @@ pub enum HidOutputRoute {
 /// `output` is `None` when no active route is evidenced (`active_writes_allowed == false`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Type2NegotiatedPolicy {
-    pub output: Option<HidOutputRoute>,
-    pub keep_single_session: bool,
-    pub portrait_native: bool,
-    pub active_writes_allowed: bool,
+    output: Option<HidOutputRoute>,
+    keep_single_session: bool,
+    portrait_native: bool,
+    active_writes_allowed: bool,
 }
 
 impl Type2NegotiatedPolicy {
@@ -81,15 +81,49 @@ impl Type2NegotiatedPolicy {
             active_writes_allowed: false,
         }
     }
+
+    pub fn output(&self) -> Option<HidOutputRoute> {
+        self.output
+    }
+
+    pub fn keep_single_session(&self) -> bool {
+        self.keep_single_session
+    }
+
+    pub fn portrait_native(&self) -> bool {
+        self.portrait_native
+    }
+
+    pub fn active_writes_allowed(&self) -> bool {
+        self.active_writes_allowed
+    }
 }
 
 /// Observed handshake response plus derived policy for downstream transport wiring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type2NegotiatedObservation {
-    pub pm: u8,
-    pub sub: u8,
-    pub response: Vec<u8>,
-    pub policy: Type2NegotiatedPolicy,
+    pm: u8,
+    sub: u8,
+    response: Vec<u8>,
+    policy: Type2NegotiatedPolicy,
+}
+
+impl Type2NegotiatedObservation {
+    pub fn pm(&self) -> u8 {
+        self.pm
+    }
+
+    pub fn sub(&self) -> u8 {
+        self.sub
+    }
+
+    pub fn response(&self) -> &[u8] {
+        &self.response
+    }
+
+    pub fn policy(&self) -> Type2NegotiatedPolicy {
+        self.policy
+    }
 }
 
 fn is_exact_407_fingerprint(fingerprint: &UsbFingerprint) -> bool {
@@ -141,19 +175,40 @@ pub fn parse_type2_pm_sub(response: &[u8]) -> Result<(u8, u8)> {
     );
 }
 
+/// PM/SUB pair evidenced for upstream 4.07 HID-report active I/O (#228 / #230).
+pub const TYPE2_PM58_HID_REPORT: u8 = 58;
+pub const TYPE2_SUB0: u8 = 0;
+
 /// Authorize active HID-report writes from a negotiated Type2 observation.
 pub fn authorize_hid_report_writes(obs: &Type2NegotiatedObservation) -> Result<()> {
     ensure!(
-        obs.policy.active_writes_allowed,
-        "active HID report writes not authorized for PM={} SUB={}",
-        obs.pm,
-        obs.sub
+        validate_short_response_type2(obs.response()),
+        "HID report write authorization requires {TYPE2_SHORT_RESPONSE_LEN}-byte Type2 magic response"
     );
     ensure!(
-        obs.policy.output == Some(HidOutputRoute::HidReport),
+        obs.pm() == TYPE2_PM58_HID_REPORT && obs.sub() == TYPE2_SUB0,
+        "HID report writes authorized only for PM{TYPE2_PM58_HID_REPORT}/SUB{TYPE2_SUB0}, got PM={} SUB={}",
+        obs.pm(),
+        obs.sub()
+    );
+    let policy = obs.policy();
+    ensure!(
+        policy.active_writes_allowed(),
+        "active HID report writes not authorized for PM={} SUB={}",
+        obs.pm(),
+        obs.sub()
+    );
+    ensure!(
+        policy.output() == Some(HidOutputRoute::HidReport),
         "negotiated output route is not HID report for PM={} SUB={}",
-        obs.pm,
-        obs.sub
+        obs.pm(),
+        obs.sub()
+    );
+    ensure!(
+        policy.keep_single_session(),
+        "HID report write authorization requires single-session policy for PM={} SUB={}",
+        obs.pm(),
+        obs.sub()
     );
     Ok(())
 }
@@ -380,7 +435,66 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("active HID report writes not authorized"),
+                .contains("PM58/SUB0")
+                || error
+                    .to_string()
+                    .contains("active HID report writes not authorized"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn authorize_hid_report_writes_rejects_pm68_even_with_magic_response() {
+        let mut resp = short_pm58_response();
+        resp[5] = 68;
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &resp,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .unwrap();
+        let error = authorize_hid_report_writes(&obs).unwrap_err();
+        assert!(
+            error.to_string().contains("PM58/SUB0")
+                || error
+                    .to_string()
+                    .contains("active HID report writes not authorized"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn authorize_hid_report_writes_rejects_pm58_legacy_bulk_route() {
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &legacy_full_response(58, 0),
+            Type2PreHandshakePolicy::LegacyBulkInit,
+        )
+        .unwrap();
+        let error = authorize_hid_report_writes(&obs).unwrap_err();
+        assert!(
+            error.to_string().contains("not HID report")
+                || error.to_string().contains("magic response"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn authorize_hid_report_writes_rejects_pm58_wrong_sub() {
+        let mut resp = short_pm58_response();
+        resp[4] = 1;
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &resp,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .unwrap();
+        let error = authorize_hid_report_writes(&obs).unwrap_err();
+        assert!(
+            error.to_string().contains("SUB0") || error.to_string().contains("SUB"),
             "{error:#}"
         );
     }
@@ -395,10 +509,10 @@ mod tests {
             pre,
         )
         .expect("PM58/SUB0");
-        assert_eq!(obs.pm, 58);
-        assert_eq!(obs.sub, 0);
+        assert_eq!(obs.pm(), 58);
+        assert_eq!(obs.sub(), 0);
         assert_eq!(
-            obs.policy,
+            obs.policy(),
             Type2NegotiatedPolicy::authorized(HidOutputRoute::HidReport, true, true)
         );
     }
@@ -409,8 +523,8 @@ mod tests {
         resp[5] = 68;
         let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
         let obs = negotiate_type2_policy(WINBOND_HID2_VID, WINBOND_HID2_PID, &resp, pre).unwrap();
-        assert_eq!(obs.pm, 68);
-        assert_eq!(obs.policy, Type2NegotiatedPolicy::observed_inactive());
+        assert_eq!(obs.pm(), 68);
+        assert_eq!(obs.policy(), Type2NegotiatedPolicy::observed_inactive());
     }
 
     #[test]
@@ -454,9 +568,9 @@ mod tests {
             pre,
         )
         .unwrap();
-        assert_eq!(obs.pm, 49);
+        assert_eq!(obs.pm(), 49);
         assert_eq!(
-            obs.policy,
+            obs.policy(),
             Type2NegotiatedPolicy::authorized(HidOutputRoute::LegacyBulk, false, false)
         );
     }
@@ -473,8 +587,8 @@ mod tests {
     #[test]
     fn observed_inactive_has_no_output_route() {
         let policy = Type2NegotiatedPolicy::observed_inactive();
-        assert!(!policy.active_writes_allowed);
-        assert_eq!(policy.output, None);
+        assert!(!policy.active_writes_allowed());
+        assert_eq!(policy.output(), None);
     }
 
     #[test]

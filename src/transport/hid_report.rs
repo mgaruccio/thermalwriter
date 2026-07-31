@@ -184,6 +184,23 @@ pub struct HidChunkedWriteFailure {
     pub error: HidReportWriteError,
 }
 
+impl std::fmt::Display for HidChunkedWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "HID chunked write failed after {} completed chunk(s): {}",
+            self.completed.len(),
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for HidChunkedWriteFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum HidReportReadError {
     #[error("HID report read returned error ({returned})")]
@@ -459,7 +476,7 @@ impl<Io: HidReportIo> HidReportSessionCore<Io> {
                     read_capacity_bytes: capacity,
                     read_timeout_ms: timeout_ms,
                     transport_return_bytes: returned,
-                    protocol_response_bytes: returned_usize,
+                    protocol_response_bytes: 0,
                 },
             });
         }
@@ -510,6 +527,21 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
     ) -> Result<(HidReadObservation, Vec<u8>), HidReportReadError> {
         self.core.read_bounded(capacity, timeout_ms)
     }
+
+    /// Promote this read-capable session to write-authorized use on the same I/O handle.
+    ///
+    /// Production flow: open once (`open_correlated_read_session`), probe read-only, then
+    /// promote after `Type2NegotiatedObservation` authorizes PM58/SUB0 HID-report writes.
+    pub fn authorize_writes(
+        self,
+        obs: &Type2NegotiatedObservation,
+    ) -> Result<HidReportWriteSession<Io>> {
+        let auth = HidReportWriteAuthorization::from_negotiated(obs)?;
+        Ok(HidReportWriteSession {
+            core: self.core,
+            _auth: auth,
+        })
+    }
 }
 
 /// Write-authorized HID report session (requires negotiated PM58 HID-report policy).
@@ -524,10 +556,6 @@ pub struct HidReportWriteSession<Io: HidReportIo> {
 impl<Io: HidReportIo> HidReportWriteSession<Io> {
     #[cfg(test)]
     pub(crate) fn new_for_test(io: Io, auth: HidReportWriteAuthorization) -> Self {
-        Self::new(io, auth)
-    }
-
-    fn new(io: Io, auth: HidReportWriteAuthorization) -> Self {
         Self {
             core: HidReportSessionCore::new(io, &LINUX_HIDRAW_BACKEND_CONTRACT),
             _auth: auth,
@@ -692,6 +720,53 @@ impl<Io: HidReportIo> HidReportWriteSession<Io> {
     }
 }
 
+/// Outcome of polling a hidraw fd before `read(2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HidrawPollOutcome {
+    Ready,
+    Timeout,
+}
+
+/// Interpret `poll(2)` results for hidraw reads (testable without hardware).
+pub(crate) fn interpret_hidraw_poll(poll_result: i32, revents: i16) -> Result<HidrawPollOutcome> {
+    if poll_result < 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("hidraw poll(2) failed: {err}");
+    }
+    if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        bail!("hidraw poll(2) reported error revents=0x{revents:x} (POLLERR|POLLHUP|POLLNVAL)");
+    }
+    if poll_result == 0 {
+        return Ok(HidrawPollOutcome::Timeout);
+    }
+    if revents & libc::POLLIN == 0 {
+        bail!("hidraw poll(2) returned without POLLIN (revents=0x{revents:x})");
+    }
+    Ok(HidrawPollOutcome::Ready)
+}
+
+/// Poll one hidraw fd; always invoked (including `timeout_ms == 0`).
+pub(crate) fn poll_hidraw_for_read(fd: libc::c_int, timeout_ms: u32) -> Result<HidrawPollOutcome> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout =
+        i32::try_from(timeout_ms).context("HID read timeout exceeds i32::MAX milliseconds")?;
+    let poll_result = loop {
+        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
+        if result >= 0 {
+            break result;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            bail!("hidraw poll(2) failed: {err}");
+        }
+    };
+    interpret_hidraw_poll(poll_result, poll_fd.revents)
+}
+
 #[cfg(feature = "daemon")]
 pub mod linux {
     use super::*;
@@ -740,28 +815,17 @@ pub mod linux {
         }
 
         fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<isize> {
-            if timeout_ms > 0 {
-                let mut poll_fd = libc::pollfd {
-                    fd: self.file.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let timeout = i32::try_from(timeout_ms)
-                    .context("HID read timeout exceeds i32::MAX milliseconds")?;
-                let poll_result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
-                if poll_result < 0 {
-                    bail!("hidraw poll(2) failed");
-                }
-                if poll_result == 0 {
-                    return Ok(0);
-                }
+            match poll_hidraw_for_read(self.file.as_raw_fd(), timeout_ms)? {
+                HidrawPollOutcome::Timeout => return Ok(0),
+                HidrawPollOutcome::Ready => {}
             }
             let count = self.file.read(buf).context("hidraw read(2)")?;
             isize::try_from(count).context("hidraw read count overflow")
         }
     }
 
-    /// Open a correlated hidraw devnode for read-only use.
+    /// Open a correlated hidraw devnode once (O_RDWR); probe read-only, then promote via
+    /// [`HidReportReadSession::authorize_writes`].
     pub fn open_correlated_read_session(
         selector: UsbBusAddress,
         candidates: &[HidrawCandidate],
@@ -770,17 +834,6 @@ pub mod linux {
         let io = LinuxHidrawIo::open_authenticated(&correlation, selector, &RealSysfs)?;
         Ok(HidReportReadSession::new(io))
     }
-
-    /// Open a correlated hidraw devnode for write-authorized use.
-    pub fn open_correlated_write_session(
-        selector: UsbBusAddress,
-        candidates: &[HidrawCandidate],
-        auth: HidReportWriteAuthorization,
-    ) -> Result<HidReportWriteSession<LinuxHidrawIo>> {
-        let correlation = correlate_hidraw_to_usb(selector, candidates, &RealSysfs)?;
-        let io = LinuxHidrawIo::open_authenticated(&correlation, selector, &RealSysfs)?;
-        Ok(HidReportWriteSession::new(io, auth))
-    }
 }
 
 #[cfg(test)]
@@ -788,6 +841,9 @@ mod tests {
     use super::*;
     use crate::transport::type2_policy::{Type2PreHandshakePolicy, negotiate_type2_policy};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_MEM_IO_ID: AtomicU64 = AtomicU64::new(1);
 
     #[derive(Debug, Default)]
     struct MapSysfs {
@@ -828,6 +884,7 @@ mod tests {
     }
 
     struct MemHidReportIo {
+        id: u64,
         write_returns: std::collections::VecDeque<Result<isize>>,
         read_returns: std::collections::VecDeque<Result<isize>>,
         read_data: std::collections::VecDeque<Vec<u8>>,
@@ -840,6 +897,7 @@ mod tests {
     impl MemHidReportIo {
         fn new() -> Self {
             Self {
+                id: NEXT_MEM_IO_ID.fetch_add(1, Ordering::Relaxed),
                 write_returns: std::collections::VecDeque::new(),
                 read_returns: std::collections::VecDeque::new(),
                 read_data: std::collections::VecDeque::new(),
@@ -854,6 +912,10 @@ mod tests {
             let mut io = Self::new();
             io.write_returns.push_back(Ok(returned));
             io
+        }
+
+        fn id(&self) -> u64 {
+            self.id
         }
     }
 
@@ -936,9 +998,10 @@ mod tests {
         .unwrap();
         let error = HidReportWriteAuthorization::from_negotiated(&obs).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("active HID report writes not authorized"),
+            error.to_string().contains("PM58/SUB0")
+                || error
+                    .to_string()
+                    .contains("active HID report writes not authorized"),
             "{error:#}"
         );
     }
@@ -1137,7 +1200,7 @@ mod tests {
         ));
         if let HidReportReadError::ExceedsCapacity { observation, .. } = error {
             assert_eq!(observation.transport_return_bytes, 100);
-            assert_eq!(observation.protocol_response_bytes, 100);
+            assert_eq!(observation.protocol_response_bytes, 0);
         }
         assert!(session.is_stopped());
     }
@@ -1322,6 +1385,65 @@ mod tests {
                 || error.to_string().contains("invalid hidraw"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn authorize_writes_promotes_same_io_handle_without_reopen() {
+        let io = MemHidReportIo::new();
+        let io_id = io.id();
+        let read_session = HidReportReadSession::new_for_test(io);
+        let obs = negotiate_type2_policy(
+            0x0416,
+            0x5302,
+            &[0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00],
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .unwrap();
+        let write_session = read_session.authorize_writes(&obs).unwrap();
+        assert_eq!(write_session.core.io.id(), io_id);
+    }
+
+    #[test]
+    fn chunked_write_failure_implements_error_with_source() {
+        let io = MemHidReportIo::with_write_ok(512);
+        let mut session = HidReportWriteSession::new_for_test(io, pm58_auth());
+        let failure = session
+            .write_chunked(sample_chunk(1).as_ref(), None, None)
+            .unwrap_err();
+        let rendered = failure.to_string();
+        assert!(rendered.contains("completed chunk"));
+        assert!(rendered.contains("unexpected HID write count"));
+        assert!(std::error::Error::source(&failure).is_some());
+    }
+
+    #[test]
+    fn interpret_poll_zero_timeout_is_immediate_without_pollin() {
+        assert_eq!(
+            interpret_hidraw_poll(0, 0).unwrap(),
+            HidrawPollOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn interpret_poll_pollin_is_ready() {
+        assert_eq!(
+            interpret_hidraw_poll(1, libc::POLLIN).unwrap(),
+            HidrawPollOutcome::Ready
+        );
+    }
+
+    #[test]
+    fn interpret_poll_error_revents_fail_closed() {
+        for revents in [libc::POLLERR, libc::POLLHUP, libc::POLLNVAL] {
+            let error = interpret_hidraw_poll(1, revents).unwrap_err();
+            assert!(error.to_string().contains("error revents"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn interpret_poll_positive_without_pollin_fails() {
+        let error = interpret_hidraw_poll(1, libc::POLLOUT).unwrap_err();
+        assert!(error.to_string().contains("without POLLIN"), "{error:#}");
     }
 
     #[test]

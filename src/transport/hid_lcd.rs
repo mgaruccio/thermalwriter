@@ -12,9 +12,7 @@ use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
 #[cfg(feature = "daemon")]
-pub use super::hid_report::linux::{
-    LinuxHidrawIo, open_correlated_read_session, open_correlated_write_session,
-};
+pub use super::hid_report::linux::{LinuxHidrawIo, open_correlated_read_session};
 pub use super::hid_report::{
     HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportReadError,
     HidReportReadSession, HidReportWriteAuthorization, HidReportWriteError, HidReportWriteSession,
@@ -181,8 +179,8 @@ pub fn handshake_type2_with_policy(
                 WireProtocol::HidType2,
                 vid,
                 pid,
-                observation.pm,
-                observation.sub,
+                observation.pm(),
+                observation.sub(),
                 None,
             )?;
             Ok((info, observation))
