@@ -918,6 +918,127 @@ fn from_toml_rejects_unknown_commit_without_dirty_flag() {
     assert!(error.to_string().contains("build provenance"));
 }
 
+#[test]
+fn from_toml_rejects_bulk_tampered_active_writes_false() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace(
+        "active_writes_allowed = true",
+        "active_writes_allowed = false",
+    );
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_tampered_keep_single_session_true() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("keep_single_session = false", "keep_single_session = true");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_tampered_portrait_native_true() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("portrait_native = false", "portrait_native = true");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_tampered_wire_dimensions() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("width = 480", "width = 320");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+fn short_pm49_response() -> Vec<u8> {
+    vec![0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x31, 0x00, 0x00]
+}
+
+#[test]
+fn observed_inactive_pm49_in_progress_round_trips() {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &short_pm49_response(),
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm49 inactive");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(!toml.contains("negotiated_output_route = "));
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
+    let negotiated = parsed.negotiated().expect("negotiated");
+    assert_eq!(
+        negotiated.profile_policy(),
+        ProfilePolicyLabel::ObservedInactive
+    );
+    assert!(!negotiated.active_writes_allowed());
+    assert!(negotiated.negotiated_output_route().is_none());
+}
+
+#[test]
+fn from_toml_rejects_observed_inactive_without_hid407_pre_policy() {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &short_pm49_response(),
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm49 inactive");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace(
+        "pre_handshake_policy = \"hid407_read_only_probe\"",
+        "pre_handshake_policy = \"legacy_bulk_init\"",
+    );
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_hid407_vendor_class_fingerprint() {
+    let report = replay_pm58_active_report();
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("class = 3", "class = 255");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
 /// Strip volatile `[build]` lines so golden fixtures stay stable across commits.
 fn normalize_build_section(toml: &str) -> String {
     toml.lines()

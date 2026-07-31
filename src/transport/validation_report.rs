@@ -985,6 +985,7 @@ impl HardwareValidationReport {
         prospective.result = Some(ValidationResult::Pass);
         validate_semantics(&prospective, self.redaction_permanent)
             .map_err(map_semantic_to_finalize_error)?;
+        validate_shareable_strings(&prospective).map_err(map_semantic_to_finalize_error)?;
         self.doc.result = Some(ValidationResult::Pass);
         Ok(())
     }
@@ -1187,9 +1188,10 @@ fn map_semantic_to_finalize_error(err: SemanticError) -> FinalizeError {
         SemanticError::ConservativeStopProfile => FinalizeError::ConservativeStopProfile,
         SemanticError::UnknownBuildCommit => FinalizeError::UnknownCommit,
         SemanticError::UncleanBuild => FinalizeError::UncleanBuild,
-        SemanticError::NotShareable | SemanticError::RedactionBlocksShareable => {
-            FinalizeError::NotShareable
-        }
+        SemanticError::NotShareable
+        | SemanticError::RedactionBlocksShareable
+        | SemanticError::ShareableStringViolation
+        | SemanticError::HostileString => FinalizeError::NotShareable,
         SemanticError::InvalidOrigin => FinalizeError::WrongOrigin,
         _ => FinalizeError::InvariantViolation,
     }
@@ -1315,14 +1317,15 @@ fn validate_hid407_fingerprint_binding(
     if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
         return Err(SemanticError::Hid407BindingViolation);
     }
-    let has_interrupt_in = fingerprint.interfaces.iter().any(|iface| {
-        iface.endpoints.iter().any(|ep| {
-            ep.direction == UsbDirection::In
-                && ep.transfer == UsbTransferKind::Interrupt
-                && ep.max_packet_size == 8
-        })
+    let has_hid_interrupt_in = fingerprint.interfaces.iter().any(|iface| {
+        iface.class == 3
+            && iface.endpoints.iter().any(|ep| {
+                ep.direction == UsbDirection::In
+                    && ep.transfer == UsbTransferKind::Interrupt
+                    && ep.max_packet_size == 8
+            })
     });
-    if !has_interrupt_in {
+    if !has_hid_interrupt_in {
         return Err(SemanticError::Hid407BindingViolation);
     }
     Ok(())
@@ -1354,11 +1357,6 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
         return Err(SemanticError::NegotiatedProfileMismatch);
     }
 
-    let expected_wire = expected_wire_dimensions(&device_info, negotiated.portrait_native)?;
-    if negotiated.wire_dimensions != expected_wire {
-        return Err(SemanticError::NegotiatedProfileMismatch);
-    }
-
     if let ProfilePolicyLabel::ActivePmSub { pm, sub } = negotiated.profile_policy {
         if pm != negotiated.pm || sub != negotiated.sub {
             return Err(SemanticError::NegotiatedProfileMismatch);
@@ -1366,8 +1364,16 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
     }
 
     match negotiated.protocol_family {
-        ProtocolFamily::HidType2 => validate_type2_negotiated_profile(doc, negotiated)?,
+        ProtocolFamily::HidType2 => {
+            let expected_wire = expected_wire_dimensions(&device_info, negotiated.portrait_native)?;
+            if negotiated.wire_dimensions != expected_wire {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            validate_type2_negotiated_profile(doc, negotiated)?;
+        }
         ProtocolFamily::Bulk => {
+            validate_generic_lifecycle_flags(negotiated, &device_info)?;
+            validate_generic_wire_dimensions(negotiated, &device_info)?;
             if negotiated.profile_policy != ProfilePolicyLabel::LegacyBulk {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1376,6 +1382,8 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
             }
         }
         ProtocolFamily::Scsi | ProtocolFamily::HidType3 | ProtocolFamily::Ly => {
+            validate_generic_lifecycle_flags(negotiated, &device_info)?;
+            validate_generic_wire_dimensions(negotiated, &device_info)?;
             let ProfilePolicyLabel::ActivePmSub { pm, sub } = negotiated.profile_policy else {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             };
@@ -1466,15 +1474,16 @@ fn validate_type2_negotiated_profile(
             }
         }
         ProfilePolicyLabel::ObservedInactive => {
+            if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.response_bytes != 8 {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
             if negotiated.negotiated_output_route.is_some()
                 || negotiated.active_writes_allowed
                 || negotiated.keep_single_session
                 || negotiated.portrait_native
-            {
-                return Err(SemanticError::NegotiatedProfileMismatch);
-            }
-            if doc.pre_handshake_policy == Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe)
-                && negotiated.response_bytes != 8
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1499,6 +1508,35 @@ fn validate_type2_negotiated_profile(
         ProfilePolicyLabel::ActivePmSub { .. } => {
             return Err(SemanticError::NegotiatedProfileMismatch);
         }
+    }
+    Ok(())
+}
+
+fn validate_generic_lifecycle_flags(
+    negotiated: &NegotiatedProfile,
+    device_info: &DeviceInfo,
+) -> Result<(), SemanticError> {
+    if !negotiated.active_writes_allowed {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    if negotiated.keep_single_session {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    if negotiated.portrait_native != device_info.profile.rotate_panel {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    Ok(())
+}
+
+fn validate_generic_wire_dimensions(
+    negotiated: &NegotiatedProfile,
+    device_info: &DeviceInfo,
+) -> Result<(), SemanticError> {
+    let (width, height) = device_info
+        .wire_dimensions()
+        .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+    if negotiated.wire_dimensions != (DisplayDimensions { width, height }) {
+        return Err(SemanticError::NegotiatedProfileMismatch);
     }
     Ok(())
 }
@@ -2545,6 +2583,21 @@ mod tests {
         assert_eq!(
             report.finalize_full_pass().unwrap_err(),
             FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn physical_full_pass_rejects_malformed_build_version_on_finalize() {
+        let report = full_physical_pass_report_parts();
+        let mut toml = with_clean_build(report, KNOWN_COMMIT)
+            .to_private_toml()
+            .expect("serialize");
+        toml = toml.replace("version = \"0.1.4\"", "version = \"/tmp/leak\"");
+        let mut report = HardwareValidationReport::from_toml(&toml).expect("parse");
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::NotShareable
         );
         assert!(report.result().is_none());
     }
