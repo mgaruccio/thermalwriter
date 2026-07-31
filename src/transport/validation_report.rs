@@ -9,8 +9,10 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 
 use super::hid_report::{
-    HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportWriteError,
-    KERNEL_HIDRAW_DOC_REF, LINUX_HIDRAW_BACKEND_CONTRACT, REVIEWED_HIDAPI_EVIDENCE_COMMIT,
+    EXPECTED_TRANSPORT_RETURN_BYTES, HidChunkedWriteFailure, HidReadObservation,
+    HidReportBackendContract, HidReportWriteError, KERNEL_HIDRAW_DOC_REF,
+    LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
+    REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES,
 };
 use super::profile::{DeviceInfo, WireProtocol, build_device_info};
 use super::type2_policy::{
@@ -255,6 +257,7 @@ pub enum DescriptorCaptureStatus {
 pub enum NegotiatedOutputRoute {
     LegacyBulk,
     HidReport,
+    ScsiCommand,
 }
 
 /// Runtime transport backend route (direct hidraw cannot distinguish interrupt-OUT vs SET_REPORT).
@@ -569,9 +572,16 @@ enum SemanticError {
     HidWriteNotAuthorized,
     IncompleteHidWriteEvidence,
     InvalidHidWriteReturn,
+    InvalidHidReadEvidence,
+    InvalidHidBackend,
     RedactionBlocksShareable,
     ShareableStringViolation,
     HostileString,
+    InvalidOrigin,
+    NotShareable,
+    UncleanBuild,
+    UnknownBuildCommit,
+    ProtocolRouteMismatch,
 }
 
 impl fmt::Display for SemanticError {
@@ -591,9 +601,16 @@ impl fmt::Display for SemanticError {
             Self::HidWriteNotAuthorized => write!(f, "HID active write not authorized"),
             Self::IncompleteHidWriteEvidence => write!(f, "HID write evidence incomplete"),
             Self::InvalidHidWriteReturn => write!(f, "HID write transport return invalid"),
+            Self::InvalidHidReadEvidence => write!(f, "HID read evidence inconsistent"),
+            Self::InvalidHidBackend => write!(f, "HID backend contract invalid"),
             Self::RedactionBlocksShareable => write!(f, "redaction permanently blocks shareable"),
             Self::ShareableStringViolation => write!(f, "shareable string field invalid"),
             Self::HostileString => write!(f, "hostile string in serialized field"),
+            Self::InvalidOrigin => write!(f, "full pass requires physical origin"),
+            Self::NotShareable => write!(f, "report is not shareable"),
+            Self::UncleanBuild => write!(f, "build tree is dirty"),
+            Self::UnknownBuildCommit => write!(f, "build commit unknown or invalid"),
+            Self::ProtocolRouteMismatch => write!(f, "protocol family and output route disagree"),
         }
     }
 }
@@ -728,10 +745,11 @@ impl HardwareValidationReport {
     }
 
     /// Record negotiated profile for bulk/SCSI/HID3/LY devices from resolved [`DeviceInfo`].
+    ///
+    /// Output route is derived from [`WireProtocol`] (bulk/HID3/LY → legacy bulk, SCSI → scsi command).
     pub fn record_negotiated_device(
         &mut self,
         device_info: &DeviceInfo,
-        route: NegotiatedOutputRoute,
         response_bytes: usize,
     ) -> Result<()> {
         self.ensure_mutable().context("report already finalized")?;
@@ -741,7 +759,6 @@ impl HardwareValidationReport {
         );
         self.doc.negotiated = Some(NegotiatedProfile::from_device_info(
             device_info,
-            route,
             response_bytes,
         )?);
         Ok(())
@@ -908,9 +925,11 @@ impl HardwareValidationReport {
         {
             return Err(FinalizeError::MissingMandatoryChecks);
         }
-        self.doc.result = Some(ValidationResult::Pass);
-        validate_semantics(&self.doc, self.redaction_permanent)
+        let mut prospective = self.doc.clone();
+        prospective.result = Some(ValidationResult::Pass);
+        validate_semantics(&prospective, self.redaction_permanent)
             .map_err(|_| FinalizeError::InvariantViolation)?;
+        self.doc.result = Some(ValidationResult::Pass);
         Ok(())
     }
 
@@ -951,26 +970,20 @@ impl HardwareValidationReport {
         if !self.shareable() {
             return Err(FinalizeError::NotShareable);
         }
-        validate_full_pass_evidence(&self.doc).map_err(|err| match err {
-            SemanticError::ConservativeStopProfile => FinalizeError::ConservativeStopProfile,
-            _ => FinalizeError::InvariantViolation,
-        })?;
+        let mut prospective = self.doc.clone();
+        prospective.result = Some(ValidationResult::Pass);
+        validate_semantics(&prospective, self.redaction_permanent)
+            .map_err(map_semantic_to_finalize_error)?;
         self.doc.result = Some(ValidationResult::Pass);
-        validate_semantics(&self.doc, self.redaction_permanent)
-            .map_err(|_| FinalizeError::InvariantViolation)?;
         Ok(())
     }
 
     /// Recompute Tested-badge eligibility; never trust a stored flag.
     pub fn eligible_for_tested(&self) -> bool {
-        self.doc.origin == EvidenceOrigin::Physical
-            && self.doc.scope == ValidationScope::Full
+        self.doc.scope == ValidationScope::Full
             && matches!(self.doc.result, Some(ValidationResult::Pass))
             && validate_semantics(&self.doc, self.redaction_permanent).is_ok()
-            && validate_full_pass_evidence(&self.doc).is_ok()
-            && build_commit_known(&self.doc.build.commit)
-            && !self.doc.build.dirty
-            && self.shareable()
+            && validate_shareable_strings(&self.doc).is_ok()
     }
 
     pub fn to_private_toml(&self) -> Result<String, toml::ser::Error> {
@@ -1002,6 +1015,11 @@ impl HardwareValidationReport {
             doc,
             redaction_permanent: false,
         };
+        if let Some(negotiated) = &report.doc.negotiated {
+            validate_protocol_route_consistency(negotiated).map_err(|err| {
+                toml::de::Error::custom(format!("negotiated profile failed validation: {err}"))
+            })?;
+        }
         if report.doc.result.is_some() {
             validate_semantics(&report.doc, report.redaction_permanent).map_err(|err| {
                 toml::de::Error::custom(format!(
@@ -1067,6 +1085,10 @@ fn validate_semantics(
         return Err(SemanticError::RedactionBlocksShareable);
     }
 
+    if let Some(negotiated) = &doc.negotiated {
+        validate_protocol_route_consistency(negotiated)?;
+    }
+
     match doc.result {
         None => {
             if doc.failed_step.is_some() || doc.failure.is_some() {
@@ -1099,6 +1121,7 @@ fn validate_semantics(
                     {
                         return Err(SemanticError::MissingMandatoryChecks);
                     }
+                    validate_full_pass_completion_requirements(doc, redaction_permanent)?;
                     validate_full_pass_evidence(doc)?;
                 }
             }
@@ -1118,6 +1141,38 @@ fn validate_semantics(
     }
 
     Ok(())
+}
+
+fn validate_full_pass_completion_requirements(
+    doc: &ReportDocument,
+    redaction_permanent: bool,
+) -> Result<(), SemanticError> {
+    if doc.origin != EvidenceOrigin::Physical {
+        return Err(SemanticError::InvalidOrigin);
+    }
+    if !doc.shareable || redaction_permanent {
+        return Err(SemanticError::NotShareable);
+    }
+    if !build_commit_known(&doc.build.commit) {
+        return Err(SemanticError::UnknownBuildCommit);
+    }
+    if doc.build.dirty {
+        return Err(SemanticError::UncleanBuild);
+    }
+    Ok(())
+}
+
+fn map_semantic_to_finalize_error(err: SemanticError) -> FinalizeError {
+    match err {
+        SemanticError::ConservativeStopProfile => FinalizeError::ConservativeStopProfile,
+        SemanticError::UnknownBuildCommit => FinalizeError::UnknownCommit,
+        SemanticError::UncleanBuild => FinalizeError::UncleanBuild,
+        SemanticError::NotShareable | SemanticError::RedactionBlocksShareable => {
+            FinalizeError::NotShareable
+        }
+        SemanticError::InvalidOrigin => FinalizeError::WrongOrigin,
+        _ => FinalizeError::InvariantViolation,
+    }
 }
 
 fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError> {
@@ -1140,27 +1195,92 @@ fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError
         .negotiated_output_route
         .ok_or(SemanticError::MissingNegotiatedRoute)?;
 
+    validate_protocol_route_consistency(negotiated)?;
+
     match route {
-        NegotiatedOutputRoute::HidReport => {
-            let hid = doc
-                .hid_report
-                .as_ref()
-                .ok_or(SemanticError::MissingHidEvidence)?;
-            if hid.active_write_authorized != Some(true) {
-                return Err(SemanticError::HidWriteNotAuthorized);
-            }
-            if hid.protocol_chunk_bytes.is_none()
-                || hid.userspace_submit_bytes.is_none()
-                || hid.transport_return_bytes.is_none()
-            {
-                return Err(SemanticError::IncompleteHidWriteEvidence);
-            }
-            let returned = hid.transport_return_bytes.unwrap();
-            if returned <= 0 {
-                return Err(SemanticError::InvalidHidWriteReturn);
-            }
+        NegotiatedOutputRoute::HidReport => validate_hid_report_route_evidence(doc)?,
+        NegotiatedOutputRoute::LegacyBulk | NegotiatedOutputRoute::ScsiCommand => {}
+    }
+
+    Ok(())
+}
+
+fn validate_protocol_route_consistency(
+    negotiated: &NegotiatedProfile,
+) -> Result<(), SemanticError> {
+    let route = negotiated
+        .negotiated_output_route
+        .ok_or(SemanticError::MissingNegotiatedRoute)?;
+    let expected = match negotiated.protocol_family {
+        ProtocolFamily::Bulk | ProtocolFamily::HidType3 | ProtocolFamily::Ly => {
+            NegotiatedOutputRoute::LegacyBulk
         }
-        NegotiatedOutputRoute::LegacyBulk => {}
+        ProtocolFamily::Scsi => NegotiatedOutputRoute::ScsiCommand,
+        ProtocolFamily::HidType2 => {
+            if matches!(
+                route,
+                NegotiatedOutputRoute::HidReport | NegotiatedOutputRoute::LegacyBulk
+            ) {
+                return Ok(());
+            }
+            return Err(SemanticError::ProtocolRouteMismatch);
+        }
+    };
+    if route != expected {
+        return Err(SemanticError::ProtocolRouteMismatch);
+    }
+    Ok(())
+}
+
+fn validate_hid_report_route_evidence(doc: &ReportDocument) -> Result<(), SemanticError> {
+    let negotiated = doc
+        .negotiated
+        .as_ref()
+        .ok_or(SemanticError::MissingNegotiated)?;
+    let hid = doc
+        .hid_report
+        .as_ref()
+        .ok_or(SemanticError::MissingHidEvidence)?;
+
+    validate_shareable_hid_backend(&hid.backend)?;
+    if hid.backend.runtime_route != RuntimeBackendRoute::KernelManagedHidraw {
+        return Err(SemanticError::InvalidHidBackend);
+    }
+    if hid.read_failure.is_some() || hid.write_failure.is_some() {
+        return Err(SemanticError::IncompleteHidWriteEvidence);
+    }
+
+    let read = hid
+        .read
+        .as_ref()
+        .ok_or(SemanticError::InvalidHidReadEvidence)?;
+    if read.protocol_response_bytes != negotiated.response_bytes {
+        return Err(SemanticError::InvalidHidReadEvidence);
+    }
+    let returned = read
+        .transport_return_bytes
+        .ok_or(SemanticError::InvalidHidReadEvidence)?;
+    if returned <= 0 || (returned as usize) > read.read_capacity_bytes {
+        return Err(SemanticError::InvalidHidReadEvidence);
+    }
+
+    if hid.active_write_authorized != Some(true) {
+        return Err(SemanticError::HidWriteNotAuthorized);
+    }
+    if hid.report_id != Some(REPORT_ID_UNNUMBERED) {
+        return Err(SemanticError::IncompleteHidWriteEvidence);
+    }
+    if hid.protocol_chunk_bytes != Some(PROTOCOL_CHUNK_BYTES) {
+        return Err(SemanticError::IncompleteHidWriteEvidence);
+    }
+    if hid.userspace_submit_bytes != Some(USERSPACE_SUBMIT_BYTES) {
+        return Err(SemanticError::IncompleteHidWriteEvidence);
+    }
+    if hid.logical_output_report_bytes != Some(PROTOCOL_CHUNK_BYTES) {
+        return Err(SemanticError::IncompleteHidWriteEvidence);
+    }
+    if hid.transport_return_bytes != Some(EXPECTED_TRANSPORT_RETURN_BYTES as isize) {
+        return Err(SemanticError::InvalidHidWriteReturn);
     }
 
     Ok(())
@@ -1170,10 +1290,19 @@ fn validate_shareable_strings(doc: &ReportDocument) -> Result<(), SemanticError>
     if doc.upstream_reviewed_commit != UPSTREAM_REVIEWED_COMMIT {
         return Err(SemanticError::ShareableStringViolation);
     }
+    if !is_valid_shareable_version(&doc.build.version) {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    if !is_valid_shareable_commit(&doc.build.commit) {
+        return Err(SemanticError::ShareableStringViolation);
+    }
     if contains_privacy_signal(&doc.build.version) || contains_privacy_signal(&doc.build.commit) {
         return Err(SemanticError::HostileString);
     }
     if let Some(fingerprint) = &doc.fingerprint {
+        if !is_valid_bcd_device(&fingerprint.bcd_device) {
+            return Err(SemanticError::ShareableStringViolation);
+        }
         if contains_privacy_signal(&fingerprint.bcd_device) {
             return Err(SemanticError::HostileString);
         }
@@ -1203,6 +1332,30 @@ fn validate_shareable_strings(doc: &ReportDocument) -> Result<(), SemanticError>
         }
     }
     Ok(())
+}
+
+fn is_valid_shareable_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && version
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '-'))
+}
+
+fn is_valid_shareable_commit(commit: &str) -> bool {
+    commit == "unknown" || build_commit_known(commit)
+}
+
+fn is_valid_bcd_device(bcd_device: &str) -> bool {
+    let Some((major, minor)) = bcd_device.split_once('.') else {
+        return false;
+    };
+    !major.is_empty()
+        && major.len() <= 4
+        && minor.len() <= 4
+        && !minor.is_empty()
+        && major.chars().all(|ch| ch.is_ascii_digit())
+        && minor.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn validate_shareable_hid_backend(backend: &HidBackendProvenance) -> Result<(), SemanticError> {
@@ -1272,8 +1425,10 @@ fn contains_privacy_signal(input: &str) -> bool {
         "i serial",
         "bus=",
         "bus:",
-        "address=/",
-        "addr=/",
+        "address=",
+        "address:",
+        "addr=",
+        "addr:",
         "user=",
         "username=",
         "uid=",
@@ -1470,11 +1625,8 @@ impl NegotiatedProfile {
         })
     }
 
-    fn from_device_info(
-        device_info: &DeviceInfo,
-        route: NegotiatedOutputRoute,
-        response_bytes: usize,
-    ) -> Result<Self> {
+    fn from_device_info(device_info: &DeviceInfo, response_bytes: usize) -> Result<Self> {
+        let route = negotiated_route_for_protocol(device_info.protocol)?;
         let native = DisplayDimensions {
             width: device_info.width(),
             height: device_info.height(),
@@ -1508,6 +1660,16 @@ impl NegotiatedProfile {
             keep_single_session: false,
             portrait_native: device_info.profile.rotate_panel,
         })
+    }
+}
+
+fn negotiated_route_for_protocol(protocol: WireProtocol) -> Result<NegotiatedOutputRoute> {
+    match protocol {
+        WireProtocol::Bulk | WireProtocol::HidType3 | WireProtocol::Ly => {
+            Ok(NegotiatedOutputRoute::LegacyBulk)
+        }
+        WireProtocol::Scsi => Ok(NegotiatedOutputRoute::ScsiCommand),
+        WireProtocol::HidType2 => bail!("use record_negotiated_type2 for HID Type2"),
     }
 }
 
@@ -1855,6 +2017,13 @@ mod tests {
     }
 
     fn full_physical_pass_report() -> HardwareValidationReport {
+        let report = full_physical_pass_report_parts();
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        report.finalize_full_pass().expect("full pass");
+        report
+    }
+
+    fn full_physical_pass_report_parts() -> HardwareValidationReport {
         let obs = negotiate_type2_policy(
             WINBOND_HID2_VID,
             WINBOND_HID2_PID,
@@ -1881,6 +2050,14 @@ mod tests {
             .set_hid_descriptor_status(DescriptorCaptureStatus::Captured)
             .expect("descriptor");
         report
+            .record_hid_read(&HidReadObservation {
+                read_capacity_bytes: 512,
+                read_timeout_ms: 500,
+                transport_return_bytes: 8,
+                protocol_response_bytes: 8,
+            })
+            .expect("read");
+        report
             .record_hid_write_observation(512, Some(512), 0, 513, Some(513), Some(8))
             .expect("write");
         report
@@ -1904,8 +2081,6 @@ mod tests {
                 .record_check(field, CheckStatus::Pass)
                 .expect("check");
         }
-        let mut report = with_clean_build(report, KNOWN_COMMIT);
-        report.finalize_full_pass().expect("full pass");
         report
     }
 
@@ -1947,6 +2122,14 @@ mod tests {
         let outcome = sanitize_free_text(
             "opened /dev/hidraw3 on busnum=1 devnum=4 serial=ABC /home/mike/sys/class/hidraw/hidraw3 bus=1 address=/dev/foo user=alice uid=1000",
         );
+        assert!(!outcome.provably_safe);
+        assert_eq!(outcome.text, REDACTED);
+    }
+
+    #[test]
+    fn privacy_detector_matches_assignment_forms() {
+        let outcome =
+            sanitize_free_text("bus=2 address=7 addr:7 user=mike username=alice uid=1000");
         assert!(!outcome.provably_safe);
         assert_eq!(outcome.text, REDACTED);
     }
@@ -1997,5 +2180,53 @@ mod tests {
         toml = toml.replace("result = \"pass\"", "result = \"fail\"");
         let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
         assert!(error.to_string().contains("semantic validation"));
+    }
+
+    #[test]
+    fn physical_full_pass_rejects_short_write_return() {
+        let mut report = full_physical_pass_report_parts();
+        report
+            .record_hid_write_observation(512, Some(512), 0, 513, Some(8), Some(8))
+            .expect("write");
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn physical_full_pass_rejects_missing_transport_return() {
+        let mut report = full_physical_pass_report_parts();
+        report
+            .record_hid_write_observation(512, Some(512), 0, 513, None, Some(8))
+            .expect("write");
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn physical_full_pass_rejects_read_failure_evidence() {
+        let mut report = full_physical_pass_report_parts();
+        report
+            .record_hid_read_failure(
+                512,
+                500,
+                Some(8),
+                HidReadErrorKind::ShortCount,
+                "short read",
+            )
+            .expect("read failure");
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
     }
 }

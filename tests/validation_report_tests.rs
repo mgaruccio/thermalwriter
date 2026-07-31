@@ -484,6 +484,13 @@ fn sanitize_hostile_redaction_golden() {
 }
 
 #[test]
+fn privacy_detector_matches_assignment_forms() {
+    let outcome = sanitize_free_text("bus=2 address=7 addr:7 user=mike username=alice uid=1000");
+    assert!(!outcome.provably_safe);
+    assert_eq!(outcome.text, "[redacted]");
+}
+
+#[test]
 fn missing_checks_never_count_as_pass() {
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
@@ -640,7 +647,7 @@ fn record_negotiated_device_supports_bulk_87ad70db() {
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
     report
-        .record_negotiated_device(&device_info, NegotiatedOutputRoute::LegacyBulk, 64)
+        .record_negotiated_device(&device_info, 64)
         .expect("negotiated");
 
     let negotiated = report.negotiated().expect("negotiated");
@@ -655,6 +662,109 @@ fn record_negotiated_device_supports_bulk_87ad70db() {
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("protocol_family = \"bulk\""));
     assert!(toml.contains("negotiated_output_route = \"legacy_bulk\""));
+}
+
+#[test]
+fn record_negotiated_device_derives_scsi_route() {
+    let device_info =
+        build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, 100, 0, Some(72)).expect("scsi info");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .record_negotiated_device(&device_info, 64)
+        .expect("negotiated");
+
+    assert_eq!(
+        report.negotiated().unwrap().negotiated_output_route(),
+        Some(NegotiatedOutputRoute::ScsiCommand)
+    );
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(toml.contains("negotiated_output_route = \"scsi_command\""));
+}
+
+#[test]
+fn from_toml_rejects_bulk_protocol_with_scsi_route() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .record_negotiated_device(&device_info, 64)
+        .expect("negotiated");
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace(
+        "negotiated_output_route = \"legacy_bulk\"",
+        "negotiated_output_route = \"scsi_command\"",
+    );
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("protocol family and output route disagree")
+    );
+}
+
+#[test]
+fn from_toml_rejects_replay_full_pass_with_clean_build() {
+    let mut report = replay_pm58_active_report();
+    full_mandatory_checks(&mut report);
+    report
+        .record_hid_read(&HidReadObservation {
+            read_capacity_bytes: 512,
+            read_timeout_ms: 500,
+            transport_return_bytes: 8,
+            protocol_response_bytes: 8,
+        })
+        .expect("read");
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml
+        .lines()
+        .map(|line| {
+            if line.starts_with("commit = ") {
+                "commit = \"655a1acff5c86ff0f9121f9fd4a0ea14bee35447\""
+            } else if line.starts_with("dirty = ") {
+                "dirty = false"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    toml = format!("result = \"pass\"\n\n{toml}");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("physical origin") || message.contains("full pass requires physical"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn shareable_toml_rejects_malformed_version_path() {
+    let report = passive_physical_report();
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("version = \"0.1.4\"", "version = \"/tmp/leak\"");
+    let loaded = HardwareValidationReport::from_toml(&toml).expect("parse");
+    assert!(loaded.to_shareable_toml().is_err());
+}
+
+#[test]
+fn replay_origin_cannot_finalize_full_pass() {
+    let mut report = replay_pm58_active_report();
+    full_mandatory_checks(&mut report);
+    report
+        .record_hid_read(&HidReadObservation {
+            read_capacity_bytes: 512,
+            read_timeout_ms: 500,
+            transport_return_bytes: 8,
+            protocol_response_bytes: 8,
+        })
+        .expect("read");
+    assert_eq!(
+        report.finalize_full_pass().unwrap_err(),
+        FinalizeError::WrongOrigin
+    );
+    assert!(report.result().is_none());
 }
 
 /// Strip volatile `[build]` lines so golden fixtures stay stable across commits.
