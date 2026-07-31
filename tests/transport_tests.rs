@@ -711,10 +711,7 @@ fn expected_hid_write_failure_schedule(init: Vec<u8>, attempts: usize) -> Vec<Io
 fn hid_type2_407_read_only_probe_performs_no_writes() {
     let short = vec![0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00];
     let mut io = MemHidIo::new(vec![short]);
-    let pre = hid_lcd::Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-        skip_init: true,
-        accept_short_response: true,
-    };
+    let pre = hid_lcd::Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
     let obs =
         hid_lcd::handshake_type2_read_only_probe_with_io(&mut io, 0x0416, 0x5302, pre).unwrap();
     assert_eq!(obs.pm, 58);
@@ -725,6 +722,50 @@ fn hid_type2_407_read_only_probe_performs_no_writes() {
         vec![IoOp::Read(hid_lcd::TYPE2_PROBE_READ_BOUND)],
         "4.07 probe must not write init or output"
     );
+}
+
+#[test]
+fn hid_type2_read_only_probe_rejects_non_probe_policy_without_io() {
+    for pre in [
+        hid_lcd::Type2PreHandshakePolicy::LegacyBulkInit,
+        hid_lcd::Type2PreHandshakePolicy::StopUnsupportedShape,
+    ] {
+        let mut probe_io =
+            MemHidIo::new(vec![vec![0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00]]);
+        let error =
+            hid_lcd::handshake_type2_read_only_probe_with_io(&mut probe_io, 0x0416, 0x5302, pre)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("read-only probe requires Hid407ReadOnlyProbe"),
+            "{error:#}"
+        );
+        assert!(
+            probe_io.log.is_empty(),
+            "wrong pre-handshake policy must perform zero I/O, got {:?}",
+            probe_io.log
+        );
+    }
+}
+
+#[test]
+fn hid_type2_with_policy_stop_shape_refuses_without_io() {
+    let mut io = MemHidIo::new(vec![]);
+    let error = hid_lcd::handshake_type2_with_policy(
+        &mut io,
+        0x0416,
+        0x5302,
+        hid_lcd::Type2PreHandshakePolicy::StopUnsupportedShape,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Type2 interface shape"),
+        "{error:#}"
+    );
+    assert!(io.log.is_empty(), "stop policy must perform zero I/O");
 }
 
 #[test]

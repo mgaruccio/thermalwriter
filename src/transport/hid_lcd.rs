@@ -140,7 +140,7 @@ pub fn handshake_type2_read_only_probe_with_io(
     pid: u16,
     pre: Type2PreHandshakePolicy,
 ) -> Result<Type2NegotiatedObservation> {
-    let Type2PreHandshakePolicy::Hid407ReadOnlyProbe { .. } = pre else {
+    let Type2PreHandshakePolicy::Hid407ReadOnlyProbe = pre else {
         bail!("read-only probe requires Hid407ReadOnlyProbe pre-handshake policy");
     };
     let response = io
@@ -162,7 +162,7 @@ pub fn handshake_type2_with_policy(
             let observation = negotiate_type2_policy(vid, pid, &response, pre)?;
             Ok((info, observation))
         }
-        Type2PreHandshakePolicy::Hid407ReadOnlyProbe { .. } => {
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe => {
             let observation = handshake_type2_read_only_probe_with_io(io, vid, pid, pre)?;
             let info = build_device_info(
                 WireProtocol::HidType2,

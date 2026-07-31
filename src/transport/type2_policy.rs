@@ -32,11 +32,9 @@ pub const UPSTREAM_407_PM58_PR: &str =
 pub enum Type2PreHandshakePolicy {
     /// Existing bulk IN/OUT init + full response handshake.
     LegacyBulkInit,
-    /// Exact `0416:5302 / 4.07` HID interrupt IN + correlated hidraw: no init/output.
-    Hid407ReadOnlyProbe {
-        skip_init: bool,
-        accept_short_response: bool,
-    },
+    /// Exact `0416:5302 / 4.07` HID interrupt IN + correlated hidraw: no init/output,
+    /// bounded short-response read only (safe semantics are intrinsic to this variant).
+    Hid407ReadOnlyProbe,
     /// Observed shape is recorded; stop before handshake I/O.
     StopUnsupportedShape,
 }
@@ -49,12 +47,40 @@ pub enum HidOutputRoute {
 }
 
 /// Negotiated lifecycle and output policy derived from observed PM/SUB and response shape.
+///
+/// `output` is `None` when no active route is evidenced (`active_writes_allowed == false`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Type2NegotiatedPolicy {
-    pub output: HidOutputRoute,
+    pub output: Option<HidOutputRoute>,
     pub keep_single_session: bool,
     pub portrait_native: bool,
     pub active_writes_allowed: bool,
+}
+
+impl Type2NegotiatedPolicy {
+    /// Active output route with upstream- or legacy-evidenced transport semantics.
+    pub fn authorized(
+        output: HidOutputRoute,
+        keep_single_session: bool,
+        portrait_native: bool,
+    ) -> Self {
+        Self {
+            output: Some(output),
+            keep_single_session,
+            portrait_native,
+            active_writes_allowed: true,
+        }
+    }
+
+    /// Profile observed but no output route is authorized.
+    pub fn observed_inactive() -> Self {
+        Self {
+            output: None,
+            keep_single_session: false,
+            portrait_native: false,
+            active_writes_allowed: false,
+        }
+    }
 }
 
 /// Observed handshake response plus derived policy for downstream transport wiring.
@@ -83,10 +109,7 @@ pub fn select_type2_pre_handshake_policy(
 ) -> Type2PreHandshakePolicy {
     if is_exact_407_fingerprint(fingerprint) {
         if hidraw_correlated && has_hid_interrupt_in(fingerprint) {
-            return Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-                skip_init: true,
-                accept_short_response: true,
-            };
+            return Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
         }
         return Type2PreHandshakePolicy::StopUnsupportedShape;
     }
@@ -128,18 +151,11 @@ pub fn negotiate_type2_policy(
     let (pm, sub) = parse_type2_pm_sub(response)?;
 
     match pre {
-        Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-            accept_short_response,
-            ..
-        } => {
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe => {
             ensure!(
                 validate_short_response_type2(response),
                 "4.07 probe requires {TYPE2_SHORT_RESPONSE_LEN}-byte response, got {}",
                 response.len()
-            );
-            ensure!(
-                accept_short_response,
-                "short response not accepted by pre-handshake policy"
             );
             if pm == 58 && sub == 0 {
                 // #228 / #230: HID report output, skip-init, portrait-native 240×320, one session.
@@ -147,12 +163,11 @@ pub fn negotiate_type2_policy(
                     pm,
                     sub,
                     response: response.to_vec(),
-                    policy: Type2NegotiatedPolicy {
-                        output: HidOutputRoute::HidReport,
-                        keep_single_session: true,
-                        portrait_native: true,
-                        active_writes_allowed: true,
-                    },
+                    policy: Type2NegotiatedPolicy::authorized(
+                        HidOutputRoute::HidReport,
+                        true,
+                        true,
+                    ),
                 });
             }
             // Known profile observed on 4.07; active output not evidenced for this PM/SUB.
@@ -161,12 +176,7 @@ pub fn negotiate_type2_policy(
                 pm,
                 sub,
                 response: response.to_vec(),
-                policy: Type2NegotiatedPolicy {
-                    output: HidOutputRoute::LegacyBulk,
-                    keep_single_session: false,
-                    portrait_native: false,
-                    active_writes_allowed: false,
-                },
+                policy: Type2NegotiatedPolicy::observed_inactive(),
             })
         }
         Type2PreHandshakePolicy::LegacyBulkInit => {
@@ -182,12 +192,7 @@ pub fn negotiate_type2_policy(
                 pm,
                 sub,
                 response: response.to_vec(),
-                policy: Type2NegotiatedPolicy {
-                    output: HidOutputRoute::LegacyBulk,
-                    keep_single_session: false,
-                    portrait_native: false,
-                    active_writes_allowed: true,
-                },
+                policy: Type2NegotiatedPolicy::authorized(HidOutputRoute::LegacyBulk, false, false),
             })
         }
         Type2PreHandshakePolicy::StopUnsupportedShape => {
@@ -280,13 +285,7 @@ mod tests {
     #[test]
     fn pre_handshake_407_hid_in_correlated_selects_read_only_probe() {
         let policy = select_type2_pre_handshake_policy(&fingerprint_407_hid_in(), true);
-        assert_eq!(
-            policy,
-            Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-                skip_init: true,
-                accept_short_response: true,
-            }
-        );
+        assert_eq!(policy, Type2PreHandshakePolicy::Hid407ReadOnlyProbe);
     }
 
     #[test]
@@ -342,10 +341,7 @@ mod tests {
 
     #[test]
     fn pm58_short_response_authorizes_upstream_evidenced_policy() {
-        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-            skip_init: true,
-            accept_short_response: true,
-        };
+        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
         let obs = negotiate_type2_policy(
             WINBOND_HID2_VID,
             WINBOND_HID2_PID,
@@ -357,12 +353,7 @@ mod tests {
         assert_eq!(obs.sub, 0);
         assert_eq!(
             obs.policy,
-            Type2NegotiatedPolicy {
-                output: HidOutputRoute::HidReport,
-                keep_single_session: true,
-                portrait_native: true,
-                active_writes_allowed: true,
-            }
+            Type2NegotiatedPolicy::authorized(HidOutputRoute::HidReport, true, true)
         );
     }
 
@@ -370,24 +361,17 @@ mod tests {
     fn pm68_short_response_observed_but_active_writes_disallowed() {
         let mut resp = short_pm58_response();
         resp[5] = 68;
-        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-            skip_init: true,
-            accept_short_response: true,
-        };
+        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
         let obs = negotiate_type2_policy(WINBOND_HID2_VID, WINBOND_HID2_PID, &resp, pre).unwrap();
         assert_eq!(obs.pm, 68);
-        assert!(!obs.policy.active_writes_allowed);
-        assert_eq!(obs.policy.output, HidOutputRoute::LegacyBulk);
+        assert_eq!(obs.policy, Type2NegotiatedPolicy::observed_inactive());
     }
 
     #[test]
     fn unknown_pm_on_407_probe_fails_without_guessing() {
         let mut resp = short_pm58_response();
         resp[5] = 200;
-        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
-            skip_init: true,
-            accept_short_response: true,
-        };
+        let pre = Type2PreHandshakePolicy::Hid407ReadOnlyProbe;
         let error =
             negotiate_type2_policy(WINBOND_HID2_VID, WINBOND_HID2_PID, &resp, pre).unwrap_err();
         assert!(
@@ -425,8 +409,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(obs.pm, 49);
-        assert!(obs.policy.active_writes_allowed);
-        assert_eq!(obs.policy.output, HidOutputRoute::LegacyBulk);
+        assert_eq!(
+            obs.policy,
+            Type2NegotiatedPolicy::authorized(HidOutputRoute::LegacyBulk, false, false)
+        );
     }
 
     #[test]
@@ -436,6 +422,13 @@ mod tests {
             error.to_string().contains("malformed Type2 response"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn observed_inactive_has_no_output_route() {
+        let policy = Type2NegotiatedPolicy::observed_inactive();
+        assert!(!policy.active_writes_allowed);
+        assert_eq!(policy.output, None);
     }
 
     #[test]
