@@ -572,6 +572,9 @@ fn missing_checks_never_count_as_pass() {
     report
         .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
         .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
     let obs = negotiate_type2_policy(
         WINBOND_HID2_VID,
         WINBOND_HID2_PID,
@@ -691,6 +694,9 @@ fn eligible_for_tested_rejects_replay_and_synthetic_origins() {
     synthetic
         .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
         .expect("fingerprint");
+    synthetic
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
     let obs = negotiate_type2_policy(
         WINBOND_HID2_VID,
         WINBOND_HID2_PID,
@@ -751,8 +757,70 @@ fn scsi_fingerprint() -> UsbFingerprint {
         vid: 0x87cd,
         pid: 0x70db,
         bcd_device: "1.00".to_string(),
-        interfaces: vec![],
+        interfaces: vec![UsbInterfaceShape {
+            number: 0,
+            alternate_setting: 0,
+            class: 8,
+            subclass: 0,
+            protocol: 0,
+            endpoints: vec![
+                UsbEndpointCapability {
+                    address: 0x01,
+                    direction: UsbDirection::Out,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+                UsbEndpointCapability {
+                    address: 0x81,
+                    direction: UsbDirection::In,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+            ],
+        }],
     }
+}
+
+fn legacy_type2_bulk_fingerprint() -> UsbFingerprint {
+    UsbFingerprint {
+        vid: WINBOND_HID2_VID,
+        pid: WINBOND_HID2_PID,
+        bcd_device: "1.00".to_string(),
+        interfaces: vec![UsbInterfaceShape {
+            number: 1,
+            alternate_setting: 0,
+            class: 0xff,
+            subclass: 0,
+            protocol: 0,
+            endpoints: vec![
+                UsbEndpointCapability {
+                    address: 0x02,
+                    direction: UsbDirection::Out,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+                UsbEndpointCapability {
+                    address: 0x81,
+                    direction: UsbDirection::In,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+            ],
+        }],
+    }
+}
+
+fn legacy_type2_full_response(pm: u8, sub: u8) -> Vec<u8> {
+    let mut resp = vec![0u8; 20];
+    resp[0..4].copy_from_slice(&[0xDA, 0xDB, 0xDC, 0xDD]);
+    resp[12] = 0x01;
+    resp[5] = pm;
+    resp[4] = sub;
+    resp
 }
 
 fn record_negotiated_device_report(
@@ -1141,6 +1209,118 @@ fn from_toml_rejects_hid407_vendor_class_fingerprint() {
     toml = toml.replace("class = 3", "class = 255");
     let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
     assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_407_tampered_to_legacy_bulk_init() {
+    let report = replay_pm58_active_report();
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace(
+        "pre_handshake_policy = \"hid407_read_only_probe\"",
+        "pre_handshake_policy = \"legacy_bulk_init\"",
+    );
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_non_407_legacy_without_bulk_pair() {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &legacy_type2_full_response(49, 0),
+        Type2PreHandshakePolicy::LegacyBulkInit,
+    )
+    .expect("legacy obs");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&legacy_type2_bulk_fingerprint(), false, None)
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::LegacyBulkInit)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("transfer = \"bulk\"", "transfer = \"interrupt\"");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn legacy_type2_bulk_profile_round_trips() {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &legacy_type2_full_response(49, 0),
+        Type2PreHandshakePolicy::LegacyBulkInit,
+    )
+    .expect("legacy obs");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&legacy_type2_bulk_fingerprint(), false, None)
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::LegacyBulkInit)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(toml.contains("pre_handshake_policy = \"legacy_bulk_init\""));
+    assert!(toml.contains("profile_policy = \"legacy_bulk\""));
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
+    assert_eq!(
+        parsed.negotiated().unwrap().profile_policy(),
+        ProfilePolicyLabel::LegacyBulk
+    );
+}
+
+#[test]
+fn record_negotiated_type2_rejects_policy_mismatch_with_fingerprint() {
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &short_pm58_response(),
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm58");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::LegacyBulkInit)
+        .expect("policy");
+    let error = report.record_negotiated_type2(&obs).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+    assert!(report.negotiated().is_none());
+}
+
+#[test]
+fn record_negotiated_device_rejects_invalid_scsi_shape() {
+    let device_info =
+        build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, 100, 0, Some(72)).expect("scsi info");
+    let empty_scsi = UsbFingerprint {
+        vid: 0x87cd,
+        pid: 0x70db,
+        bcd_device: "1.00".to_string(),
+        interfaces: vec![],
+    };
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&empty_scsi, false, None)
+        .expect("fingerprint");
+    let error = report
+        .record_negotiated_device(&device_info, 64)
+        .unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+    assert!(report.negotiated().is_none());
 }
 
 /// Strip volatile `[build]` lines so golden fixtures stay stable across commits.

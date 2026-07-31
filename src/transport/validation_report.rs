@@ -19,6 +19,7 @@ use super::profile::{DeviceInfo, WireProtocol, build_device_info};
 use super::type2_policy::{
     BCD_DEVICE_407, HidOutputRoute, TYPE2_LEGACY_RESPONSE_MIN, Type2NegotiatedObservation,
     Type2NegotiatedPolicy, Type2PreHandshakePolicy, WINBOND_HID2_PID, WINBOND_HID2_VID,
+    select_type2_pre_handshake_policy,
 };
 use super::usb_fingerprint::{
     UsbDirection, UsbEndpointCapability, UsbFingerprint, UsbInterfaceShape, UsbTransferKind,
@@ -757,7 +758,12 @@ impl HardwareValidationReport {
             None,
         )
         .context("derive negotiated DeviceInfo from Type2 observation")?;
-        self.doc.negotiated = Some(NegotiatedProfile::from_type2(observation, &device_info)?);
+        let candidate = NegotiatedProfile::from_type2(observation, &device_info)?;
+        let mut provisional = self.doc.clone();
+        provisional.negotiated = Some(candidate.clone());
+        validate_negotiated_profile_consistency(&provisional)
+            .map_err(|err| anyhow::anyhow!("negotiated profile failed validation: {err}"))?;
+        self.doc.negotiated = Some(candidate);
         Ok(())
     }
 
@@ -787,10 +793,12 @@ impl HardwareValidationReport {
             !matches!(device_info.protocol, WireProtocol::HidType2),
             "use record_negotiated_type2 for HID Type2"
         );
-        self.doc.negotiated = Some(NegotiatedProfile::from_device_info(
-            device_info,
-            response_bytes,
-        )?);
+        let candidate = NegotiatedProfile::from_device_info(device_info, response_bytes)?;
+        let mut provisional = self.doc.clone();
+        provisional.negotiated = Some(candidate.clone());
+        validate_negotiated_profile_consistency(&provisional)
+            .map_err(|err| anyhow::anyhow!("negotiated profile failed validation: {err}"))?;
+        self.doc.negotiated = Some(candidate);
         Ok(())
     }
 
@@ -1375,6 +1383,26 @@ fn requires_hid407_binding(doc: &ReportDocument, negotiated: &NegotiatedProfile)
         || negotiated.negotiated_output_route == Some(NegotiatedOutputRoute::HidReport)
 }
 
+fn validate_type2_pre_handshake_binding(
+    doc: &ReportDocument,
+    fingerprint: &ReportFingerprint,
+) -> Result<(), SemanticError> {
+    let usb_fp = fingerprint.to_usb_fingerprint();
+    let selected =
+        select_type2_pre_handshake_policy(&usb_fp, fingerprint.hidraw_correlated.unwrap_or(false));
+    if selected == Type2PreHandshakePolicy::StopUnsupportedShape {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    let recorded = doc
+        .pre_handshake_policy
+        .ok_or(SemanticError::NegotiatedProfileMismatch)?;
+    let expected = ReportPreHandshakePolicy::from(selected);
+    if recorded != expected {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    Ok(())
+}
+
 fn validate_hid407_fingerprint_binding(
     doc: &ReportDocument,
     fingerprint: &ReportFingerprint,
@@ -1446,6 +1474,7 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
 
     match negotiated.protocol_family {
         ProtocolFamily::HidType2 => {
+            validate_type2_pre_handshake_binding(doc, fingerprint)?;
             let portrait = negotiated
                 .portrait_native
                 .ok_or(SemanticError::NegotiatedProfileMismatch)?;
@@ -1576,7 +1605,7 @@ fn validate_type2_negotiated_profile(
             }
             if !negotiated.active_writes_allowed
                 || negotiated.keep_single_session
-                || negotiated.portrait_native.is_some()
+                || negotiated.portrait_native != Some(false)
                 || negotiated.rotate_panel.is_some()
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
