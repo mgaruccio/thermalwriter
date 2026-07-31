@@ -5,8 +5,8 @@
 // on EP0 via the kernel hidraw driver; descriptor-level interrupt OUT is not required.
 
 use super::type2_policy::{
-    TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy,
-    negotiate_type2_policy,
+    TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy, WINBOND_HID2_PID,
+    WINBOND_HID2_VID, negotiate_type2_policy,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -551,15 +551,15 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
         self.core.read_bounded(capacity, timeout_ms)
     }
 
-    /// Perform the 4.07 read-only Type2 probe on this session's I/O handle.
+    /// Perform the 4.07 read-only Type2 probe on this session's I/O handle for the exact
+    /// Winbond `0416:5302` firmware-4.07 policy.
     ///
     /// Clears any prior probe authorization, reads up to [`TYPE2_PROBE_READ_BOUND`] bytes,
-    /// negotiates internally, and stores write authorization only when that same read yields
-    /// the exact PM58/SUB0 short response. Returns the observation for reporting.
+    /// negotiates internally with [`WINBOND_HID2_VID`]/[`WINBOND_HID2_PID`], and stores write
+    /// authorization only when that same read yields the exact PM58/SUB0 short response.
+    /// Returns the observation for reporting.
     pub fn probe_type2_read_only(
         &mut self,
-        vid: u16,
-        pid: u16,
         timeout_ms: u32,
     ) -> Result<Type2NegotiatedObservation, HidReportProbeError> {
         self.session_auth = None;
@@ -569,8 +569,8 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
             .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
             .map_err(HidReportProbeError::Read)?;
         let observation = negotiate_type2_policy(
-            vid,
-            pid,
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
             &response,
             Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
         )
@@ -1511,9 +1511,7 @@ mod tests {
         let io_id = io.id();
         let mut read_session = HidReportReadSession::new_for_test(io);
         setup_probe_read(&mut read_session.core.io, &pm58_short_response());
-        read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        read_session.probe_type2_read_only(0).unwrap();
         let write_session = read_session.authorize_writes().unwrap();
         assert_eq!(write_session.core.io.id(), io_id);
     }
@@ -1529,9 +1527,7 @@ mod tests {
     fn fabricated_negotiated_observation_cannot_authorize_session() {
         let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
         setup_probe_read(&mut read_session.core.io, &pm68_short_response());
-        let obs = read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        let obs = read_session.probe_type2_read_only(0).unwrap();
         assert_eq!(obs.pm(), 68);
         let error = expect_authorize_error(read_session);
         assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
@@ -1541,9 +1537,7 @@ mod tests {
     fn pm68_probe_cannot_promote_even_if_external_negotiation_is_pm58() {
         let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
         setup_probe_read(&mut read_session.core.io, &pm68_short_response());
-        read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        read_session.probe_type2_read_only(0).unwrap();
         let error = expect_authorize_error(read_session);
         assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
     }
@@ -1552,13 +1546,9 @@ mod tests {
     fn failed_probe_clears_stale_authorization() {
         let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
         setup_probe_read(&mut read_session.core.io, &pm58_short_response());
-        read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        read_session.probe_type2_read_only(0).unwrap();
         read_session.core.io.read_returns.push_back(Ok(-1));
-        let probe_error = read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap_err();
+        let probe_error = read_session.probe_type2_read_only(0).unwrap_err();
         assert!(matches!(probe_error, HidReportProbeError::Read(_)));
         let error = expect_authorize_error(read_session);
         assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
@@ -1568,13 +1558,9 @@ mod tests {
     fn repeated_pm68_probe_cannot_retain_pm58_authorization() {
         let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
         setup_probe_read(&mut read_session.core.io, &pm58_short_response());
-        read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        read_session.probe_type2_read_only(0).unwrap();
         setup_probe_read(&mut read_session.core.io, &pm68_short_response());
-        read_session
-            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
-            .unwrap();
+        read_session.probe_type2_read_only(0).unwrap();
         let error = expect_authorize_error(read_session);
         assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
     }
