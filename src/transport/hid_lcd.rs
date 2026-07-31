@@ -14,11 +14,11 @@ use std::time::Duration;
 #[cfg(feature = "daemon")]
 pub use super::hid_report::linux::{LinuxHidrawIo, open_correlated_read_session};
 pub use super::hid_report::{
-    HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportReadError,
-    HidReportReadSession, HidReportWriteAuthorization, HidReportWriteError, HidReportWriteSession,
-    HidWriteObservation, HidrawCandidate, HidrawCorrelation, KERNEL_HIDRAW_DOC_REF,
-    LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
-    REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
+    HidChunkedWriteFailure, HidReadObservation, HidReportAuthorizeError, HidReportBackendContract,
+    HidReportProbeError, HidReportReadError, HidReportReadSession, HidReportWriteAuthorization,
+    HidReportWriteError, HidReportWriteSession, HidWriteObservation, HidrawCandidate,
+    HidrawCorrelation, KERNEL_HIDRAW_DOC_REF, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
+    REPORT_ID_UNNUMBERED, REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
     authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
 

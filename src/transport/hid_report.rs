@@ -4,11 +4,15 @@
 // length contracts. Output may route through interrupt OUT or control SET_REPORT
 // on EP0 via the kernel hidraw driver; descriptor-level interrupt OUT is not required.
 
-use super::type2_policy::Type2NegotiatedObservation;
+use super::type2_policy::{
+    TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy,
+    negotiate_type2_policy,
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// HIDAPI 0.16 source commit reviewed for write-return semantics alignment.
@@ -135,15 +139,14 @@ pub struct HidrawCorrelation {
     pub devnode: PathBuf,
 }
 
-/// Production write authorization derived from negotiated Type2 policy.
+/// Production write authorization bound to a session probe (not caller-constructible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HidReportWriteAuthorization {
     _private: (),
 }
 
 impl HidReportWriteAuthorization {
-    /// Create write authorization only from an evidenced PM58/SUB0 HID-report policy.
-    pub fn from_negotiated(obs: &Type2NegotiatedObservation) -> Result<Self> {
+    fn from_session_probe(obs: &Type2NegotiatedObservation) -> Result<Self> {
         super::type2_policy::authorize_hid_report_writes(obs)?;
         Ok(Self { _private: () })
     }
@@ -199,6 +202,22 @@ impl std::error::Error for HidChunkedWriteFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum HidReportProbeError {
+    #[error(transparent)]
+    Read(#[from] HidReportReadError),
+    #[error("Type2 negotiation failed: {0}")]
+    Negotiate(String),
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum HidReportAuthorizeError {
+    #[error("HID report session probe not performed")]
+    ProbeNotPerformed,
+    #[error("HID report write authorization requires PM58/SUB0 probe on this session")]
+    ProbeNotAuthorized,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -498,6 +517,8 @@ pub struct HidReportReadSession<Io: HidReportIo> {
     pub(crate) core: HidReportSessionCore<Io>,
     #[cfg(not(test))]
     core: HidReportSessionCore<Io>,
+    session_auth: Option<HidReportWriteAuthorization>,
+    probe_performed: bool,
 }
 
 impl<Io: HidReportIo> HidReportReadSession<Io> {
@@ -509,6 +530,8 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
     fn new(io: Io) -> Self {
         Self {
             core: HidReportSessionCore::new(io, &LINUX_HIDRAW_BACKEND_CONTRACT),
+            session_auth: None,
+            probe_performed: false,
         }
     }
 
@@ -528,15 +551,45 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
         self.core.read_bounded(capacity, timeout_ms)
     }
 
+    /// Perform the 4.07 read-only Type2 probe on this session's I/O handle.
+    ///
+    /// Clears any prior probe authorization, reads up to [`TYPE2_PROBE_READ_BOUND`] bytes,
+    /// negotiates internally, and stores write authorization only when that same read yields
+    /// the exact PM58/SUB0 short response. Returns the observation for reporting.
+    pub fn probe_type2_read_only(
+        &mut self,
+        vid: u16,
+        pid: u16,
+        timeout_ms: u32,
+    ) -> Result<Type2NegotiatedObservation, HidReportProbeError> {
+        self.session_auth = None;
+        self.probe_performed = true;
+        let (_, response) = self
+            .core
+            .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
+            .map_err(HidReportProbeError::Read)?;
+        let observation = negotiate_type2_policy(
+            vid,
+            pid,
+            &response,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .map_err(|error| HidReportProbeError::Negotiate(error.to_string()))?;
+        self.session_auth = HidReportWriteAuthorization::from_session_probe(&observation).ok();
+        Ok(observation)
+    }
+
     /// Promote this read-capable session to write-authorized use on the same I/O handle.
     ///
-    /// Production flow: open once (`open_correlated_read_session`), probe read-only, then
-    /// promote after `Type2NegotiatedObservation` authorizes PM58/SUB0 HID-report writes.
-    pub fn authorize_writes(
-        self,
-        obs: &Type2NegotiatedObservation,
-    ) -> Result<HidReportWriteSession<Io>> {
-        let auth = HidReportWriteAuthorization::from_negotiated(obs)?;
+    /// Requires a prior [`probe_type2_read_only`] that stored PM58/SUB0 authorization from
+    /// bytes read on this session. Caller-supplied observations cannot authorize writes.
+    pub fn authorize_writes(self) -> Result<HidReportWriteSession<Io>, HidReportAuthorizeError> {
+        if !self.probe_performed {
+            return Err(HidReportAuthorizeError::ProbeNotPerformed);
+        }
+        let auth = self
+            .session_auth
+            .ok_or(HidReportAuthorizeError::ProbeNotAuthorized)?;
         Ok(HidReportWriteSession {
             core: self.core,
             _auth: auth,
@@ -745,26 +798,64 @@ pub(crate) fn interpret_hidraw_poll(poll_result: i32, revents: i16) -> Result<Hi
     Ok(HidrawPollOutcome::Ready)
 }
 
-/// Poll one hidraw fd; always invoked (including `timeout_ms == 0`).
-pub(crate) fn poll_hidraw_for_read(fd: libc::c_int, timeout_ms: u32) -> Result<HidrawPollOutcome> {
+/// One `poll(2)` invocation (injectable for deadline/EINTR tests).
+pub(crate) fn poll_hidraw_once(fd: libc::c_int, timeout_ms: i32) -> std::io::Result<(i32, i16)> {
     let mut poll_fd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    let timeout =
-        i32::try_from(timeout_ms).context("HID read timeout exceeds i32::MAX milliseconds")?;
-    let poll_result = loop {
-        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
-        if result >= 0 {
-            break result;
+    let poll_result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if poll_result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((poll_result, poll_fd.revents))
+}
+
+/// Poll one hidraw fd with a monotonic deadline; always invoked (including `timeout_ms == 0`).
+///
+/// Zero timeout: one `poll(0)` only; `EINTR` fails immediately (no retry that could extend wait).
+/// Non-zero: recompute remaining time from the deadline after `EINTR` so repeated signals cannot
+/// extend the operation beyond the original timeout.
+pub(crate) fn poll_hidraw_for_read_deadline(
+    fd: libc::c_int,
+    timeout_ms: u32,
+    mut poll_once: impl FnMut(libc::c_int, i32) -> std::io::Result<(i32, i16)>,
+    now: impl Fn() -> Instant,
+) -> Result<HidrawPollOutcome> {
+    if timeout_ms == 0 {
+        let (poll_result, revents) = match poll_once(fd, 0) {
+            Ok(value) => value,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                bail!("hidraw poll(2) interrupted with zero timeout: {err}");
+            }
+            Err(err) => bail!("hidraw poll(2) failed: {err}"),
+        };
+        return interpret_hidraw_poll(poll_result, revents);
+    }
+
+    let deadline = now() + Duration::from_millis(timeout_ms as u64);
+    loop {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Ok(HidrawPollOutcome::Timeout);
         }
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            bail!("hidraw poll(2) failed: {err}");
+        let remaining_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let (poll_result, revents) = match poll_once(fd, remaining_ms) {
+            Ok(value) => value,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => bail!("hidraw poll(2) failed: {err}"),
+        };
+        if poll_result == 0 && now() >= deadline {
+            return Ok(HidrawPollOutcome::Timeout);
         }
-    };
-    interpret_hidraw_poll(poll_result, poll_fd.revents)
+        return interpret_hidraw_poll(poll_result, revents);
+    }
+}
+
+/// Poll one hidraw fd using the production `poll(2)` backend.
+pub(crate) fn poll_hidraw_for_read(fd: libc::c_int, timeout_ms: u32) -> Result<HidrawPollOutcome> {
+    poll_hidraw_for_read_deadline(fd, timeout_ms, poll_hidraw_once, Instant::now)
 }
 
 #[cfg(feature = "daemon")]
@@ -824,7 +915,8 @@ pub mod linux {
         }
     }
 
-    /// Open a correlated hidraw devnode once (O_RDWR); probe read-only, then promote via
+    /// Open a correlated hidraw devnode once (O_RDWR); probe via
+    /// [`HidReportReadSession::probe_type2_read_only`], then promote via
     /// [`HidReportReadSession::authorize_writes`].
     pub fn open_correlated_read_session(
         selector: UsbBusAddress,
@@ -839,7 +931,9 @@ pub mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::type2_policy::{Type2PreHandshakePolicy, negotiate_type2_policy};
+    use crate::transport::type2_policy::{
+        Type2PreHandshakePolicy, WINBOND_HID2_PID, WINBOND_HID2_VID, negotiate_type2_policy,
+    };
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -943,15 +1037,39 @@ mod tests {
         }
     }
 
+    fn pm58_short_response() -> [u8; 8] {
+        [0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00]
+    }
+
+    fn pm68_short_response() -> [u8; 8] {
+        let mut resp = pm58_short_response();
+        resp[5] = 0x44;
+        resp
+    }
+
+    fn setup_probe_read(io: &mut MemHidReportIo, response: &[u8]) {
+        io.read_data.push_back(response.to_vec());
+        io.read_returns.push_back(Ok(response.len() as isize));
+    }
+
     fn pm58_auth() -> HidReportWriteAuthorization {
         let obs = negotiate_type2_policy(
-            0x0416,
-            0x5302,
-            &[0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00],
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &pm58_short_response(),
             Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
         )
         .unwrap();
-        HidReportWriteAuthorization::from_negotiated(&obs).unwrap()
+        HidReportWriteAuthorization::from_session_probe(&obs).unwrap()
+    }
+
+    fn expect_authorize_error(
+        session: HidReportReadSession<MemHidReportIo>,
+    ) -> HidReportAuthorizeError {
+        match session.authorize_writes() {
+            Err(error) => error,
+            Ok(_) => panic!("expected authorize_writes to fail"),
+        }
     }
 
     fn sample_chunk(byte: u8) -> [u8; PROTOCOL_CHUNK_BYTES] {
@@ -990,13 +1108,13 @@ mod tests {
     #[test]
     fn write_authorization_requires_pm58_hid_report_policy() {
         let obs = negotiate_type2_policy(
-            0x0416,
-            0x5302,
-            &[0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x44, 0x00, 0x00],
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &pm68_short_response(),
             Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
         )
         .unwrap();
-        let error = HidReportWriteAuthorization::from_negotiated(&obs).unwrap_err();
+        let error = HidReportWriteAuthorization::from_session_probe(&obs).unwrap_err();
         assert!(
             error.to_string().contains("PM58/SUB0")
                 || error
@@ -1391,16 +1509,74 @@ mod tests {
     fn authorize_writes_promotes_same_io_handle_without_reopen() {
         let io = MemHidReportIo::new();
         let io_id = io.id();
-        let read_session = HidReportReadSession::new_for_test(io);
-        let obs = negotiate_type2_policy(
-            0x0416,
-            0x5302,
-            &[0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00],
-            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
-        )
-        .unwrap();
-        let write_session = read_session.authorize_writes(&obs).unwrap();
+        let mut read_session = HidReportReadSession::new_for_test(io);
+        setup_probe_read(&mut read_session.core.io, &pm58_short_response());
+        read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        let write_session = read_session.authorize_writes().unwrap();
         assert_eq!(write_session.core.io.id(), io_id);
+    }
+
+    #[test]
+    fn authorize_writes_before_probe_fails() {
+        let read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
+        let error = expect_authorize_error(read_session);
+        assert_eq!(error, HidReportAuthorizeError::ProbeNotPerformed);
+    }
+
+    #[test]
+    fn fabricated_negotiated_observation_cannot_authorize_session() {
+        let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
+        setup_probe_read(&mut read_session.core.io, &pm68_short_response());
+        let obs = read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        assert_eq!(obs.pm(), 68);
+        let error = expect_authorize_error(read_session);
+        assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
+    }
+
+    #[test]
+    fn pm68_probe_cannot_promote_even_if_external_negotiation_is_pm58() {
+        let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
+        setup_probe_read(&mut read_session.core.io, &pm68_short_response());
+        read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        let error = expect_authorize_error(read_session);
+        assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
+    }
+
+    #[test]
+    fn failed_probe_clears_stale_authorization() {
+        let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
+        setup_probe_read(&mut read_session.core.io, &pm58_short_response());
+        read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        read_session.core.io.read_returns.push_back(Ok(-1));
+        let probe_error = read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap_err();
+        assert!(matches!(probe_error, HidReportProbeError::Read(_)));
+        let error = expect_authorize_error(read_session);
+        assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
+    }
+
+    #[test]
+    fn repeated_pm68_probe_cannot_retain_pm58_authorization() {
+        let mut read_session = HidReportReadSession::new_for_test(MemHidReportIo::new());
+        setup_probe_read(&mut read_session.core.io, &pm58_short_response());
+        read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        setup_probe_read(&mut read_session.core.io, &pm68_short_response());
+        read_session
+            .probe_type2_read_only(WINBOND_HID2_VID, WINBOND_HID2_PID, 0)
+            .unwrap();
+        let error = expect_authorize_error(read_session);
+        assert_eq!(error, HidReportAuthorizeError::ProbeNotAuthorized);
     }
 
     #[test]
@@ -1444,6 +1620,75 @@ mod tests {
     fn interpret_poll_positive_without_pollin_fails() {
         let error = interpret_hidraw_poll(1, libc::POLLOUT).unwrap_err();
         assert!(error.to_string().contains("without POLLIN"), "{error:#}");
+    }
+
+    #[test]
+    fn poll_zero_timeout_eintr_fails_immediately_without_retry() {
+        let mut calls = 0;
+        let error = poll_hidraw_for_read_deadline(
+            7,
+            0,
+            |_fd, timeout| {
+                calls += 1;
+                assert_eq!(timeout, 0);
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            },
+            Instant::now,
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(
+            error.to_string().contains("interrupted with zero timeout"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn poll_nonzero_eintr_recomputes_remaining_deadline() {
+        let start = Instant::now();
+        let elapsed_ms = std::cell::Cell::new(0_u64);
+        let mut poll_timeouts = Vec::new();
+        let outcome = poll_hidraw_for_read_deadline(
+            7,
+            100,
+            |_fd, timeout| {
+                poll_timeouts.push(timeout);
+                if poll_timeouts.len() == 1 {
+                    elapsed_ms.set(40);
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                Ok((1, libc::POLLIN))
+            },
+            || start + Duration::from_millis(elapsed_ms.get()),
+        )
+        .unwrap();
+        assert_eq!(outcome, HidrawPollOutcome::Ready);
+        assert_eq!(poll_timeouts.len(), 2);
+        assert!(poll_timeouts[0] >= 90 && poll_timeouts[0] <= 100);
+        assert!(poll_timeouts[1] >= 50 && poll_timeouts[1] <= 70);
+    }
+
+    #[test]
+    fn poll_nonzero_deadline_expiry_returns_timeout_without_extra_poll() {
+        let start = Instant::now();
+        let now_calls = std::cell::Cell::new(0_u32);
+        let mut poll_calls = 0;
+        let outcome = poll_hidraw_for_read_deadline(
+            7,
+            40,
+            |_fd, _timeout| {
+                poll_calls += 1;
+                Ok((0, 0))
+            },
+            || {
+                let n = now_calls.get();
+                now_calls.set(n + 1);
+                start + Duration::from_millis(if n == 0 { 0 } else { 40 })
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, HidrawPollOutcome::Timeout);
+        assert_eq!(poll_calls, 0);
     }
 
     #[test]
