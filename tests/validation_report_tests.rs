@@ -164,6 +164,8 @@ fn golden_replay_pm58_active_evidence_in_progress() {
     let toml = report.to_private_toml().expect("serialize");
 
     let expected = include_str!("fixtures/validation_report/replay_pm58_active_evidence.toml");
+    assert!(expected.contains("commit = \"unknown\""));
+    assert!(expected.contains("dirty = true"));
     assert_eq!(
         normalize_build_section(&toml),
         normalize_build_section(expected)
@@ -175,6 +177,9 @@ fn golden_replay_pm58_active_evidence_in_progress() {
     assert!(toml.contains("fbl = 58"));
     assert!(!toml.contains("result = "));
     assert!(!report.eligible_for_tested());
+
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse pm58 replay");
+    assert_eq!(parsed.origin(), EvidenceOrigin::Replay);
 }
 
 #[test]
@@ -220,6 +225,9 @@ fn golden_pm68_conservative_stop_before_active_write() {
     report
         .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
         .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
     report.record_negotiated_type2(&obs).expect("negotiated");
     report
         .record_check(CheckField::Handshake, CheckStatus::Pass)
@@ -256,6 +264,50 @@ fn golden_pm68_conservative_stop_before_active_write() {
     assert!(toml.contains("kind = \"policy\""));
     assert!(toml.contains("fbl = 192"));
     assert!(!report.eligible_for_tested());
+
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse pm68 fail");
+    assert_eq!(parsed.result(), Some(ValidationResult::Fail));
+    assert!(
+        parsed
+            .negotiated()
+            .unwrap()
+            .negotiated_output_route()
+            .is_none()
+    );
+}
+
+#[test]
+fn pm68_in_progress_round_trips() {
+    let mut resp = short_pm58_response();
+    resp[5] = 68;
+    let obs = negotiate_type2_policy(
+        WINBOND_HID2_VID,
+        WINBOND_HID2_PID,
+        &resp,
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+    )
+    .expect("pm68");
+
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report.record_negotiated_type2(&obs).expect("negotiated");
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(!toml.contains("negotiated_output_route = "));
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
+    let negotiated = parsed.negotiated().expect("negotiated");
+    assert_eq!(
+        negotiated.profile_policy(),
+        ProfilePolicyLabel::ObservedPm68ConservativeStop
+    );
+    assert!(!negotiated.active_writes_allowed());
+    assert!(negotiated.negotiated_output_route().is_none());
 }
 
 #[test]
@@ -275,6 +327,9 @@ fn pm68_cannot_finalize_full_pass() {
     report
         .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
         .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
     report.record_negotiated_type2(&obs).expect("negotiated");
     full_mandatory_checks(&mut report);
     report
@@ -640,15 +695,67 @@ fn eligible_for_tested_rejects_replay_and_synthetic_origins() {
     assert!(!synthetic.eligible_for_tested());
 }
 
+fn bulk_fingerprint() -> UsbFingerprint {
+    UsbFingerprint {
+        vid: 0x87ad,
+        pid: 0x70db,
+        bcd_device: "1.00".to_string(),
+        interfaces: vec![UsbInterfaceShape {
+            number: 0,
+            alternate_setting: 0,
+            class: 0xff,
+            subclass: 0,
+            protocol: 0,
+            endpoints: vec![
+                UsbEndpointCapability {
+                    address: 0x01,
+                    direction: UsbDirection::Out,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+                UsbEndpointCapability {
+                    address: 0x81,
+                    direction: UsbDirection::In,
+                    transfer: UsbTransferKind::Bulk,
+                    max_packet_size: 512,
+                    interval: 0,
+                },
+            ],
+        }],
+    }
+}
+
+fn scsi_fingerprint() -> UsbFingerprint {
+    UsbFingerprint {
+        vid: 0x87cd,
+        pid: 0x70db,
+        bcd_device: "1.00".to_string(),
+        interfaces: vec![],
+    }
+}
+
+fn record_negotiated_device_report(
+    fingerprint: &UsbFingerprint,
+    device_info: &thermalwriter::transport::profile::DeviceInfo,
+    response_bytes: usize,
+) -> HardwareValidationReport {
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(fingerprint, false, None)
+        .expect("fingerprint");
+    report
+        .record_negotiated_device(device_info, response_bytes)
+        .expect("negotiated");
+    report
+}
+
 #[test]
 fn record_negotiated_device_supports_bulk_87ad70db() {
     let device_info =
         build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
-    let mut report =
-        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
-    report
-        .record_negotiated_device(&device_info, 64)
-        .expect("negotiated");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
 
     let negotiated = report.negotiated().expect("negotiated");
     assert_eq!(negotiated.pm(), 4);
@@ -668,11 +775,7 @@ fn record_negotiated_device_supports_bulk_87ad70db() {
 fn record_negotiated_device_derives_scsi_route() {
     let device_info =
         build_device_info(WireProtocol::Scsi, 0x87cd, 0x70db, 100, 0, Some(72)).expect("scsi info");
-    let mut report =
-        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
-    report
-        .record_negotiated_device(&device_info, 64)
-        .expect("negotiated");
+    let report = record_negotiated_device_report(&scsi_fingerprint(), &device_info, 64);
 
     assert_eq!(
         report.negotiated().unwrap().negotiated_output_route(),
@@ -686,11 +789,7 @@ fn record_negotiated_device_derives_scsi_route() {
 fn from_toml_rejects_bulk_protocol_with_scsi_route() {
     let device_info =
         build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
-    let mut report =
-        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
-    report
-        .record_negotiated_device(&device_info, 64)
-        .expect("negotiated");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
     let mut toml = report.to_private_toml().expect("serialize");
     toml = toml.replace(
         "negotiated_output_route = \"legacy_bulk\"",
@@ -765,6 +864,58 @@ fn replay_origin_cannot_finalize_full_pass() {
         FinalizeError::WrongOrigin
     );
     assert!(report.result().is_none());
+}
+
+#[test]
+fn transport_write_failure_omits_failing_chunk_return() {
+    let failure = HidChunkedWriteFailure {
+        completed: vec![],
+        error: HidReportWriteError::Transport {
+            message: "EIO".to_string(),
+            observation: write_observation(0),
+        },
+    };
+
+    let mut report = HardwareValidationReport::new_in_progress(
+        EvidenceOrigin::Physical,
+        ValidationScope::Passive,
+    );
+    report
+        .record_hid_chunked_write_failure(&failure)
+        .expect("write failure");
+
+    let toml = report.to_private_toml().expect("serialize");
+    assert!(!toml.contains("failing_chunk.transport_return_bytes"));
+    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
+    let chunk = parsed
+        .hid_report()
+        .unwrap()
+        .write_failure()
+        .unwrap()
+        .failing_chunk()
+        .expect("failing chunk");
+    assert_eq!(chunk.transport_return_bytes(), None);
+}
+
+#[test]
+fn from_toml_rejects_unknown_commit_without_dirty_flag() {
+    let report = passive_physical_report();
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml
+        .lines()
+        .map(|line| {
+            if line.starts_with("commit = ") {
+                "commit = \"unknown\""
+            } else if line.starts_with("dirty = ") {
+                "dirty = false"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("build provenance"));
 }
 
 /// Strip volatile `[build]` lines so golden fixtures stay stable across commits.

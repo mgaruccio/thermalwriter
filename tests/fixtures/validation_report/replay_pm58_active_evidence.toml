@@ -8,7 +8,7 @@ pre_handshake_policy = "hid407_read_only_probe"
 [build]
 version = "0.1.4"
 commit = "unknown"
-dirty = false
+dirty = true
 
 [fingerprint]
 vid = "0416"

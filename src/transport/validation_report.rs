@@ -16,9 +16,12 @@ use super::hid_report::{
 };
 use super::profile::{DeviceInfo, WireProtocol, build_device_info};
 use super::type2_policy::{
-    HidOutputRoute, Type2NegotiatedObservation, Type2NegotiatedPolicy, Type2PreHandshakePolicy,
+    BCD_DEVICE_407, HidOutputRoute, TYPE2_LEGACY_RESPONSE_MIN, Type2NegotiatedObservation,
+    Type2NegotiatedPolicy, Type2PreHandshakePolicy, WINBOND_HID2_PID, WINBOND_HID2_VID,
 };
-use super::usb_fingerprint::{UsbEndpointCapability, UsbFingerprint, UsbInterfaceShape};
+use super::usb_fingerprint::{
+    UsbDirection, UsbEndpointCapability, UsbFingerprint, UsbInterfaceShape, UsbTransferKind,
+};
 
 /// Current report schema revision.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -582,6 +585,8 @@ enum SemanticError {
     UncleanBuild,
     UnknownBuildCommit,
     ProtocolRouteMismatch,
+    NegotiatedProfileMismatch,
+    Hid407BindingViolation,
 }
 
 impl fmt::Display for SemanticError {
@@ -611,6 +616,12 @@ impl fmt::Display for SemanticError {
             Self::UncleanBuild => write!(f, "build tree is dirty"),
             Self::UnknownBuildCommit => write!(f, "build commit unknown or invalid"),
             Self::ProtocolRouteMismatch => write!(f, "protocol family and output route disagree"),
+            Self::NegotiatedProfileMismatch => {
+                write!(f, "negotiated profile inconsistent with device facts")
+            }
+            Self::Hid407BindingViolation => {
+                write!(f, "Type2 Hid407 context fingerprint binding violated")
+            }
         }
     }
 }
@@ -1015,8 +1026,14 @@ impl HardwareValidationReport {
             doc,
             redaction_permanent: false,
         };
+        validate_build_provenance(&report.doc).map_err(|err| {
+            toml::de::Error::custom(format!("build provenance failed validation: {err}"))
+        })?;
         if let Some(negotiated) = &report.doc.negotiated {
             validate_protocol_route_consistency(negotiated).map_err(|err| {
+                toml::de::Error::custom(format!("negotiated profile failed validation: {err}"))
+            })?;
+            validate_negotiated_profile_consistency(&report.doc).map_err(|err| {
                 toml::de::Error::custom(format!("negotiated profile failed validation: {err}"))
             })?;
         }
@@ -1085,8 +1102,11 @@ fn validate_semantics(
         return Err(SemanticError::RedactionBlocksShareable);
     }
 
+    validate_build_provenance(doc)?;
+
     if let Some(negotiated) = &doc.negotiated {
         validate_protocol_route_consistency(negotiated)?;
+        validate_negotiated_profile_consistency(doc)?;
     }
 
     match doc.result {
@@ -1191,11 +1211,11 @@ fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError
         return Err(SemanticError::MissingMandatoryChecks);
     }
 
+    validate_protocol_route_consistency(negotiated)?;
+
     let route = negotiated
         .negotiated_output_route
         .ok_or(SemanticError::MissingNegotiatedRoute)?;
-
-    validate_protocol_route_consistency(negotiated)?;
 
     match route {
         NegotiatedOutputRoute::HidReport => validate_hid_report_route_evidence(doc)?,
@@ -1208,6 +1228,12 @@ fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError
 fn validate_protocol_route_consistency(
     negotiated: &NegotiatedProfile,
 ) -> Result<(), SemanticError> {
+    if !negotiated.active_writes_allowed {
+        if negotiated.negotiated_output_route.is_some() {
+            return Err(SemanticError::ProtocolRouteMismatch);
+        }
+        return Ok(());
+    }
     let route = negotiated
         .negotiated_output_route
         .ok_or(SemanticError::MissingNegotiatedRoute)?;
@@ -1228,6 +1254,263 @@ fn validate_protocol_route_consistency(
     };
     if route != expected {
         return Err(SemanticError::ProtocolRouteMismatch);
+    }
+    Ok(())
+}
+
+fn validate_build_provenance(doc: &ReportDocument) -> Result<(), SemanticError> {
+    if doc.build.commit == "unknown" && !doc.build.dirty {
+        return Err(SemanticError::ShareableStringViolation);
+    }
+    Ok(())
+}
+
+fn wire_protocol_from_family(family: ProtocolFamily) -> WireProtocol {
+    match family {
+        ProtocolFamily::Bulk => WireProtocol::Bulk,
+        ProtocolFamily::Scsi => WireProtocol::Scsi,
+        ProtocolFamily::HidType2 => WireProtocol::HidType2,
+        ProtocolFamily::HidType3 => WireProtocol::HidType3,
+        ProtocolFamily::Ly => WireProtocol::Ly,
+    }
+}
+
+fn expected_wire_dimensions(
+    device_info: &DeviceInfo,
+    portrait_native: bool,
+) -> Result<DisplayDimensions, SemanticError> {
+    if portrait_native && device_info.protocol == WireProtocol::HidType2 {
+        return Ok(DisplayDimensions {
+            width: device_info.height(),
+            height: device_info.width(),
+        });
+    }
+    let (width, height) = device_info
+        .wire_dimensions()
+        .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+    Ok(DisplayDimensions { width, height })
+}
+
+fn requires_hid407_binding(doc: &ReportDocument, negotiated: &NegotiatedProfile) -> bool {
+    if negotiated.protocol_family != ProtocolFamily::HidType2 {
+        return false;
+    }
+    doc.pre_handshake_policy == Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe)
+        || negotiated.negotiated_output_route == Some(NegotiatedOutputRoute::HidReport)
+}
+
+fn validate_hid407_fingerprint_binding(
+    doc: &ReportDocument,
+    fingerprint: &ReportFingerprint,
+) -> Result<(), SemanticError> {
+    if fingerprint.vid != WINBOND_HID2_VID || fingerprint.pid != WINBOND_HID2_PID {
+        return Err(SemanticError::Hid407BindingViolation);
+    }
+    if fingerprint.bcd_device != BCD_DEVICE_407 {
+        return Err(SemanticError::Hid407BindingViolation);
+    }
+    if fingerprint.hidraw_correlated != Some(true) {
+        return Err(SemanticError::Hid407BindingViolation);
+    }
+    if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
+        return Err(SemanticError::Hid407BindingViolation);
+    }
+    let has_interrupt_in = fingerprint.interfaces.iter().any(|iface| {
+        iface.endpoints.iter().any(|ep| {
+            ep.direction == UsbDirection::In
+                && ep.transfer == UsbTransferKind::Interrupt
+                && ep.max_packet_size == 8
+        })
+    });
+    if !has_interrupt_in {
+        return Err(SemanticError::Hid407BindingViolation);
+    }
+    Ok(())
+}
+
+fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), SemanticError> {
+    let negotiated = doc
+        .negotiated
+        .as_ref()
+        .ok_or(SemanticError::MissingNegotiated)?;
+    let fingerprint = doc
+        .fingerprint
+        .as_ref()
+        .ok_or(SemanticError::MissingFingerprint)?;
+
+    let device_info = build_device_info(
+        wire_protocol_from_family(negotiated.protocol_family),
+        fingerprint.vid,
+        fingerprint.pid,
+        negotiated.pm,
+        negotiated.sub,
+        Some(negotiated.fbl),
+    )
+    .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+
+    if negotiated.native_dimensions.width != device_info.width()
+        || negotiated.native_dimensions.height != device_info.height()
+    {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+
+    let expected_wire = expected_wire_dimensions(&device_info, negotiated.portrait_native)?;
+    if negotiated.wire_dimensions != expected_wire {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+
+    if let ProfilePolicyLabel::ActivePmSub { pm, sub } = negotiated.profile_policy {
+        if pm != negotiated.pm || sub != negotiated.sub {
+            return Err(SemanticError::NegotiatedProfileMismatch);
+        }
+    }
+
+    match negotiated.protocol_family {
+        ProtocolFamily::HidType2 => validate_type2_negotiated_profile(doc, negotiated)?,
+        ProtocolFamily::Bulk => {
+            if negotiated.profile_policy != ProfilePolicyLabel::LegacyBulk {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.negotiated_output_route != Some(NegotiatedOutputRoute::LegacyBulk) {
+                return Err(SemanticError::ProtocolRouteMismatch);
+            }
+        }
+        ProtocolFamily::Scsi | ProtocolFamily::HidType3 | ProtocolFamily::Ly => {
+            let ProfilePolicyLabel::ActivePmSub { pm, sub } = negotiated.profile_policy else {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            };
+            if pm != negotiated.pm || sub != negotiated.sub {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            let expected_route = match negotiated.protocol_family {
+                ProtocolFamily::Scsi => NegotiatedOutputRoute::ScsiCommand,
+                ProtocolFamily::HidType3 | ProtocolFamily::Ly => NegotiatedOutputRoute::LegacyBulk,
+                _ => unreachable!(),
+            };
+            if negotiated.negotiated_output_route != Some(expected_route) {
+                return Err(SemanticError::ProtocolRouteMismatch);
+            }
+        }
+    }
+
+    if requires_hid407_binding(doc, negotiated) {
+        validate_hid407_fingerprint_binding(doc, fingerprint)?;
+    }
+
+    Ok(())
+}
+
+fn validate_type2_negotiated_profile(
+    doc: &ReportDocument,
+    negotiated: &NegotiatedProfile,
+) -> Result<(), SemanticError> {
+    match negotiated.profile_policy {
+        ProfilePolicyLabel::UpstreamPm58_407 => {
+            ensure_type2_tuple(negotiated, 58, 0, 58)?;
+            if negotiated.response_bytes != 8 {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.negotiated_output_route != Some(NegotiatedOutputRoute::HidReport) {
+                return Err(SemanticError::ProtocolRouteMismatch);
+            }
+            if !negotiated.active_writes_allowed
+                || !negotiated.keep_single_session
+                || !negotiated.portrait_native
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.native_dimensions
+                != (DisplayDimensions {
+                    width: 320,
+                    height: 240,
+                })
+                || negotiated.wire_dimensions
+                    != (DisplayDimensions {
+                        width: 240,
+                        height: 320,
+                    })
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+        }
+        ProfilePolicyLabel::ObservedPm68ConservativeStop => {
+            ensure_type2_tuple(negotiated, 68, negotiated.sub, 192)?;
+            if negotiated.response_bytes != 8 {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.negotiated_output_route.is_some()
+                || negotiated.active_writes_allowed
+                || negotiated.keep_single_session
+                || negotiated.portrait_native
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.native_dimensions
+                != (DisplayDimensions {
+                    width: 1280,
+                    height: 480,
+                })
+                || negotiated.wire_dimensions
+                    != (DisplayDimensions {
+                        width: 1280,
+                        height: 480,
+                    })
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+        }
+        ProfilePolicyLabel::ObservedInactive => {
+            if negotiated.negotiated_output_route.is_some()
+                || negotiated.active_writes_allowed
+                || negotiated.keep_single_session
+                || negotiated.portrait_native
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if doc.pre_handshake_policy == Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe)
+                && negotiated.response_bytes != 8
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+        }
+        ProfilePolicyLabel::LegacyBulk => {
+            if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::LegacyBulkInit) {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.negotiated_output_route != Some(NegotiatedOutputRoute::LegacyBulk) {
+                return Err(SemanticError::ProtocolRouteMismatch);
+            }
+            if !negotiated.active_writes_allowed
+                || negotiated.keep_single_session
+                || negotiated.portrait_native
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            if negotiated.response_bytes < TYPE2_LEGACY_RESPONSE_MIN {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+        }
+        ProfilePolicyLabel::ActivePmSub { .. } => {
+            return Err(SemanticError::NegotiatedProfileMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_type2_tuple(
+    negotiated: &NegotiatedProfile,
+    pm: u8,
+    sub: u8,
+    fbl: u8,
+) -> Result<(), SemanticError> {
+    if negotiated.pm != pm || negotiated.sub != sub || negotiated.fbl != fbl {
+        return Err(SemanticError::NegotiatedProfileMismatch);
     }
     Ok(())
 }
@@ -1260,7 +1543,14 @@ fn validate_hid_report_route_evidence(doc: &ReportDocument) -> Result<(), Semant
     let returned = read
         .transport_return_bytes
         .ok_or(SemanticError::InvalidHidReadEvidence)?;
-    if returned <= 0 || (returned as usize) > read.read_capacity_bytes {
+    if returned < 0 {
+        return Err(SemanticError::InvalidHidReadEvidence);
+    }
+    let returned_usize = returned as usize;
+    if returned_usize != read.protocol_response_bytes {
+        return Err(SemanticError::InvalidHidReadEvidence);
+    }
+    if read.protocol_response_bytes > read.read_capacity_bytes {
         return Err(SemanticError::InvalidHidReadEvidence);
     }
 
@@ -1279,7 +1569,7 @@ fn validate_hid_report_route_evidence(doc: &ReportDocument) -> Result<(), Semant
     if hid.logical_output_report_bytes != Some(PROTOCOL_CHUNK_BYTES) {
         return Err(SemanticError::IncompleteHidWriteEvidence);
     }
-    if hid.transport_return_bytes != Some(EXPECTED_TRANSPORT_RETURN_BYTES as isize) {
+    if hid.transport_return_bytes != Some(hid.backend.expected_write_return_bytes as isize) {
         return Err(SemanticError::InvalidHidWriteReturn);
     }
 
@@ -1361,6 +1651,9 @@ fn is_valid_bcd_device(bcd_device: &str) -> bool {
 fn validate_shareable_hid_backend(backend: &HidBackendProvenance) -> Result<(), SemanticError> {
     if backend.backend != LINUX_HIDRAW_BACKEND_CONTRACT.backend {
         return Err(SemanticError::ShareableStringViolation);
+    }
+    if backend.expected_write_return_bytes != EXPECTED_TRANSPORT_RETURN_BYTES {
+        return Err(SemanticError::InvalidHidBackend);
     }
     if backend.kernel_hidraw_doc_ref != KERNEL_HIDRAW_DOC_REF {
         return Err(SemanticError::ShareableStringViolation);
@@ -1750,7 +2043,14 @@ impl HidWriteFailureEvidence {
             } => (
                 HidWriteErrorKind::Transport,
                 format!("HID report write transport error: {message}"),
-                Some(HidWriteChunkEvidence::from_observation(observation)),
+                Some(HidWriteChunkEvidence {
+                    protocol_chunk_bytes: observation.protocol_chunk_bytes,
+                    logical_output_report_bytes: observation.logical_output_report_bytes,
+                    report_id: observation.report_id,
+                    userspace_submit_bytes: observation.userspace_submit_bytes,
+                    transport_return_bytes: None,
+                    endpoint_max_packet_size: observation.endpoint_max_packet_size,
+                }),
             ),
             HidReportWriteError::SessionStopped => (
                 HidWriteErrorKind::SessionStopped,
@@ -1787,8 +2087,6 @@ impl HidWriteChunkEvidence {
         }
     }
 }
-
-use super::type2_policy::{WINBOND_HID2_PID, WINBOND_HID2_VID};
 
 mod hex_u16 {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -1968,12 +2266,15 @@ impl HidWriteChunkEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::type2_policy::{Type2PreHandshakePolicy, negotiate_type2_policy};
+    use crate::transport::hid_report::HidWriteObservation;
+    use crate::transport::type2_policy::{
+        Type2PreHandshakePolicy, WINBOND_HID2_PID, WINBOND_HID2_VID, negotiate_type2_policy,
+    };
     use crate::transport::usb_fingerprint::{
         UsbDirection, UsbEndpointCapability, UsbInterfaceShape, UsbTransferKind,
     };
 
-    const KNOWN_COMMIT: &str = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447";
+    const KNOWN_COMMIT: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
     #[cfg(test)]
     fn with_clean_build(
@@ -2211,6 +2512,56 @@ mod tests {
     }
 
     #[test]
+    fn physical_full_pass_rejects_read_transport_protocol_mismatch() {
+        let mut report = full_physical_pass_report_parts();
+        report
+            .record_hid_read(&HidReadObservation {
+                read_capacity_bytes: 512,
+                read_timeout_ms: 500,
+                transport_return_bytes: 9,
+                protocol_response_bytes: 8,
+            })
+            .expect("read");
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn physical_full_pass_rejects_read_protocol_exceeds_capacity() {
+        let mut report = full_physical_pass_report_parts();
+        report
+            .record_hid_read(&HidReadObservation {
+                read_capacity_bytes: 8,
+                read_timeout_ms: 500,
+                transport_return_bytes: 512,
+                protocol_response_bytes: 512,
+            })
+            .expect("read");
+        let mut report = with_clean_build(report, KNOWN_COMMIT);
+        assert_eq!(
+            report.finalize_full_pass().unwrap_err(),
+            FinalizeError::InvariantViolation
+        );
+        assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn from_toml_rejects_tampered_backend_expected_return() {
+        let report = full_physical_pass_report();
+        let mut toml = report.to_private_toml().expect("serialize");
+        toml = toml.replace(
+            "expected_write_return_bytes = 513",
+            "expected_write_return_bytes = 8",
+        );
+        let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+        assert!(error.to_string().contains("semantic validation"));
+    }
+
+    #[test]
     fn physical_full_pass_rejects_read_failure_evidence() {
         let mut report = full_physical_pass_report_parts();
         report
@@ -2228,5 +2579,32 @@ mod tests {
             FinalizeError::InvariantViolation
         );
         assert!(report.result().is_none());
+    }
+
+    #[test]
+    fn transport_write_failure_omits_failing_chunk_return() {
+        let failure = HidChunkedWriteFailure {
+            completed: vec![],
+            error: HidReportWriteError::Transport {
+                message: "EIO".to_string(),
+                observation: HidWriteObservation {
+                    protocol_chunk_bytes: PROTOCOL_CHUNK_BYTES,
+                    logical_output_report_bytes: Some(PROTOCOL_CHUNK_BYTES),
+                    report_id: REPORT_ID_UNNUMBERED,
+                    userspace_submit_bytes: USERSPACE_SUBMIT_BYTES,
+                    transport_return_bytes: 0,
+                    endpoint_max_packet_size: Some(8),
+                },
+            },
+        };
+        let (evidence, _) = HidWriteFailureEvidence::from_failure(&failure);
+        assert_eq!(
+            evidence
+                .failing_chunk
+                .as_ref()
+                .unwrap()
+                .transport_return_bytes,
+            None
+        );
     }
 }
