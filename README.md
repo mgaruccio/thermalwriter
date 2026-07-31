@@ -58,19 +58,36 @@ Source installs, the GUI, and full details below.
 
 ### Supported Devices
 
-| Status | USB ID | Transport / notes |
-| --- | --- | --- |
-| **Ordered; capture pending** | `0416:5302` (shared) | Thermalright Trofeo Vision 6.86-inch IPS, 1280×480. Upstream identifies HID Type 2 with PM68/FBL192; this unit's SUB, orientation, and firmware quirks will be recorded before marking it hardware-verified. |
-| **Hardware-smoked** | `87ad:70db` | Raw bulk Grand Vision family; negotiated PM/FBL selects native geometry and JPEG/RGB565 |
-| **Fixture-verified** | `87cd:70db`, `0402:3922` | SCSI LCD over `scsi_generic` |
-| **Fixture-verified** | `0416:5302` | HID LCD Type 2 |
-| **Fixture-verified** | `0418:5303`, `0418:5304` | HID LCD Type 3 |
-| **Fixture-verified** | `0416:5408`, `0416:5409` | LY bulk / larger Trofeo Vision family |
-| **Fixture-verified** | `0416:5406` | Dual-shape Winbond device: vendor bulk preferred, SCSI fallback |
-| **Not supported** | Other IDs / non-Linux hosts | Unknown devices are rejected rather than guessed |
+thermalwriter implements protocol support for the USB IDs below. Evidence is grouped at the hardware-fingerprint/profile level where one VID:PID can cover multiple panel profiles. Upstream registry evidence was last reviewed at [thermalright-trcc-linux `655a1ac`](https://github.com/Lexonight1/thermalright-trcc-linux/commit/655a1acff5c86ff0f9121f9fd4a0ea14bee35447).
 
-The pre-arrival Trofeo Vision mapping is corroborated by upstream's [reference device registry](https://github.com/Lexonight1/thermalright-trcc-linux/blob/main/doc/REFERENCE_DEVICES.md) and a [6.86-inch hardware report](https://github.com/Lexonight1/thermalright-trcc-linux/issues/213).
-Only `87ad:70db` has been verified on physical hardware so far; the other IDs are implemented against protocol fixtures derived from real captures. The ordered 6.86-inch panel is an inventory entry, not a support claim, until its USB handshake is captured. **Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
+### Tested
+
+No entries yet meet the full-evaluation standard (isolation, visual checks, soak, reconnect, and daemon restoration).
+
+### Likely
+
+| Hardware fingerprint | Basis | Limitation |
+| --- | --- | --- |
+| `87ad:70db`, bulk, PM4/SUB5 | Local physical frame delivery | Standardized full evaluation pending |
+| `0416:5302`, bcdDevice `4.07`, PM58/SUB0 (upstream unit) | [Upstream issue #228](https://github.com/Lexonight1/thermalright-trcc-linux/issues/228) / [PR #230](https://github.com/Lexonight1/thermalright-trcc-linux/pull/230): HID report transport, portrait `240×320` | Does not establish behavior for other 4.07 profiles |
+| Local `0416:5302`, bcdDevice `4.07`, PM/SUB unknown | Local HID enumeration; upstream family evidence | Output route, handshake, geometry, and frame delivery unverified |
+| Other upstream-reported `0416:5302` profiles (e.g. PM49, PM68/FBL192) | [Reference device registry](https://github.com/Lexonight1/thermalright-trcc-linux/blob/655a1acff5c86ff0f9121f9fd4a0ea14bee35447/doc/REFERENCE_DEVICES.md), [issue #213](https://github.com/Lexonight1/thermalright-trcc-linux/issues/213) | Firmware, PM, orientation, and transport vary under one VID:PID |
+| Other `87ad:70db` profiles (PM5, PM32, PM64, …) | Same bulk family as the locally working unit; fixture-backed | Individual PM/profile combinations not evaluated locally |
+| `0402:3922`, SCSI | Upstream reference-device evidence | No thermalwriter physical run |
+| `0416:5406`, dual-shape (bulk preferred, SCSI fallback) | Upstream issue/report evidence | Neither thermalwriter path was physically run |
+| `0416:5408`, LY bulk | Upstream physical reports | Current 1920×462 mapping is disputed by upstream 1920×480 evidence |
+| `87cd:70db`, SCSI | Upstream-maintained SCSI reference evidence | Exact local fingerprint and frame output untested |
+
+### Untested
+
+| Hardware fingerprint | Basis | Gap |
+| --- | --- | --- |
+| `0418:5303`, HID Type 3 | Registry/fixture mapping | No traceable device-specific physical report found |
+| `0418:5304`, HID Type 3 | Paired registry/fixture mapping | No traceable device-specific physical report found |
+| `0416:5409`, LY1 | Inferred from the `5408` family | No independent physical report found |
+| Fixture-only PM/FBL combinations under shared IDs | Synthetic profile coverage in null/capture tests | No matching physical fingerprint/report |
+
+**Have one of these coolers? Testers wanted** — [open a device report](https://github.com/mgaruccio/thermalwriter/issues/new/choose) with `lsusb` output and a `thermalwriter ctl status` transcript.
 
 ## Features
 
