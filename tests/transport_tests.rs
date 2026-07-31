@@ -10,7 +10,7 @@ use thermalwriter::render::RawFrame;
 use thermalwriter::transport::encode::encode_frame;
 use thermalwriter::transport::{
     DeviceInfo, EncodedFrame, FrameEncoding, Transport, WireProtocol, build_device_info, bulk_usb,
-    device_info_from_fixture, hid_lcd, ly_lcd, null, scsi_lcd,
+    device_info_from_fixture, hid_lcd, hid_report, ly_lcd, null, scsi_lcd,
 };
 
 // ---------------------------------------------------------------------------
@@ -1135,4 +1135,42 @@ fn scsi_rotate_panel_encode_and_send_use_swapped_wire_dimensions() {
         .map(|(_, len)| len.parse::<usize>().unwrap())
         .sum();
     assert_eq!(sent, encoded.data.len());
+}
+
+#[test]
+fn hid_report_lengths_remain_distinct_from_endpoint_packet_size() {
+    assert_eq!(hid_report::PROTOCOL_CHUNK_BYTES, 512);
+    assert_eq!(hid_report::USERSPACE_SUBMIT_BYTES, 513);
+    assert_ne!(
+        hid_report::PROTOCOL_CHUNK_BYTES,
+        hid_report::USERSPACE_SUBMIT_BYTES
+    );
+    let obs = hid_report::HidWriteObservation {
+        protocol_chunk_bytes: hid_report::PROTOCOL_CHUNK_BYTES,
+        logical_output_report_bytes: Some(512),
+        report_id: hid_report::REPORT_ID_UNNUMBERED,
+        userspace_submit_bytes: hid_report::USERSPACE_SUBMIT_BYTES,
+        transport_return_bytes: 513,
+        endpoint_max_packet_size: Some(8),
+    };
+    assert_eq!(obs.endpoint_max_packet_size, Some(8));
+    assert_ne!(
+        obs.endpoint_max_packet_size.unwrap() as usize,
+        obs.protocol_chunk_bytes
+    );
+}
+
+#[test]
+fn legacy_hid_bulk_packets_unchanged_after_report_backend() {
+    let type2 = hid_lcd::build_init_packet_type2();
+    assert_eq!(type2.len(), 512);
+    assert_eq!(&type2[0..4], &[0xDA, 0xDB, 0xDC, 0xDD]);
+    assert_eq!(type2[12], 1);
+
+    let type3 = hid_lcd::build_init_packet_type3();
+    assert_eq!(type3.len(), 1040);
+    assert_eq!(
+        &type3[0..8],
+        &[0xF5, 0x00, 0x01, 0x00, 0xBC, 0xFF, 0xB6, 0xC8]
+    );
 }

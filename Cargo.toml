@@ -60,6 +60,7 @@ required-features = ["daemon"]
 
 [dependencies]
 rusb = { version = "0.9", optional = true }
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"], optional = true }
 wait-timeout = "0.2"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tiny-skia = "0.12"
@@ -104,7 +105,7 @@ default = ["daemon"]
 # The `daemon` feature gates all hardware-facing and daemon-specific code paths.
 # Disable with `--no-default-features` to build the library for the GUI, which
 # does not need libusb (rusb) or the xvfb mmap capture pipeline (memmap2).
-daemon = ["dep:rusb", "dep:memmap2"]
+daemon = ["dep:rusb", "dep:memmap2", "dep:hidapi"]
 blitz = ["dep:blitz-html", "dep:blitz-dom", "dep:blitz-paint", "dep:blitz-traits", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:png"]
 # Swaps in dhat's heap-profiling global allocator. Not part of `default` —
 # only enabled for dedicated profiling builds (see docs/profiling.md).

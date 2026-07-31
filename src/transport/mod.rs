@@ -17,12 +17,18 @@ pub mod usb_fingerprint;
 
 // Family implementations (added as they land).
 pub mod hid_lcd;
+pub mod hid_report;
 pub mod ly_lcd;
 pub mod scsi_lcd;
 pub mod type2_policy;
 
 use anyhow::Result;
 
+pub use hid_report::{
+    HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract, HidWriteObservation,
+    HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
+    REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress, correlate_hidraw_to_usb,
+};
 pub use profile::{
     DeviceInfo, DeviceProfile, DisplayShape, FixtureProfile, FrameEncoding, KNOWN_FBL_CODES,
     WireProtocol, build_device_info, device_info_from_fixture, display_shape, fixture_by_id,
