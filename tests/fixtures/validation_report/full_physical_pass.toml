@@ -1,0 +1,75 @@
+schema = 1
+origin = "physical"
+scope = "full"
+result = "pass"
+shareable = true
+upstream_reviewed_commit = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
+pre_handshake_policy = "hid407_read_only_probe"
+
+[build]
+version = "0.1.4"
+commit = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
+dirty = false
+
+[fingerprint]
+vid = "0416"
+pid = "5302"
+bcd_device = "4.07"
+serial_present = false
+hidraw_correlated = true
+
+[[fingerprint.interfaces]]
+number = 0
+alternate_setting = 0
+class = 3
+subclass = 0
+protocol = 0
+
+[[fingerprint.interfaces.endpoints]]
+address = "0x81"
+direction = "in"
+transfer = "interrupt"
+max_packet_size = 8
+interval = 1
+
+[hid_report]
+descriptor_status = "unknown"
+
+[hid_report.backend]
+backend = "linux-hidraw-syscall"
+runtime_route = "kernel_managed_hidraw"
+expected_write_return_bytes = 513
+kernel_hidraw_doc_ref = "Documentation/hid/hidraw.rst (report ID prefix, write/read byte counts)"
+reviewed_hidapi_semantics_commit = "518fbd18796b0ef376f47796d1ee8dd63cc9315a"
+
+[negotiated]
+response_bytes = 8
+protocol_family = "hid_type2"
+pm = 58
+sub = 0
+fbl = 58
+profile_policy = "upstream_pm58_407"
+negotiated_output_route = "hid_report"
+active_writes_allowed = true
+keep_single_session = true
+portrait_native = true
+
+[negotiated.native_dimensions]
+width = 320
+height = 240
+
+[negotiated.wire_dimensions]
+width = 240
+height = 320
+
+[checks]
+enumerated = "pass"
+exclusive_owner = "pass"
+handshake = "pass"
+target_marker = "pass"
+second_display_unchanged = "pass"
+orientation = "pass"
+colors = "pass"
+soak = "pass"
+reconnect = "pass"
+daemon_restored = "pass"

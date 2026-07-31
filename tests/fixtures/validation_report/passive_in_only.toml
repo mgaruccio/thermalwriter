@@ -1,0 +1,37 @@
+schema = 1
+origin = "physical"
+scope = "passive"
+result = "pass"
+shareable = true
+upstream_reviewed_commit = "655a1acff5c86ff0f9121f9fd4a0ea14bee35447"
+pre_handshake_policy = "hid407_read_only_probe"
+
+[build]
+version = "0.1.4"
+commit = "0bf18acbdd74f5783a3d6f777ffc8eabc1ac2dae"
+dirty = true
+
+[fingerprint]
+vid = "0416"
+pid = "5302"
+bcd_device = "4.07"
+serial_present = false
+hidraw_correlated = true
+
+[[fingerprint.interfaces]]
+number = 0
+alternate_setting = 0
+class = 3
+subclass = 0
+protocol = 0
+
+[[fingerprint.interfaces.endpoints]]
+address = "0x81"
+direction = "in"
+transfer = "interrupt"
+max_packet_size = 8
+interval = 1
+
+[checks]
+enumerated = "pass"
+passive_allowlist = "pass"

@@ -52,12 +52,15 @@ pub use usb_fingerprint::{
     format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
 };
 pub use validation_report::{
-    CheckField, CheckStatus, DescriptorCaptureStatus, HardwareValidationReport,
-    HidBackendProvenance, HidReadEvidence, HidReportEvidence, HidWriteChunkEvidence,
-    HidWriteErrorKind, HidWriteFailureEvidence, NegotiatedProfile, ReportEndpointCapability,
-    ReportFingerprint, ReportHidOutputRoute, ReportInterfaceShape, ReportPreHandshakePolicy,
-    SCHEMA_VERSION, SanitizedText, UPSTREAM_REVIEWED_COMMIT, ValidationChecks, ValidationErrorLink,
-    ValidationFailure, ValidationResult, ValidationStage, sanitize_free_text,
+    BuildProvenance, CheckField, CheckStatus, DescriptorCaptureStatus, DisplayDimensions,
+    EvidenceOrigin, FinalizeError, HardwareValidationReport, HidBackendProvenance,
+    HidReadErrorKind, HidReadEvidence, HidReadFailureEvidence, HidReportEvidence,
+    HidWriteChunkEvidence, HidWriteErrorKind, HidWriteFailureEvidence, NegotiatedOutputRoute,
+    NegotiatedProfile, ProfilePolicyLabel, ProtocolFamily, ReportEndpointCapability,
+    ReportFingerprint, ReportInterfaceShape, ReportPreHandshakePolicy, RuntimeBackendRoute,
+    SCHEMA_VERSION, SanitizedText, UPSTREAM_REVIEWED_COMMIT, ValidationChecks, ValidationErrorKind,
+    ValidationErrorLink, ValidationFailure, ValidationResult, ValidationScope, ValidationStage,
+    build_commit_known, current_build_provenance, sanitize_free_text,
 };
 
 /// Encoded payload ready for the wire — dimensions match the device native
