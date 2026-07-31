@@ -8,6 +8,8 @@
 //! Transport layer: discovery, profile resolution, and frame transfer.
 
 pub mod bulk_usb;
+#[cfg(feature = "daemon")]
+pub use discovery::{LcdTransportRoute, resolve_known_lcd_route};
 pub mod discovery;
 pub mod encode;
 pub mod null;

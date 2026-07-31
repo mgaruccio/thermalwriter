@@ -57,6 +57,25 @@ fn write_observation(returned: isize) -> HidWriteObservation {
     }
 }
 
+fn passive_replay_report() -> HardwareValidationReport {
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Passive);
+    report
+        .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
+        .expect("fingerprint");
+    report
+        .set_pre_handshake_policy(Type2PreHandshakePolicy::Hid407ReadOnlyProbe)
+        .expect("policy");
+    report
+        .record_check(CheckField::Enumerated, CheckStatus::Pass)
+        .expect("check");
+    report
+        .record_check(CheckField::PassiveAllowlist, CheckStatus::Pass)
+        .expect("check");
+    report.finalize_passive_pass().expect("passive pass");
+    report
+}
+
 fn passive_physical_report() -> HardwareValidationReport {
     let mut report = HardwareValidationReport::new_in_progress(
         EvidenceOrigin::Physical,
@@ -134,7 +153,7 @@ fn replay_pm58_active_report() -> HardwareValidationReport {
 
 #[test]
 fn golden_passive_in_only_hid_interrupt_without_out() {
-    let report = passive_physical_report();
+    let report = passive_replay_report();
     let toml = report.to_private_toml().expect("serialize");
 
     let expected = include_str!("fixtures/validation_report/passive_in_only.toml");
@@ -149,11 +168,12 @@ fn golden_passive_in_only_hid_interrupt_without_out() {
     assert!(toml.contains("max_packet_size = 8"));
     assert!(!toml.contains("direction = \"out\""));
     assert!(toml.contains("scope = \"passive\""));
-    assert!(toml.contains("origin = \"physical\""));
+    assert!(toml.contains("origin = \"replay\""));
     assert!(toml.contains("pre_handshake_policy = \"hid407_read_only_probe\""));
 
     let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
     assert_eq!(parsed.scope(), ValidationScope::Passive);
+    assert_eq!(parsed.origin(), EvidenceOrigin::Replay);
     assert_eq!(parsed.result(), Some(ValidationResult::Pass));
     assert!(!parsed.eligible_for_tested());
 }
@@ -608,7 +628,7 @@ fn endpoint_packet_size_not_serialized_as_report_length() {
 
 #[test]
 fn deterministic_round_trip_preserves_schema_fields() {
-    let report = passive_physical_report();
+    let report = passive_replay_report();
     let first = report.to_private_toml().expect("serialize");
     let second = HardwareValidationReport::from_toml(&first)
         .expect("parse")
@@ -621,7 +641,7 @@ fn deterministic_round_trip_preserves_schema_fields() {
 
 #[test]
 fn rejects_unsupported_schema_version() {
-    let mut input = passive_physical_report()
+    let mut input = passive_replay_report()
         .to_private_toml()
         .expect("serialize");
     input = input.replace("schema = 1", "schema = 99");
@@ -631,7 +651,7 @@ fn rejects_unsupported_schema_version() {
 
 #[test]
 fn rejects_unknown_fields() {
-    let input = passive_physical_report()
+    let input = passive_replay_report()
         .to_private_toml()
         .expect("serialize");
     let input = format!("unknown_field = true\n{input}");
@@ -659,7 +679,7 @@ fn hostile_message_rejected_on_deserialize() {
 
 #[test]
 fn eligible_for_tested_rejects_replay_and_synthetic_origins() {
-    let passive = passive_physical_report();
+    let passive = passive_replay_report();
     assert!(!passive.eligible_for_tested());
 
     let replay = replay_pm58_active_report();
@@ -769,6 +789,8 @@ fn record_negotiated_device_supports_bulk_87ad70db() {
     let toml = report.to_private_toml().expect("serialize");
     assert!(toml.contains("protocol_family = \"bulk\""));
     assert!(toml.contains("negotiated_output_route = \"legacy_bulk\""));
+    assert!(toml.contains("rotate_panel = false"));
+    assert!(!toml.contains("portrait_native"));
 }
 
 #[test]
@@ -944,12 +966,94 @@ fn from_toml_rejects_bulk_tampered_keep_single_session_true() {
 }
 
 #[test]
+fn from_toml_rejects_bulk_tampered_rotate_panel_true() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("rotate_panel = false", "rotate_panel = true");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_tampered_fbl_derived_mismatch() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("fbl = 72", "fbl = 36");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_tampered_vid_pid() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("vid = \"87ad\"", "vid = \"0416\"");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    assert!(error.to_string().contains("negotiated profile"));
+}
+
+#[test]
+fn from_toml_rejects_bulk_missing_out_endpoint() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
+    let mut toml = report.to_private_toml().expect("serialize");
+    toml = toml.replace("transfer = \"bulk\"", "transfer = \"interrupt\"");
+    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("negotiated profile") || message.contains("bulk route"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn record_negotiated_device_requires_fingerprint() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    let error = report
+        .record_negotiated_device(&device_info, 64)
+        .unwrap_err();
+    assert!(error.to_string().contains("fingerprint required"));
+}
+
+#[test]
+fn record_negotiated_device_rejects_vid_pid_mismatch() {
+    let device_info =
+        build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
+    report
+        .set_fingerprint(&scsi_fingerprint(), false, None)
+        .expect("fingerprint");
+    let error = report
+        .record_negotiated_device(&device_info, 64)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not match report fingerprint")
+    );
+}
+
+#[test]
 fn from_toml_rejects_bulk_tampered_portrait_native_true() {
     let device_info =
         build_device_info(WireProtocol::Bulk, 0x87ad, 0x70db, 4, 5, Some(72)).expect("bulk info");
     let report = record_negotiated_device_report(&bulk_fingerprint(), &device_info, 64);
     let mut toml = report.to_private_toml().expect("serialize");
-    toml = toml.replace("portrait_native = false", "portrait_native = true");
+    toml = toml.replace(
+        "rotate_panel = false",
+        "rotate_panel = false\nportrait_native = true",
+    );
     let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
     assert!(error.to_string().contains("negotiated profile"));
 }

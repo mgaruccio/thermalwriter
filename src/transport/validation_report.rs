@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 
+use super::discovery::{LcdTransportRoute, protocol_for_id, resolve_known_lcd_route};
 use super::hid_report::{
     EXPECTED_TRANSPORT_RETURN_BYTES, HidChunkedWriteFailure, HidReadObservation,
     HidReportBackendContract, HidReportWriteError, KERNEL_HIDRAW_DOC_REF,
@@ -407,7 +408,12 @@ pub struct NegotiatedProfile {
     negotiated_output_route: Option<NegotiatedOutputRoute>,
     active_writes_allowed: bool,
     keep_single_session: bool,
-    portrait_native: bool,
+    /// Type2 portrait-native wire rotation; absent on generic negotiated profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    portrait_native: Option<bool>,
+    /// Generic panel rotation policy; absent on Type2 negotiated profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotate_panel: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,6 +770,19 @@ impl HardwareValidationReport {
         response_bytes: usize,
     ) -> Result<()> {
         self.ensure_mutable().context("report already finalized")?;
+        let fingerprint = self
+            .doc
+            .fingerprint
+            .as_ref()
+            .context("fingerprint required before recording negotiated generic device")?;
+        ensure!(
+            device_info.vid == fingerprint.vid && device_info.pid == fingerprint.pid,
+            "device_info VID:PID {:04x}:{:04x} does not match report fingerprint {:04x}:{:04x}",
+            device_info.vid,
+            device_info.pid,
+            fingerprint.vid,
+            fingerprint.pid,
+        );
         ensure!(
             !matches!(device_info.protocol, WireProtocol::HidType2),
             "use record_negotiated_type2 for HID Type2"
@@ -1293,6 +1312,61 @@ fn expected_wire_dimensions(
     Ok(DisplayDimensions { width, height })
 }
 
+fn negotiated_route_from_lcd(route: LcdTransportRoute) -> NegotiatedOutputRoute {
+    match route {
+        LcdTransportRoute::LegacyBulk => NegotiatedOutputRoute::LegacyBulk,
+        LcdTransportRoute::ScsiCommand => NegotiatedOutputRoute::ScsiCommand,
+    }
+}
+
+fn fbl_input_for_validation(family: ProtocolFamily, serialized_fbl: u8) -> Option<u8> {
+    match family {
+        ProtocolFamily::Bulk | ProtocolFamily::HidType2 | ProtocolFamily::Ly => None,
+        ProtocolFamily::Scsi | ProtocolFamily::HidType3 => Some(serialized_fbl),
+    }
+}
+
+fn validate_fingerprint_route_binding(
+    fingerprint: &ReportFingerprint,
+    negotiated: &NegotiatedProfile,
+) -> Result<(), SemanticError> {
+    let usb_fp = fingerprint.to_usb_fingerprint();
+    let (expected_protocol, expected_lcd_route) =
+        resolve_known_lcd_route(fingerprint.vid, fingerprint.pid, &usb_fp)
+            .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+
+    if wire_protocol_from_family(negotiated.protocol_family) != expected_protocol {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+
+    if negotiated.active_writes_allowed {
+        let expected_route = negotiated_route_from_lcd(expected_lcd_route);
+        if negotiated.negotiated_output_route != Some(expected_route) {
+            return Err(SemanticError::ProtocolRouteMismatch);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_fingerprint_protocol_matrix(
+    fingerprint: &ReportFingerprint,
+    negotiated: &NegotiatedProfile,
+) -> Result<(), SemanticError> {
+    match negotiated.protocol_family {
+        ProtocolFamily::HidType2 => {
+            if protocol_for_id(fingerprint.vid, fingerprint.pid) != Some(WireProtocol::HidType2) {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            Ok(())
+        }
+        ProtocolFamily::Bulk
+        | ProtocolFamily::Scsi
+        | ProtocolFamily::HidType3
+        | ProtocolFamily::Ly => validate_fingerprint_route_binding(fingerprint, negotiated),
+    }
+}
+
 fn requires_hid407_binding(doc: &ReportDocument, negotiated: &NegotiatedProfile) -> bool {
     if negotiated.protocol_family != ProtocolFamily::HidType2 {
         return false;
@@ -1341,15 +1415,22 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
         .as_ref()
         .ok_or(SemanticError::MissingFingerprint)?;
 
+    validate_fingerprint_protocol_matrix(fingerprint, negotiated)?;
+
+    let wire_protocol = wire_protocol_from_family(negotiated.protocol_family);
     let device_info = build_device_info(
-        wire_protocol_from_family(negotiated.protocol_family),
+        wire_protocol,
         fingerprint.vid,
         fingerprint.pid,
         negotiated.pm,
         negotiated.sub,
-        Some(negotiated.fbl),
+        fbl_input_for_validation(negotiated.protocol_family, negotiated.fbl),
     )
     .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+
+    if device_info.fbl != negotiated.fbl {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
 
     if negotiated.native_dimensions.width != device_info.width()
         || negotiated.native_dimensions.height != device_info.height()
@@ -1365,7 +1446,13 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
 
     match negotiated.protocol_family {
         ProtocolFamily::HidType2 => {
-            let expected_wire = expected_wire_dimensions(&device_info, negotiated.portrait_native)?;
+            let portrait = negotiated
+                .portrait_native
+                .ok_or(SemanticError::NegotiatedProfileMismatch)?;
+            if negotiated.rotate_panel.is_some() {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
+            let expected_wire = expected_wire_dimensions(&device_info, portrait)?;
             if negotiated.wire_dimensions != expected_wire {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1377,9 +1464,6 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
             if negotiated.profile_policy != ProfilePolicyLabel::LegacyBulk {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
-            if negotiated.negotiated_output_route != Some(NegotiatedOutputRoute::LegacyBulk) {
-                return Err(SemanticError::ProtocolRouteMismatch);
-            }
         }
         ProtocolFamily::Scsi | ProtocolFamily::HidType3 | ProtocolFamily::Ly => {
             validate_generic_lifecycle_flags(negotiated, &device_info)?;
@@ -1389,14 +1473,6 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
             };
             if pm != negotiated.pm || sub != negotiated.sub {
                 return Err(SemanticError::NegotiatedProfileMismatch);
-            }
-            let expected_route = match negotiated.protocol_family {
-                ProtocolFamily::Scsi => NegotiatedOutputRoute::ScsiCommand,
-                ProtocolFamily::HidType3 | ProtocolFamily::Ly => NegotiatedOutputRoute::LegacyBulk,
-                _ => unreachable!(),
-            };
-            if negotiated.negotiated_output_route != Some(expected_route) {
-                return Err(SemanticError::ProtocolRouteMismatch);
             }
         }
     }
@@ -1423,7 +1499,8 @@ fn validate_type2_negotiated_profile(
             }
             if !negotiated.active_writes_allowed
                 || !negotiated.keep_single_session
-                || !negotiated.portrait_native
+                || negotiated.portrait_native != Some(true)
+                || negotiated.rotate_panel.is_some()
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1452,7 +1529,8 @@ fn validate_type2_negotiated_profile(
             if negotiated.negotiated_output_route.is_some()
                 || negotiated.active_writes_allowed
                 || negotiated.keep_single_session
-                || negotiated.portrait_native
+                || negotiated.portrait_native != Some(false)
+                || negotiated.rotate_panel.is_some()
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1483,7 +1561,8 @@ fn validate_type2_negotiated_profile(
             if negotiated.negotiated_output_route.is_some()
                 || negotiated.active_writes_allowed
                 || negotiated.keep_single_session
-                || negotiated.portrait_native
+                || negotiated.portrait_native != Some(false)
+                || negotiated.rotate_panel.is_some()
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1497,7 +1576,8 @@ fn validate_type2_negotiated_profile(
             }
             if !negotiated.active_writes_allowed
                 || negotiated.keep_single_session
-                || negotiated.portrait_native
+                || negotiated.portrait_native.is_some()
+                || negotiated.rotate_panel.is_some()
             {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
@@ -1522,7 +1602,10 @@ fn validate_generic_lifecycle_flags(
     if negotiated.keep_single_session {
         return Err(SemanticError::NegotiatedProfileMismatch);
     }
-    if negotiated.portrait_native != device_info.profile.rotate_panel {
+    if negotiated.portrait_native.is_some() {
+        return Err(SemanticError::NegotiatedProfileMismatch);
+    }
+    if negotiated.rotate_panel != Some(device_info.profile.rotate_panel) {
         return Err(SemanticError::NegotiatedProfileMismatch);
     }
     Ok(())
@@ -1810,6 +1893,36 @@ impl ReportFingerprint {
             interfaces,
         }
     }
+
+    fn to_usb_fingerprint(&self) -> UsbFingerprint {
+        UsbFingerprint {
+            vid: self.vid,
+            pid: self.pid,
+            bcd_device: self.bcd_device.clone(),
+            interfaces: self
+                .interfaces
+                .iter()
+                .map(|iface| UsbInterfaceShape {
+                    number: iface.number,
+                    alternate_setting: iface.alternate_setting,
+                    class: iface.class,
+                    subclass: iface.subclass,
+                    protocol: iface.protocol,
+                    endpoints: iface
+                        .endpoints
+                        .iter()
+                        .map(|ep| UsbEndpointCapability {
+                            address: ep.address,
+                            direction: ep.direction,
+                            transfer: ep.transfer,
+                            max_packet_size: ep.max_packet_size,
+                            interval: ep.interval,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl From<&UsbInterfaceShape> for ReportInterfaceShape {
@@ -1952,7 +2065,8 @@ impl NegotiatedProfile {
             negotiated_output_route: policy.output().map(NegotiatedOutputRoute::from),
             active_writes_allowed: policy.active_writes_allowed(),
             keep_single_session: policy.keep_single_session(),
-            portrait_native: policy.portrait_native(),
+            portrait_native: Some(policy.portrait_native()),
+            rotate_panel: None,
         })
     }
 
@@ -1989,7 +2103,8 @@ impl NegotiatedProfile {
             negotiated_output_route: Some(route),
             active_writes_allowed: true,
             keep_single_session: false,
-            portrait_native: device_info.profile.rotate_panel,
+            portrait_native: None,
+            rotate_panel: Some(device_info.profile.rotate_panel),
         })
     }
 }
@@ -2220,6 +2335,14 @@ impl NegotiatedProfile {
 
     pub fn active_writes_allowed(&self) -> bool {
         self.active_writes_allowed
+    }
+
+    pub fn portrait_native(&self) -> Option<bool> {
+        self.portrait_native
+    }
+
+    pub fn rotate_panel(&self) -> Option<bool> {
+        self.rotate_panel
     }
 }
 

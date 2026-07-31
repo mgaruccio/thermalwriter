@@ -19,8 +19,8 @@ use super::null::{NullTransport, TransportKind, transport_from_env};
 use super::profile::{DeviceInfo, WireProtocol, device_info_from_fixture, fixture_by_id};
 use super::scsi_lcd::ScsiLcd;
 use super::usb_fingerprint::{
-    DerivedBulkPair, UsbFingerprint, derive_bulk_pair, derive_vendor_bulk_pair,
-    fingerprint_from_device, unsupported_known_shape_message,
+    DerivedBulkPair, UsbDirection, UsbFingerprint, UsbTransferKind, derive_bulk_pair,
+    derive_vendor_bulk_pair, fingerprint_from_device, unsupported_known_shape_message,
 };
 
 /// How the user selects which LCD to open.
@@ -141,7 +141,7 @@ pub const KNOWN_LCD_IDS: &[(u16, u16, WireProtocol)] = &[
 const SCSI_ONLY_LCD_IDS: &[(u16, u16)] = &[(0x87cd, 0x70db), (0x0402, 0x3922)];
 const DUAL_PATH_LCD_ID: (u16, u16) = (0x0416, 0x5406);
 
-fn protocol_for_id(vid: u16, pid: u16) -> Option<WireProtocol> {
+pub(crate) fn protocol_for_id(vid: u16, pid: u16) -> Option<WireProtocol> {
     KNOWN_LCD_IDS
         .iter()
         .find(|(v, p, _)| *v == vid && *p == pid)
@@ -156,6 +156,109 @@ fn scsi_protocol_for_id(vid: u16, pid: u16, bulk_claimed: bool) -> Option<WirePr
         return Some(WireProtocol::Scsi);
     }
     None
+}
+
+/// Output route for generic (non-Type2) known LCD validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcdTransportRoute {
+    LegacyBulk,
+    ScsiCommand,
+}
+
+const USB_CLASS_MASS_STORAGE: u8 = 8;
+
+fn mass_storage_bulk_pair(fingerprint: &UsbFingerprint) -> Option<DerivedBulkPair> {
+    for shape in &fingerprint.interfaces {
+        if shape.class != USB_CLASS_MASS_STORAGE {
+            continue;
+        }
+        let mut ep_in = 0u8;
+        let mut ep_out = 0u8;
+        for endpoint in &shape.endpoints {
+            if endpoint.transfer != UsbTransferKind::Bulk {
+                continue;
+            }
+            match endpoint.direction {
+                UsbDirection::In => ep_in = endpoint.address,
+                UsbDirection::Out => ep_out = endpoint.address,
+            }
+        }
+        if ep_in != 0 && ep_out != 0 {
+            return Some(DerivedBulkPair {
+                interface: shape.number,
+                ep_in,
+                ep_out,
+                vendor_class: false,
+            });
+        }
+    }
+    None
+}
+
+/// Resolve protocol and transport route from [`KNOWN_LCD_IDS`] and observed USB shape.
+///
+/// Mirrors `scan_usb` / `scan_scsi` routing: dual-path `0416:5406` prefers vendor bulk,
+/// else SCSI; SCSI-only IDs and mass-storage bulk defer to `ScsiCommand`; other bulk/HID3/LY
+/// IDs require a bulk IN+OUT pair suitable for discovery.
+pub fn resolve_known_lcd_route(
+    vid: u16,
+    pid: u16,
+    fingerprint: &UsbFingerprint,
+) -> Result<(WireProtocol, LcdTransportRoute)> {
+    let Some(base_protocol) = protocol_for_id(vid, pid) else {
+        bail!("unknown LCD VID:PID {vid:04x}:{pid:04x}");
+    };
+
+    let bulk_claimed = vendor_bulk_endpoints(derive_vendor_bulk_pair(fingerprint)).is_some();
+
+    match base_protocol {
+        WireProtocol::Bulk if (vid, pid) == DUAL_PATH_LCD_ID => {
+            if bulk_claimed {
+                derive_vendor_bulk_pair(fingerprint).ok_or_else(|| {
+                    anyhow::anyhow!("0416:5406 vendor bulk route missing IN+OUT pair")
+                })?;
+                Ok((WireProtocol::Bulk, LcdTransportRoute::LegacyBulk))
+            } else if scsi_protocol_for_id(vid, pid, false) == Some(WireProtocol::Scsi) {
+                mass_storage_bulk_pair(fingerprint).ok_or_else(|| {
+                    anyhow::anyhow!("0416:5406 SCSI route missing mass-storage bulk IN+OUT pair")
+                })?;
+                Ok((WireProtocol::Scsi, LcdTransportRoute::ScsiCommand))
+            } else {
+                bail!("0416:5406 shape has no supported bulk or SCSI route");
+            }
+        }
+        WireProtocol::Bulk => {
+            derive_bulk_pair(fingerprint).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "bulk route missing same-interface bulk IN+OUT pair for {vid:04x}:{pid:04x}"
+                )
+            })?;
+            Ok((WireProtocol::Bulk, LcdTransportRoute::LegacyBulk))
+        }
+        WireProtocol::Scsi => {
+            mass_storage_bulk_pair(fingerprint).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SCSI route missing mass-storage bulk IN+OUT pair for {vid:04x}:{pid:04x}"
+                )
+            })?;
+            if bulk_claimed && (vid, pid) != DUAL_PATH_LCD_ID {
+                bail!("SCSI-only {vid:04x}:{pid:04x} must not claim vendor bulk");
+            }
+            Ok((WireProtocol::Scsi, LcdTransportRoute::ScsiCommand))
+        }
+        WireProtocol::HidType3 | WireProtocol::Ly => {
+            derive_bulk_pair(fingerprint).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} route missing bulk IN+OUT pair for {vid:04x}:{pid:04x}",
+                    base_protocol.as_str()
+                )
+            })?;
+            Ok((base_protocol, LcdTransportRoute::LegacyBulk))
+        }
+        WireProtocol::HidType2 => {
+            bail!("HID Type2 uses record_negotiated_type2, not generic negotiated device");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
