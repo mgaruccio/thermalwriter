@@ -433,9 +433,7 @@ mod tests {
         .unwrap();
         let error = authorize_hid_report_writes(&obs).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("PM58/SUB0")
+            error.to_string().contains("PM58/SUB0")
                 || error
                     .to_string()
                     .contains("active HID report writes not authorized"),
