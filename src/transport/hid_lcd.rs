@@ -12,14 +12,20 @@ use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
 use super::profile::{WireProtocol, build_device_info};
+use super::type2_policy::{
+    self, TYPE2_MAGIC, TYPE2_RESPONSE_SIZE, Type2NegotiatedObservation, negotiate_type2_policy,
+};
+
 use super::{DeviceInfo, EncodedFrame, FrameEncoding, Transport};
+pub use type2_policy::{
+    HidOutputRoute, TYPE2_PROBE_READ_BOUND, TYPE2_SHORT_RESPONSE_LEN, Type2NegotiatedPolicy,
+    Type2PreHandshakePolicy, UPSTREAM_407_PM58_ISSUE, UPSTREAM_407_PM58_PR, parse_type2_pm_sub,
+    select_type2_pre_handshake_policy, validate_short_response_type2,
+};
 
 const EP_READ_DEFAULT: u8 = 0x81;
 const EP_WRITE_DEFAULT: u8 = 0x02;
-
-const TYPE2_MAGIC: [u8; 4] = [0xDA, 0xDB, 0xDC, 0xDD];
 const TYPE2_INIT_SIZE: usize = 512;
-const TYPE2_RESPONSE_SIZE: usize = 512;
 
 const TYPE3_CMD_PREFIX: [u8; 8] = [0xF5, 0x00, 0x01, 0x00, 0xBC, 0xFF, 0xB6, 0xC8];
 const TYPE3_FRAME_PREFIX: [u8; 8] = [0xF5, 0x01, 0x01, 0x00, 0xBC, 0xFF, 0xB6, 0xC8];
@@ -84,6 +90,15 @@ impl HidIo for UsbHidIo<'_> {
 
 /// Type2 handshake control flow over injectable I/O (retries included).
 pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
+    handshake_type2_legacy_with_io(io, vid, pid).map(|(info, _)| info)
+}
+
+/// Legacy Type2 handshake returning the raw response bytes for policy negotiation.
+pub fn handshake_type2_legacy_with_io(
+    io: &mut dyn HidIo,
+    vid: u16,
+    pid: u16,
+) -> Result<(DeviceInfo, Vec<u8>)> {
     let init = build_init_packet_type2();
     let mut last_err = None;
     for attempt in 1..=HANDSHAKE_MAX_RETRIES {
@@ -100,7 +115,8 @@ pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
             Ok(resp) if validate_response_type2(&resp) => {
                 let pm = resp[5];
                 let sub = resp[4];
-                return build_device_info(WireProtocol::HidType2, vid, pid, pm, sub, None);
+                let info = build_device_info(WireProtocol::HidType2, vid, pid, pm, sub, None)?;
+                return Ok((info, resp));
             }
             Ok(resp) => {
                 last_err = Some(anyhow::anyhow!(
@@ -115,6 +131,53 @@ pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type2 handshake failed")))
+}
+
+/// 4.07 read-only probe: one bounded read, no init or output writes.
+pub fn handshake_type2_read_only_probe_with_io(
+    io: &mut dyn HidIo,
+    vid: u16,
+    pid: u16,
+    pre: Type2PreHandshakePolicy,
+) -> Result<Type2NegotiatedObservation> {
+    let Type2PreHandshakePolicy::Hid407ReadOnlyProbe { .. } = pre else {
+        bail!("read-only probe requires Hid407ReadOnlyProbe pre-handshake policy");
+    };
+    let response = io
+        .read(TYPE2_PROBE_READ_BOUND)
+        .context("HID Type2 4.07 read-only probe read failed")?;
+    negotiate_type2_policy(vid, pid, &response, pre)
+}
+
+/// Handshake using the selected pre-handshake policy and return negotiated observation.
+pub fn handshake_type2_with_policy(
+    io: &mut dyn HidIo,
+    vid: u16,
+    pid: u16,
+    pre: Type2PreHandshakePolicy,
+) -> Result<(DeviceInfo, Type2NegotiatedObservation)> {
+    match pre {
+        Type2PreHandshakePolicy::LegacyBulkInit => {
+            let (info, response) = handshake_type2_legacy_with_io(io, vid, pid)?;
+            let observation = negotiate_type2_policy(vid, pid, &response, pre)?;
+            Ok((info, observation))
+        }
+        Type2PreHandshakePolicy::Hid407ReadOnlyProbe { .. } => {
+            let observation = handshake_type2_read_only_probe_with_io(io, vid, pid, pre)?;
+            let info = build_device_info(
+                WireProtocol::HidType2,
+                vid,
+                pid,
+                observation.pm,
+                observation.sub,
+                None,
+            )?;
+            Ok((info, observation))
+        }
+        Type2PreHandshakePolicy::StopUnsupportedShape => {
+            bail!("unsupported Type2 interface shape; handshake refused");
+        }
+    }
 }
 
 /// Type3 handshake control flow over injectable I/O (retries included).

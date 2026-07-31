@@ -19,6 +19,7 @@ pub mod usb_fingerprint;
 pub mod hid_lcd;
 pub mod ly_lcd;
 pub mod scsi_lcd;
+pub mod type2_policy;
 
 use anyhow::Result;
 
@@ -27,6 +28,11 @@ pub use profile::{
     WireProtocol, build_device_info, device_info_from_fixture, display_shape, fixture_by_id,
     known_fixture_profiles, oriented_dimensions, pm_to_fbl, resolve_profile, supported_resolutions,
     wire_angle,
+};
+pub use type2_policy::{
+    HidOutputRoute, Type2NegotiatedObservation, Type2NegotiatedPolicy, Type2PreHandshakePolicy,
+    UPSTREAM_407_PM58_ISSUE, UPSTREAM_407_PM58_PR, negotiate_type2_policy,
+    select_type2_pre_handshake_policy, validate_short_response_type2,
 };
 #[cfg(feature = "daemon")]
 pub use usb_fingerprint::fingerprint_from_device;

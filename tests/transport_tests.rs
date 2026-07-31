@@ -708,6 +708,44 @@ fn expected_hid_write_failure_schedule(init: Vec<u8>, attempts: usize) -> Vec<Io
 }
 
 #[test]
+fn hid_type2_407_read_only_probe_performs_no_writes() {
+    let short = vec![0xDA, 0xDB, 0xDC, 0xDD, 0x00, 0x3A, 0x00, 0x00];
+    let mut io = MemHidIo::new(vec![short]);
+    let pre = hid_lcd::Type2PreHandshakePolicy::Hid407ReadOnlyProbe {
+        skip_init: true,
+        accept_short_response: true,
+    };
+    let obs =
+        hid_lcd::handshake_type2_read_only_probe_with_io(&mut io, 0x0416, 0x5302, pre).unwrap();
+    assert_eq!(obs.pm, 58);
+    assert_eq!(obs.sub, 0);
+    assert!(obs.policy.active_writes_allowed);
+    assert_eq!(
+        io.log,
+        vec![IoOp::Read(hid_lcd::TYPE2_PROBE_READ_BOUND)],
+        "4.07 probe must not write init or output"
+    );
+}
+
+#[test]
+fn hid_type2_with_policy_legacy_matches_existing_handshake() {
+    let mut good = vec![0u8; 20];
+    good[0..4].copy_from_slice(&[0xDA, 0xDB, 0xDC, 0xDD]);
+    good[12] = 1;
+    good[5] = 58;
+    good[4] = 0;
+    let mut io = MemHidIo::new(vec![good.clone()]);
+    let pre = hid_lcd::Type2PreHandshakePolicy::LegacyBulkInit;
+    let (info, obs) = hid_lcd::handshake_type2_with_policy(&mut io, 0x0416, 0x5302, pre).unwrap();
+    assert_eq!((info.width(), info.height()), (320, 240));
+    assert!(obs.policy.active_writes_allowed);
+    assert_eq!(
+        io.log,
+        expected_hid_handshake_schedule(hid_lcd::build_init_packet_type2(), 512, 1)
+    );
+}
+
+#[test]
 fn hid_type2_handshake_retries_once_then_stops_on_success() {
     // First read invalid; second valid. Success must stop before a third attempt.
     let bad = vec![0u8; 20];
