@@ -25,10 +25,12 @@ pub mod type2_policy;
 use anyhow::Result;
 
 pub use hid_report::{
-    HIDAPI_CRATE_VERSION, HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract,
-    HidWriteObservation, HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
-    PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
-    correlate_hidraw_to_usb,
+    HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportReadError,
+    HidReportReadSession, HidReportWriteAuthorization, HidReportWriteError, HidReportWriteSession,
+    HidWriteObservation, HidrawCandidate, HidrawCorrelation, KERNEL_HIDRAW_DOC_REF,
+    LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
+    REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
+    authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
 pub use profile::{
     DeviceInfo, DeviceProfile, DisplayShape, FixtureProfile, FrameEncoding, KNOWN_FBL_CODES,
@@ -38,8 +40,8 @@ pub use profile::{
 };
 pub use type2_policy::{
     HidOutputRoute, Type2NegotiatedObservation, Type2NegotiatedPolicy, Type2PreHandshakePolicy,
-    UPSTREAM_407_PM58_ISSUE, UPSTREAM_407_PM58_PR, negotiate_type2_policy,
-    select_type2_pre_handshake_policy, validate_short_response_type2,
+    UPSTREAM_407_PM58_ISSUE, UPSTREAM_407_PM58_PR, authorize_hid_report_writes,
+    negotiate_type2_policy, select_type2_pre_handshake_policy, validate_short_response_type2,
 };
 #[cfg(feature = "daemon")]
 pub use usb_fingerprint::fingerprint_from_device;

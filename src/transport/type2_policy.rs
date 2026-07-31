@@ -141,6 +141,23 @@ pub fn parse_type2_pm_sub(response: &[u8]) -> Result<(u8, u8)> {
     );
 }
 
+/// Authorize active HID-report writes from a negotiated Type2 observation.
+pub fn authorize_hid_report_writes(obs: &Type2NegotiatedObservation) -> Result<()> {
+    ensure!(
+        obs.policy.active_writes_allowed,
+        "active HID report writes not authorized for PM={} SUB={}",
+        obs.pm,
+        obs.sub
+    );
+    ensure!(
+        obs.policy.output == Some(HidOutputRoute::HidReport),
+        "negotiated output route is not HID report for PM={} SUB={}",
+        obs.pm,
+        obs.sub
+    );
+    Ok(())
+}
+
 /// Derive negotiated policy from response bytes and the selected pre-handshake path.
 pub fn negotiate_type2_policy(
     vid: u16,
@@ -336,6 +353,35 @@ mod tests {
         assert_eq!(
             select_type2_pre_handshake_policy(&fp, false),
             Type2PreHandshakePolicy::StopUnsupportedShape
+        );
+    }
+
+    #[test]
+    fn authorize_hid_report_writes_requires_pm58_hid_report_route() {
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &short_pm58_response(),
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .unwrap();
+        authorize_hid_report_writes(&obs).unwrap();
+
+        let mut inactive = short_pm58_response();
+        inactive[5] = 68;
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &inactive,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .unwrap();
+        let error = authorize_hid_report_writes(&obs).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("active HID report writes not authorized"),
+            "{error:#}"
         );
     }
 

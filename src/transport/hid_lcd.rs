@@ -12,12 +12,16 @@ use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
 #[cfg(feature = "daemon")]
-pub use super::hid_report::linux::{LinuxHidReportIo, open_correlated_session};
+pub use super::hid_report::linux::{
+    LinuxHidrawIo, open_correlated_read_session, open_correlated_write_session,
+};
 pub use super::hid_report::{
-    HIDAPI_CRATE_VERSION, HIDAPI_EVIDENCE_COMMIT, HidReadObservation, HidReportBackendContract,
-    HidWriteObservation, HidrawCandidate, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
-    PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
-    correlate_hidraw_to_usb,
+    HidChunkedWriteFailure, HidReadObservation, HidReportBackendContract, HidReportReadError,
+    HidReportReadSession, HidReportWriteAuthorization, HidReportWriteError, HidReportWriteSession,
+    HidWriteObservation, HidrawCandidate, HidrawCorrelation, KERNEL_HIDRAW_DOC_REF,
+    LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
+    REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
+    authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
 
 use super::profile::{WireProtocol, build_device_info};
