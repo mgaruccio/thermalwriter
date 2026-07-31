@@ -13,6 +13,7 @@ pub mod encode;
 pub mod null;
 pub mod profile;
 pub mod usb_device;
+pub mod usb_fingerprint;
 
 // Family implementations (added as they land).
 pub mod hid_lcd;
@@ -26,6 +27,13 @@ pub use profile::{
     WireProtocol, build_device_info, device_info_from_fixture, display_shape, fixture_by_id,
     known_fixture_profiles, oriented_dimensions, pm_to_fbl, resolve_profile, supported_resolutions,
     wire_angle,
+};
+#[cfg(feature = "daemon")]
+pub use usb_fingerprint::fingerprint_from_device;
+pub use usb_fingerprint::{
+    DerivedBulkPair, HidInterruptIn, UsbDirection, UsbEndpointCapability, UsbFingerprint,
+    UsbInterfaceShape, UsbRunIdentity, UsbTransferKind, derive_bulk_pair, derive_vendor_bulk_pair,
+    format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
 };
 
 /// Encoded payload ready for the wire — dimensions match the device native

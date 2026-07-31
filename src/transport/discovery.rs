@@ -18,6 +18,10 @@ use super::ly_lcd::LyLcd;
 use super::null::{NullTransport, TransportKind, transport_from_env};
 use super::profile::{DeviceInfo, WireProtocol, device_info_from_fixture, fixture_by_id};
 use super::scsi_lcd::ScsiLcd;
+use super::usb_fingerprint::{
+    DerivedBulkPair, UsbFingerprint, derive_bulk_pair, derive_vendor_bulk_pair,
+    fingerprint_from_device, unsupported_known_shape_message,
+};
 
 /// How the user selects which LCD to open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -192,11 +196,22 @@ fn ensure_scsi_candidates_resolved(
     Ok(())
 }
 
-fn vendor_bulk_endpoints(endpoints: Option<(u8, u8, u8, bool)>) -> Option<(u8, u8, u8)> {
-    match endpoints {
-        Some((interface, ep_in, ep_out, true)) => Some((interface, ep_in, ep_out)),
-        Some((_, _, _, false)) | None => None,
-    }
+fn vendor_bulk_endpoints(pair: Option<DerivedBulkPair>) -> Option<(u8, u8, u8)> {
+    pair.filter(|pair| pair.vendor_class)
+        .map(|pair| (pair.interface, pair.ep_in, pair.ep_out))
+}
+
+fn bulk_endpoints(pair: Option<DerivedBulkPair>) -> Option<(u8, u8, u8)> {
+    pair.map(|pair| (pair.interface, pair.ep_in, pair.ep_out))
+}
+
+fn read_fingerprint<T: rusb::UsbContext>(
+    device: &rusb::Device<T>,
+    bus: u8,
+    address: u8,
+) -> Result<UsbFingerprint> {
+    fingerprint_from_device(device)
+        .with_context(|| format!("failed to read USB fingerprint at bus={bus} addr={address}"))
 }
 
 /// Scan libusb + scsi_generic for full-pixel LCDs.
@@ -228,10 +243,9 @@ fn scan_usb(
 
         // 0416:5406 — prefer vendor bulk endpoints; else leave for SCSI scan.
         if vid == 0x0416 && pid == 0x5406 {
-            let endpoints = find_bulk_endpoints(&device).with_context(|| {
-                format!("0416:5406 endpoint probe failed at bus={bus} addr={address}")
-            })?;
-            if let Some((iface, ep_in, ep_out)) = vendor_bulk_endpoints(endpoints) {
+            let fingerprint = read_fingerprint(&device, bus, address)?;
+            let endpoints = vendor_bulk_endpoints(derive_vendor_bulk_pair(&fingerprint));
+            if let Some((iface, ep_in, ep_out)) = endpoints {
                 out.push(DiscoveredDevice {
                     vid,
                     pid,
@@ -269,20 +283,14 @@ fn scan_usb(
             continue;
         }
 
-        let Some((iface, ep_in, ep_out, _)) = find_bulk_endpoints(&device).with_context(|| {
-            format!(
-                "failed to read config for {:04x}:{:04x} bus={} addr={}",
-                vid, pid, bus, address
-            )
-        })?
-        else {
-            bail!(
-                "device {:04x}:{:04x} bus={} addr={} has no bulk endpoints",
+        let fingerprint = read_fingerprint(&device, bus, address)?;
+        let Some((iface, ep_in, ep_out)) = bulk_endpoints(derive_bulk_pair(&fingerprint)) else {
+            bail!(unsupported_known_shape_message(
                 vid,
                 pid,
-                bus,
-                address
-            );
+                protocol.as_str(),
+                &fingerprint
+            ));
         };
         out.push(DiscoveredDevice {
             vid,
@@ -299,40 +307,6 @@ fn scan_usb(
         });
     }
     Ok(())
-}
-
-fn find_bulk_endpoints<T: rusb::UsbContext>(
-    device: &rusb::Device<T>,
-) -> Result<Option<(u8, u8, u8, bool)>> {
-    let config = device
-        .active_config_descriptor()
-        .context("active config descriptor")?;
-    let mut best: Option<(u8, u8, u8, bool)> = None; // iface, in, out, vendor
-    for iface in config.interfaces() {
-        for desc in iface.descriptors() {
-            let mut ep_in = 0u8;
-            let mut ep_out = 0u8;
-            for ep in desc.endpoint_descriptors() {
-                if ep.transfer_type() == rusb::TransferType::Bulk {
-                    if ep.direction() == rusb::Direction::Out {
-                        ep_out = ep.address();
-                    } else {
-                        ep_in = ep.address();
-                    }
-                }
-            }
-            if ep_in != 0 && ep_out != 0 {
-                let vendor = desc.class_code() == 255 || desc.class_code() == 0;
-                let candidate = (desc.interface_number(), ep_in, ep_out, vendor);
-                match best {
-                    None => best = Some(candidate),
-                    Some((_, _, _, was_vendor)) if vendor && !was_vendor => best = Some(candidate),
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(best)
 }
 
 fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
@@ -913,13 +887,25 @@ mod tests {
 
         let (vid, pid) = DUAL_PATH_LCD_ID;
         assert_eq!(protocol_for_id(vid, pid), Some(WireProtocol::Bulk));
+        let vendor_pair = DerivedBulkPair {
+            interface: 1,
+            ep_in: 0x81,
+            ep_out: 0x02,
+            vendor_class: true,
+        };
         assert_eq!(
-            vendor_bulk_endpoints(Some((1, 0x81, 0x02, true))),
+            vendor_bulk_endpoints(Some(vendor_pair)),
             Some((1, 0x81, 0x02)),
             "vendor interface must select bulk"
         );
+        let non_vendor_pair = DerivedBulkPair {
+            interface: 1,
+            ep_in: 0x81,
+            ep_out: 0x02,
+            vendor_class: false,
+        };
         assert_eq!(
-            vendor_bulk_endpoints(Some((1, 0x81, 0x02, false))),
+            vendor_bulk_endpoints(Some(non_vendor_pair)),
             None,
             "mass-storage bulk endpoints must defer to SCSI"
         );
