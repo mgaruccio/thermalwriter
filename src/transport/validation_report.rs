@@ -1584,7 +1584,10 @@ fn validate_type2_negotiated_profile(
             if doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe) {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
-            if negotiated.response_bytes != 8 {
+            // Short (PM58-class) or legacy-shaped (init-elicited) inactive replies.
+            let ok_len = negotiated.response_bytes == 8
+                || negotiated.response_bytes >= TYPE2_LEGACY_RESPONSE_MIN;
+            if !ok_len {
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
             if negotiated.negotiated_output_route.is_some()
