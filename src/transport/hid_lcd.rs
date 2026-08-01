@@ -144,7 +144,7 @@ pub fn handshake_type2_legacy_with_io(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type2 handshake failed")))
 }
 
-/// 4.07 read-only probe: one bounded read, no init or output writes.
+/// 4.07 probe: prefer a silent bounded read; if empty, elicit with one Type2 init.
 pub fn handshake_type2_read_only_probe_with_io(
     io: &mut dyn HidIo,
     vid: u16,
@@ -154,9 +154,18 @@ pub fn handshake_type2_read_only_probe_with_io(
     let Type2PreHandshakePolicy::Hid407ReadOnlyProbe = pre else {
         bail!("read-only probe requires Hid407ReadOnlyProbe pre-handshake policy");
     };
-    let response = io
+    let mut response = io
         .read(TYPE2_PROBE_READ_BOUND)
-        .context("HID Type2 4.07 read-only probe read failed")?;
+        .context("HID Type2 4.07 probe read failed")?;
+    if response.is_empty() {
+        let init = build_init_packet_type2();
+        io.write(&init)
+            .context("HID Type2 4.07 probe init elicit write failed")?;
+        io.sleep(DELAY_POST_INIT);
+        response = io
+            .read(TYPE2_PROBE_READ_BOUND)
+            .context("HID Type2 4.07 probe read after init elicit failed")?;
+    }
     negotiate_type2_policy(vid, pid, &response, pre)
 }
 

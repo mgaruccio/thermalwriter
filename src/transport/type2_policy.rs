@@ -153,9 +153,30 @@ pub fn select_type2_pre_handshake_policy(
     Type2PreHandshakePolicy::StopUnsupportedShape
 }
 
-/// Eight-byte Type2 magic response accepted only on the 4.07 read-only probe path.
+/// Eight-byte Type2 magic response accepted on the 4.07 probe path.
 pub fn validate_short_response_type2(resp: &[u8]) -> bool {
     resp.len() == TYPE2_SHORT_RESPONSE_LEN && resp[0..4] == TYPE2_MAGIC
+}
+
+/// Legacy-shaped Type2 response (init echo) accepted on the 4.07 probe path
+/// when a unit only replies after an eliciting init write.
+pub fn validate_legacy_response_type2(resp: &[u8]) -> bool {
+    resp.len() >= TYPE2_LEGACY_RESPONSE_MIN
+        && resp[0..4] == TYPE2_MAGIC
+        && resp[12] == 0x01
+}
+
+/// True when `resp` is either a short or legacy-shaped Type2 handshake reply.
+pub fn validate_probe_response_type2(resp: &[u8]) -> bool {
+    validate_short_response_type2(resp) || validate_legacy_response_type2(resp)
+}
+
+/// 512-byte Type2 init packet (magic + command=1 at offset 12).
+pub fn build_type2_init_packet() -> [u8; TYPE2_RESPONSE_SIZE] {
+    let mut pkt = [0_u8; TYPE2_RESPONSE_SIZE];
+    pkt[0..4].copy_from_slice(&TYPE2_MAGIC);
+    pkt[12] = 0x01;
+    pkt
 }
 
 /// Parse PM/SUB from a short or legacy full Type2 response without guessing.
@@ -163,10 +184,7 @@ pub fn parse_type2_pm_sub(response: &[u8]) -> Result<(u8, u8)> {
     if validate_short_response_type2(response) {
         return Ok((response[5], response[4]));
     }
-    if response.len() >= TYPE2_LEGACY_RESPONSE_MIN
-        && response[0..4] == TYPE2_MAGIC
-        && response[12] == 0x01
-    {
+    if validate_legacy_response_type2(response) {
         return Ok((response[5], response[4]));
     }
     bail!(
@@ -225,11 +243,11 @@ pub fn negotiate_type2_policy(
     match pre {
         Type2PreHandshakePolicy::Hid407ReadOnlyProbe => {
             ensure!(
-                validate_short_response_type2(response),
-                "4.07 probe requires {TYPE2_SHORT_RESPONSE_LEN}-byte response, got {}",
+                validate_probe_response_type2(response),
+                "4.07 probe requires {TYPE2_SHORT_RESPONSE_LEN}-byte short or legacy-shaped response, got {}",
                 response.len()
             );
-            if pm == 58 && sub == 0 {
+            if validate_short_response_type2(response) && pm == 58 && sub == 0 {
                 // #228 / #230: HID report output, skip-init, portrait-native 240×320, one session.
                 return Ok(Type2NegotiatedObservation {
                     pm,
@@ -242,7 +260,8 @@ pub fn negotiate_type2_policy(
                     ),
                 });
             }
-            // Known profile observed on 4.07; active output not evidenced for this PM/SUB.
+            // Known profile observed on 4.07; active output not evidenced for this PM/SUB
+            // (includes legacy-shaped replies elicited by init on non-PM58 units).
             build_device_info(WireProtocol::HidType2, vid, pid, pm, sub, None)?;
             Ok(Type2NegotiatedObservation {
                 pm,
@@ -523,6 +542,27 @@ mod tests {
         let obs = negotiate_type2_policy(WINBOND_HID2_VID, WINBOND_HID2_PID, &resp, pre).unwrap();
         assert_eq!(obs.pm(), 68);
         assert_eq!(obs.policy(), Type2NegotiatedPolicy::observed_inactive());
+    }
+
+    #[test]
+    fn pm128_legacy_shaped_407_probe_is_observed_inactive() {
+        // Captured from local 0416:5302 bcd 4.07 after HID init elicit.
+        let mut resp = vec![0_u8; 36];
+        resp[0..4].copy_from_slice(&TYPE2_MAGIC);
+        resp[4] = 1; // SUB
+        resp[5] = 128; // PM
+        resp[12] = 0x01;
+        let obs = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &resp,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .expect("PM128 known profile");
+        assert_eq!(obs.pm(), 128);
+        assert_eq!(obs.sub(), 1);
+        assert_eq!(obs.policy(), Type2NegotiatedPolicy::observed_inactive());
+        assert!(!obs.policy().active_writes_allowed());
     }
 
     #[test]

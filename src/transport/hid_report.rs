@@ -6,7 +6,7 @@
 
 use super::type2_policy::{
     TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy, WINBOND_HID2_PID,
-    WINBOND_HID2_VID, negotiate_type2_policy,
+    WINBOND_HID2_VID, build_type2_init_packet, negotiate_type2_policy,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -559,20 +559,52 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
     /// Perform the 4.07 read-only Type2 probe on this session's I/O handle for the exact
     /// Winbond `0416:5302` firmware-4.07 policy.
     ///
-    /// Clears any prior probe authorization, reads up to [`TYPE2_PROBE_READ_BOUND`] bytes,
-    /// negotiates internally with [`WINBOND_HID2_VID`]/[`WINBOND_HID2_PID`], and stores write
-    /// authorization only when that same read yields the exact PM58/SUB0 short response.
-    /// Returns the observation for reporting.
+    /// Clears any prior probe authorization, then:
+    /// 1. Reads up to [`TYPE2_PROBE_READ_BOUND`] bytes (no write) — PM58 units may
+    ///    already present a short response.
+    /// 2. If that read is empty, writes one Type2 init packet as a HID report and
+    ///    reads again. Some 4.07 units only reply after init (legacy-shaped body);
+    ///    note init can reboot PM58 panels, so the silent path is tried first.
+    ///
+    /// Negotiates with [`WINBOND_HID2_VID`]/[`WINBOND_HID2_PID`]. Stores write
+    /// authorization only when the same session yields the exact PM58/SUB0 short
+    /// response. Returns the observation for reporting.
     pub fn probe_type2_read_only(
         &mut self,
         timeout_ms: u32,
     ) -> Result<Type2NegotiatedObservation, HidReportProbeError> {
         self.session_auth = None;
         self.probe_performed = true;
-        let (_, response) = self
+        let (_, mut response) = self
             .core
             .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
             .map_err(HidReportProbeError::Read)?;
+
+        if response.is_empty() {
+            // Elicit a handshake reply. Init is a protocol query, not a framebuffer.
+            let init = build_type2_init_packet();
+            let mut api_buffer = [0_u8; USERSPACE_SUBMIT_BYTES];
+            api_buffer[0] = REPORT_ID_UNNUMBERED;
+            api_buffer[1..].copy_from_slice(&init);
+            if let Err(error) = self.core.io.write(&api_buffer) {
+                self.core.stop_on_error();
+                return Err(HidReportProbeError::Read(HidReportReadError::Transport {
+                    message: format!("4.07 probe init elicit write failed: {error}"),
+                    observation: HidReadObservation {
+                        read_capacity_bytes: TYPE2_PROBE_READ_BOUND,
+                        read_timeout_ms: timeout_ms,
+                        transport_return_bytes: 0,
+                        protocol_response_bytes: 0,
+                    },
+                }));
+            }
+            let (_, elicited) = self
+                .core
+                .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
+                .map_err(HidReportProbeError::Read)?;
+            response = elicited;
+        }
+
         let observation = negotiate_type2_policy(
             WINBOND_HID2_VID,
             WINBOND_HID2_PID,
@@ -1519,6 +1551,32 @@ mod tests {
         read_session.probe_type2_read_only(0).unwrap();
         let write_session = read_session.authorize_writes().unwrap();
         assert_eq!(write_session.core.io.id(), io_id);
+    }
+
+    #[test]
+    fn silent_probe_elicits_init_then_negotiates_legacy_response() {
+        let mut io = MemHidReportIo::new();
+        // First read empty; write init returns 513; second read is legacy PM128.
+        // Push an empty data buffer so the timeout read does not consume the reply.
+        io.read_data.push_back(Vec::new());
+        io.read_returns.push_back(Ok(0));
+        io.write_returns.push_back(Ok(513));
+        let mut legacy = vec![0_u8; 36];
+        legacy[0..4].copy_from_slice(&[0xDA, 0xDB, 0xDC, 0xDD]);
+        legacy[4] = 1;
+        legacy[5] = 128;
+        legacy[12] = 0x01;
+        io.read_data.push_back(legacy.clone());
+        io.read_returns.push_back(Ok(legacy.len() as isize));
+        let mut session = HidReportReadSession::new_for_test(io);
+        let obs = session.probe_type2_read_only(100).unwrap();
+        assert_eq!(obs.pm(), 128);
+        assert_eq!(obs.sub(), 1);
+        assert!(!obs.policy().active_writes_allowed());
+        assert_eq!(session.core.io.writes.len(), 1);
+        assert_eq!(session.core.io.writes[0].len(), 513);
+        assert_eq!(session.core.io.writes[0][0], 0); // report id
+        assert_eq!(&session.core.io.writes[0][1..5], &[0xDA, 0xDB, 0xDC, 0xDD]);
     }
 
     #[test]
