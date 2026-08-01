@@ -692,12 +692,12 @@ async fn main() -> Result<()> {
     let initial_xvfb_command = (config.display.mode == "xvfb").then(|| config.xvfb.command.clone());
     let needed_tx_listener = needed_tx.clone();
     let sensor_descriptors_listener = Arc::clone(&sensor_descriptors);
-    let mut independent_layout_specs = independent_layout_specs;
+    let independent_layout_specs = independent_layout_specs;
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
         // (mode, layout, vars) per independent output; empty in single/mirror mode.
-        let mut independent_layout_specs = independent_layout_specs;
+        let independent_layout_specs = independent_layout_specs;
         // Tracks the active background so layout switches preserve it.
         let mut current_background: Option<Arc<BackgroundImage>> = initial_background;
         let mut current_display = source_display;

@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Discover HID Type2 interrupt endpoints; local `0416:5302` negotiates PM128/SUB1 at 1280×480 (active cards still conservative-stop).
 - Independent multi-display via `[[displays]]`: bind distinct `VID:PID` targets with per-output layout/mode/rotation while keeping `display.device = "all"` mirror mode.
 
 ### Added

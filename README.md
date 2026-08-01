@@ -73,7 +73,7 @@ thermalwriter implements protocol support for the USB IDs below. Evidence is gro
 | Hardware fingerprint | Basis | Limitation |
 | --- | --- | --- |
 | `0416:5302`, bcdDevice `4.07`, PM58/SUB0 (upstream unit) | [Upstream issue #228](https://github.com/Lexonight1/thermalright-trcc-linux/issues/228) / [PR #230](https://github.com/Lexonight1/thermalright-trcc-linux/pull/230): HID report transport, portrait `240×320` | Does not establish behavior for other 4.07 profiles |
-| Local `0416:5302`, bcdDevice `4.07`, PM/SUB unknown | Passive `validate-device` inventory (HID IF0 IN+OUT observed, hidraw correlated, pre-handshake `hid407_read_only_probe`) | Active output, handshake, and geometry unverified; do not assume PM/SUB |
+| Local `0416:5302`, bcdDevice `4.07`, PM128/SUB1 | Active `validate-device` negotiate: init-elicited legacy reply, FBL128 **1280×480** JPEG, `observed_inactive` (no upstream active-write evidence for PM128) | Daemon can open/handshake/stream via HID interrupt; guided active cards/soak not authorized yet |
 | Other upstream-reported `0416:5302` profiles (e.g. PM49, PM68/FBL192) | [Reference device registry](https://github.com/Lexonight1/thermalright-trcc-linux/blob/655a1acff5c86ff0f9121f9fd4a0ea14bee35447/doc/REFERENCE_DEVICES.md), [issue #213](https://github.com/Lexonight1/thermalright-trcc-linux/issues/213) | Firmware, PM, orientation, and transport vary under one VID:PID |
 | Other `87ad:70db` profiles (PM5, PM32, PM64, …) | Same bulk family as the locally working unit; fixture-backed | Individual PM/profile combinations not evaluated locally |
 | `0402:3922`, SCSI | Upstream reference-device evidence | No thermalwriter physical run |
