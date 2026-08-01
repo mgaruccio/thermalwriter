@@ -791,7 +791,7 @@ where
         log.info(format!("reconnect inventory error: {error:#}"));
         ValidationStage::Reconnect
     })?;
-    let _new_selector = resolve_reconnect(&entries, previous_selector, bus_address_hint).map_err(
+    let new_selector = resolve_reconnect(&entries, previous_selector, bus_address_hint).map_err(
         |error| {
             log.info(format!("reconnect selection error: {error:#}"));
             let _ = report.abort_at(
@@ -805,7 +805,8 @@ where
         },
     )?;
 
-    let peers_after = snapshot_peers(usb, previous_selector);
+    // Exclude the reconnected target identity, not the pre-unplug address.
+    let peers_after = snapshot_peers(usb, new_selector);
     if peers_after != *peers_before {
         let _ = report.abort_at(
             ValidationStage::Reconnect,
@@ -1348,6 +1349,35 @@ mod active_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("multiple reconnect candidates"));
+    }
+
+    #[test]
+    fn snapshot_peers_excludes_reconnected_target_not_stale_address() {
+        let mut peer_fp = hid_in_fingerprint();
+        peer_fp.vid = 0x87ad;
+        peer_fp.pid = 0x70db;
+        let usb = MapInventory {
+            entries: vec![
+                inventory_entry(1, 10, peer_fp, false),
+                // stale pre-unplug address still present in some inventories is treated as peer
+                inventory_entry(3, 20, hid_in_fingerprint(), false),
+                inventory_entry(3, 21, hid_in_fingerprint(), false),
+            ],
+        };
+        let peers = snapshot_peers(&usb, UsbBusAddress { bus: 3, address: 21 });
+        assert!(peers.contains(&PeerIdentity {
+            vid: 0x87ad,
+            pid: 0x70db,
+            bus: 1,
+            address: 10,
+        }));
+        assert!(peers.contains(&PeerIdentity {
+            vid: 0x0416,
+            pid: 0x5302,
+            bus: 3,
+            address: 20,
+        }));
+        assert!(!peers.iter().any(|p| p.bus == 3 && p.address == 21));
     }
 
     #[test]
