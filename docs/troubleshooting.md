@@ -55,7 +55,9 @@ lsusb | grep -iE '87ad|87cd|0402|0416|0418'
 
 **Permission denied opening USB** — udev `uaccess` tags require a active session. Log out/in after install, or replug the device.
 
-**Wrong cooler when multiple displays share a VID:PID** — use `display.device = "all"` to mirror every attached unit, or unplug extras. To drive a single display when IDs differ, set `display.device = "VID:PID"` in `config.toml` (hex, lowercase).
+**Wrong cooler when multiple displays share a VID:PID** — use `display.device = "all"` to mirror every attached unit, or unplug extras. To drive a single display when IDs differ, set `display.device = "VID:PID"` in `config.toml` (hex, lowercase). For guided hardware testing, use `thermalwriter validate-device --device VID:PID` with `--bus-address BUS:ADDRESS` when duplicates are present; see [Hardware validation](hardware-validation.md).
+
+**Contributing a device report** — passive preflight is read-only: `thermalwriter validate-device --device 0416:5302 --passive`. Attach the output bundle (`report.toml`, `descriptor.txt`, `validator.log`) to a GitHub issue; redact local paths from `validator.log` before posting. Full active passes require a visible terminal and are documented in [Hardware validation](hardware-validation.md).
 
 ## RAPL / CPU power group
 

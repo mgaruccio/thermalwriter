@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Tracked the ordered Thermalright Trofeo Vision 6.86-inch IPS 1280×480 panel as capture-pending, with a hardware-free HID Type 2 (`0416:5302`) PM68/FBL192 profile fixture.
 - Mirrored multi-display mode via `display.device = "all"`: opens every attached supported LCD, renders once at a deterministic primary resolution, letterboxes per output, encodes for each negotiated profile, and reports `display_count` in status.
+- `docs/hardware-validation.md`: guided `validate-device` workflow (passive/active gates, evidence tiers, HID length semantics, output bundle, safety rules).
 
 ## [0.1.4] - 2026-07-28
 

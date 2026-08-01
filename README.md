@@ -60,6 +60,8 @@ Source installs, the GUI, and full details below.
 
 thermalwriter implements protocol support for the USB IDs below. Evidence is grouped at the hardware-fingerprint/profile level where one VID:PID can cover multiple panel profiles. Upstream registry evidence was last reviewed at [thermalright-trcc-linux `655a1ac`](https://github.com/Lexonight1/thermalright-trcc-linux/commit/655a1acff5c86ff0f9121f9fd4a0ea14bee35447).
 
+**Tested** means a maintainer-reviewed full `validate-device` active pass for that exact fingerprint/profile (isolation, visual checks, soak, reconnect, daemon restore). **Likely** is upstream or local evidence without that full thermalwriter evaluation. **Untested** is code/fixture mapping without adequate physical proof. Null transport, fixtures, passive-only runs, and synthetic renders never promote Tested. See [Hardware validation](docs/hardware-validation.md) for the ordered gate workflow and safety rules.
+
 ### Tested
 
 No entries yet meet the full-evaluation standard (isolation, visual checks, soak, reconnect, and daemon restoration).
@@ -313,6 +315,7 @@ cd gui && npm ci && npm run build && npm run tauri:build
 
 For more information, consult the following documentation files:
 - [CHANGELOG.md](CHANGELOG.md) - Version history and changes.
+- [Hardware validation](docs/hardware-validation.md) - Guided `validate-device` workflow, evidence tiers, and safety rules for physical LCD testing.
 - [Configuration Guide](docs/configuration.md) - Full details on `config.toml` structure, defaults, and ranges.
 - [GUI Guide](docs/gui.md) - Detailed guide to the Svelte/Tauri-based configuration app.
 - [Troubleshooting](docs/troubleshooting.md) - Common install, daemon, GUI, streaming, and compatibility issues.
