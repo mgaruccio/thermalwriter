@@ -20,7 +20,8 @@ use super::profile::{DeviceInfo, WireProtocol, device_info_from_fixture, fixture
 use super::scsi_lcd::ScsiLcd;
 use super::usb_fingerprint::{
     DerivedBulkPair, UsbDirection, UsbFingerprint, UsbTransferKind, derive_bulk_pair,
-    derive_vendor_bulk_pair, fingerprint_from_device, unsupported_known_shape_message,
+    derive_vendor_bulk_pair, fingerprint_from_device, hid_interrupt_in_endpoints,
+    unsupported_known_shape_message,
 };
 
 /// How the user selects which LCD to open.
@@ -305,6 +306,65 @@ fn bulk_endpoints(pair: Option<DerivedBulkPair>) -> Option<(u8, u8, u8)> {
     pair.map(|pair| (pair.interface, pair.ep_in, pair.ep_out))
 }
 
+/// Outcome of routing a known USB LCD through bulk-endpoint discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsbBulkDiscoveryOutcome {
+    /// Bulk IN+OUT pair suitable for `DevicePath::Usb`.
+    Endpoints(u8, u8, u8),
+    /// HID Type2 interrupt-IN only — omit from bulk scan inventory (hidraw path).
+    SkipHidInterruptOnly,
+    /// No supported route for this protocol/shape.
+    Unsupported,
+}
+
+fn usb_bulk_discovery_outcome(
+    protocol: WireProtocol,
+    fingerprint: &UsbFingerprint,
+) -> UsbBulkDiscoveryOutcome {
+    if let Some(endpoints) = bulk_endpoints(derive_bulk_pair(fingerprint)) {
+        return UsbBulkDiscoveryOutcome::Endpoints(endpoints.0, endpoints.1, endpoints.2);
+    }
+    if protocol == WireProtocol::HidType2 && !hid_interrupt_in_endpoints(fingerprint).is_empty() {
+        return UsbBulkDiscoveryOutcome::SkipHidInterruptOnly;
+    }
+    UsbBulkDiscoveryOutcome::Unsupported
+}
+
+/// Build a bulk [`DiscoveredDevice`] from a passive inventory fingerprint.
+///
+/// Does not scan libusb; peer displays cannot affect the result.
+pub fn discovered_bulk_from_fingerprint(
+    vid: u16,
+    pid: u16,
+    bus: u8,
+    address: u8,
+    fingerprint: &UsbFingerprint,
+) -> Result<DiscoveredDevice> {
+    let protocol = protocol_for_id(vid, pid)
+        .filter(|p| *p == WireProtocol::Bulk)
+        .ok_or_else(|| {
+            anyhow::anyhow!("{vid:04x}:{pid:04x} is not a bulk LCD in KNOWN_LCD_IDS")
+        })?;
+    let (interface, ep_in, ep_out) = bulk_endpoints(derive_bulk_pair(fingerprint)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "bulk route missing same-interface bulk IN+OUT pair for {vid:04x}:{pid:04x}"
+        )
+    })?;
+    Ok(DiscoveredDevice {
+        vid,
+        pid,
+        protocol,
+        serial: None,
+        path: DevicePath::Usb {
+            bus,
+            address,
+            interface,
+            ep_in,
+            ep_out,
+        },
+    })
+}
+
 fn read_fingerprint<T: rusb::UsbContext>(
     device: &rusb::Device<T>,
     bus: u8,
@@ -384,27 +444,32 @@ fn scan_usb(
         }
 
         let fingerprint = read_fingerprint(&device, bus, address)?;
-        let Some((iface, ep_in, ep_out)) = bulk_endpoints(derive_bulk_pair(&fingerprint)) else {
-            bail!(unsupported_known_shape_message(
-                vid,
-                pid,
-                protocol.as_str(),
-                &fingerprint
-            ));
-        };
-        out.push(DiscoveredDevice {
-            vid,
-            pid,
-            protocol,
-            serial: None,
-            path: DevicePath::Usb {
-                bus,
-                address,
-                interface: iface,
-                ep_in,
-                ep_out,
-            },
-        });
+        match usb_bulk_discovery_outcome(protocol, &fingerprint) {
+            UsbBulkDiscoveryOutcome::Endpoints(iface, ep_in, ep_out) => {
+                out.push(DiscoveredDevice {
+                    vid,
+                    pid,
+                    protocol,
+                    serial: None,
+                    path: DevicePath::Usb {
+                        bus,
+                        address,
+                        interface: iface,
+                        ep_in,
+                        ep_out,
+                    },
+                });
+            }
+            UsbBulkDiscoveryOutcome::SkipHidInterruptOnly => continue,
+            UsbBulkDiscoveryOutcome::Unsupported => {
+                bail!(unsupported_known_shape_message(
+                    vid,
+                    pid,
+                    protocol.as_str(),
+                    &fingerprint
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1494,5 +1559,94 @@ mod tests {
         assert!(belongs_to_usb_ancestor(&first, same));
         assert!(!belongs_to_usb_ancestor(&first, second));
         assert!(!belongs_to_usb_ancestor(&first, unknown_path));
+    }
+
+    fn hid2_interrupt_only_fingerprint() -> UsbFingerprint {
+        UsbFingerprint {
+            vid: 0x0416,
+            pid: 0x5302,
+            bcd_device: "4.07".to_string(),
+            interfaces: vec![UsbInterfaceShape {
+                number: 0,
+                alternate_setting: 0,
+                class: 3,
+                subclass: 0,
+                protocol: 0,
+                endpoints: vec![UsbEndpointCapability {
+                    address: 0x81,
+                    direction: UsbDirection::In,
+                    transfer: UsbTransferKind::Interrupt,
+                    max_packet_size: 8,
+                    interval: 1,
+                }],
+            }],
+        }
+    }
+
+    fn bulk_peer_fingerprint() -> UsbFingerprint {
+        UsbFingerprint {
+            vid: 0x87ad,
+            pid: 0x70db,
+            bcd_device: "1.00".to_string(),
+            interfaces: vec![UsbInterfaceShape {
+                number: 1,
+                alternate_setting: 0,
+                class: 0xff,
+                subclass: 0,
+                protocol: 0,
+                endpoints: vec![
+                    UsbEndpointCapability {
+                        address: 0x81,
+                        direction: UsbDirection::In,
+                        transfer: UsbTransferKind::Bulk,
+                        max_packet_size: 512,
+                        interval: 0,
+                    },
+                    UsbEndpointCapability {
+                        address: 0x02,
+                        direction: UsbDirection::Out,
+                        transfer: UsbTransferKind::Bulk,
+                        max_packet_size: 512,
+                        interval: 0,
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn usb_bulk_discovery_skips_hid2_interrupt_only_shape() {
+        let fp = hid2_interrupt_only_fingerprint();
+        assert_eq!(
+            usb_bulk_discovery_outcome(WireProtocol::HidType2, &fp),
+            UsbBulkDiscoveryOutcome::SkipHidInterruptOnly
+        );
+    }
+
+    #[test]
+    fn usb_bulk_discovery_returns_bulk_endpoints_for_peer_display() {
+        let fp = bulk_peer_fingerprint();
+        assert_eq!(
+            usb_bulk_discovery_outcome(WireProtocol::Bulk, &fp),
+            UsbBulkDiscoveryOutcome::Endpoints(1, 0x81, 0x02)
+        );
+    }
+
+    #[test]
+    fn discovered_bulk_from_fingerprint_builds_usb_path_without_scan() {
+        let fp = bulk_peer_fingerprint();
+        let device =
+            discovered_bulk_from_fingerprint(0x87ad, 0x70db, 3, 21, &fp).expect("bulk device");
+        assert_eq!(device.protocol, WireProtocol::Bulk);
+        assert_eq!(
+            device.path,
+            DevicePath::Usb {
+                bus: 3,
+                address: 21,
+                interface: 1,
+                ep_in: 0x81,
+                ep_out: 0x02,
+            }
+        );
     }
 }
