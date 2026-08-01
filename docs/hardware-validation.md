@@ -2,7 +2,7 @@
 
 Guided `thermalwriter validate-device` runs collect shareable evidence for one connected LCD. Use them to exercise the validation pipeline safely before promoting a hardware fingerprint to **Tested** in the README.
 
-Passive mode (`--passive`) inventories USB descriptors and correlates hidraw without opening the device for handshake or frame output. Active mode (default when `--passive` is omitted) stops the user daemon when needed, negotiates the profile, sends deterministic test cards, runs an interactive visual checklist, soaks, and reconnects.
+**Active mode is the default** (omit `--passive`). Active runs stop the user daemon when needed, negotiate the profile, send deterministic test cards, run an interactive visual checklist, soak, reconnect, and restore the daemon. **Passive mode** (`--passive`) inventories USB descriptors and correlates hidraw without opening the device for handshake or frame output.
 
 Build from source with default features (`daemon` is on by default). Release tarballs ship the same binary.
 
@@ -29,15 +29,16 @@ Only a maintainer-reviewed **pass** report moves a row from Likely/Untested to T
 ## Command reference
 
 ```text
-Guided hardware validation for a connected LCD (passive preflight today)
+Guided hardware validation for a connected LCD (active pass by default)
 
 Usage: thermalwriter validate-device [OPTIONS] --device <DEVICE>
 
 Options:
       --device <DEVICE>            VID:PID e.g. 0416:5302
       --bus-address <BUS_ADDRESS>  Required when duplicate VID:PIDs; always converted internally to explicit bus/address
-      --passive
+      --passive                    Read-only USB/hidraw inventory and descriptor capture (no handshake or frames)
       --output <OUTPUT>            [default: validation-results]
+  -h, --help                       Print help
 ```
 
 Examples:
@@ -74,7 +75,7 @@ Run these in order when bringing up a new HID Type 2 unit (for example Trofeo Vi
    cargo run -- validate-device --device 87ad:70db
    ```
 
-   Confirms the validator, daemon stop/restore, cards, soak, and reconnect path on a profile that already delivers frames.
+   Confirms the validator, daemon stop/restore, cards, soak, reconnect, and report path on a profile that already delivers frames. A maintainer-reviewed pass for local `87ad:70db` (bulk, PM4/SUB5, bcdDevice 4.07) is recorded under `validation-results/` — see README **Tested**.
 
 3. **Active pass on the new unit** — only after reviewing bundles from (1) and (2):
 
@@ -82,9 +83,49 @@ Run these in order when bringing up a new HID Type 2 unit (for example Trofeo Vi
    cargo run -- validate-device --device 0416:5302
    ```
 
-   Do not skip (1) or (2) because an active run performs real USB I/O and holds the device for several minutes.
+   Do not skip (1) or (2) because an active run performs real USB I/O and holds the device for several minutes. **Next gate:** active `0416:5302` with default 300 s soak (Tasks #23 → #21).
 
 For bulk-only IDs (for example `87ad:70db`), step 1 is optional when you already know the descriptor shape; step 2 is still the primary regression.
+
+## Operator stages
+
+Active validation prints unmistakable stage banners. Know what each one means before you start — total wall time is often **well over five minutes**.
+
+| Stage banner | What happens |
+| --- | --- |
+| *(preflight)* | Passive inventory, device selection, hidraw correlation, allowlist — same checks as `--passive`, even in active mode |
+| *(acquisition)* | Exclusive ownership: scan for open handles, stop `thermalwriter.service` if it was active |
+| *(negotiation)* | Handshake / profile negotiation; records PM/SUB in the report (never assume them beforehand) |
+| `=== Stage: visual cards ===` | Three test cards, one at a time. Each card is **held on the LCD** (re-sent every 200 ms) until you answer **y/n**. Answer only about the **selected** cooler. |
+| *(second display)* | If another supported LCD was attached at start, you are asked whether the **other** display stayed unchanged while the last card keeps streaming |
+| `=== Stage: soak (N seconds, keeps last card on screen) ===` | **Not idle time** — the validator keeps sending the last (colors) card at ~5 FPS for **N** seconds to prove sustained output. Progress prints every 30 s. Default **N = 300** (five minutes); override with `THERMALWRITER_VALIDATE_SOAK_SECS`. |
+| `=== Stage: reconnect ===` | Unplug and replug the USB cable when prompted; the validator re-scans and resolves the new bus/address |
+| `=== Stage: restore daemon ===` | Restarts `thermalwriter.service` only if it was active before acquisition |
+| `=== Stage: write report ===` | Serializes `report.toml` and finalizes the bundle |
+| `Done: <path>` | Bundle directory (gitignored locally by default) |
+
+Failed or aborted runs still print restore and write-report stages when possible, so you always get a triage artifact.
+
+### Visual test cards
+
+Each card has a matching `expected-*.png` in the output bundle (open with `xdg-open` when the prompt prints the path).
+
+| Card | What you should see on the **selected** LCD |
+| --- | --- |
+| **Target marker** | Dark gray background, white top bar, run ID + VID:PID text (e.g. `RUN1 87AD:70DB`), magenta rectangle in the middle |
+| **Orientation** | Dark gray background, white **TOP** bar at the top, colored corner squares (top-left red, top-right green, bottom-left blue, bottom-right yellow) |
+| **Colors** | Six blocks — top row red, green, blue; bottom row white, black, mid-gray |
+
+The validator encodes cards through the same production frame path as the daemon (including rotation and JPEG quality from config).
+
+### Dual-display setups
+
+Bulk validation on `87ad:70db` works with a peer HID cooler (for example local `0416:5302`) still attached. The validator snapshots peer identities at start and:
+
+- Asks whether the **other** display stayed unchanged after the three cards
+- Aborts with `result = "aborted"` if peer identity changes after reconnect
+
+Target the run with `--device` (and `--bus-address` when duplicates exist). Do not unplug the second display unless you are sure it is not a supported LCD on the bus.
 
 ## Passive mode
 
@@ -99,21 +140,27 @@ Passive validation:
 
 HID interrupt **IN-only** descriptors are valid. A missing interrupt OUT endpoint in the USB descriptor does **not** block passive allowlist entry for the `0416:5302 / bcdDevice 4.07` HID-in shape.
 
+**Local `0416:5302` (bcdDevice 4.07)** — passive inventory observed HID IF0 with IN `0x83` (mps 8) and OUT `0x02` (mps 512), hidraw correlated, pre-handshake policy `hid407_read_only_probe`. **Do not document or assume PM/SUB** for this unit until an active run negotiates them.
+
 ## Active mode
 
-Active validation runs the full state machine:
+Active validation runs the full state machine summarized in [Operator stages](#operator-stages):
 
 1. Passive preflight stages (inventory, selection, hidraw correlation, allowlist)
 2. **Exclusive ownership** — see [Daemon and device ownership](#daemon-and-device-ownership)
 3. **Handshake / negotiation** — protocol-specific; records negotiated PM/SUB in the report (never assume them beforehand)
 4. **Conservative stop** when negotiation does not authorize active writes (see [Type 2 `4.07` policy](#type-2-bcddevice-407-policy))
-5. **Test cards** — three encoded frames plus expected PNG previews
-6. **Interactive prompts** — target marker, second-display check, orientation, colors
-7. **Soak** — default 300 s (~5 min) at ~5 FPS with a looping frame
+5. **Test cards** — three encoded frames plus expected PNG previews (see [Visual test cards](#visual-test-cards))
+6. **Interactive prompts** — each card held until y/n; optional second-display check
+7. **Soak** — default 300 s at ~5 FPS with the colors card looping on screen
 8. **Reconnect** — operator unplugs/replugs; validator resolves the new bus/address
 9. **Daemon restore** — restarts the user unit only if it was active before acquisition
 
-Active runs require a **visible terminal** for yes/no prompts and the reconnect step. Default soak is five minutes.
+Active runs require a **visible terminal** for yes/no prompts and the reconnect step.
+
+### Soak duration
+
+Soak proves the device can sustain frame output — the LCD should keep showing the colors card for the full duration. Set `THERMALWRITER_VALIDATE_SOAK_SECS` to override the default **300** seconds (for example `60` for a quicker regression retry). Shorter soaks are useful for workflow debugging but the **default gate** for promoting hardware evidence remains five minutes.
 
 ### Type 2 `bcdDevice 4.07` policy
 
@@ -173,18 +220,31 @@ Passive `--passive` runs do not use this guard.
 Each run writes a timestamped directory under `--output` (default `validation-results/`):
 
 ```text
-validation-results/0416-5302-4-07-2026-07-31T23-00-00/
+validation-results/87ad-70db-4-07-2026-08-01T03-53-07/
   report.toml          # shareable validation report (when serialization succeeds)
   descriptor.txt       # human-readable interface/endpoint summary
-  validator.log          # stage log (may contain local paths — redact before public upload)
+  validator.log        # stage log (may contain local paths — redact before public upload)
   expected-target-marker.png   # active only
   expected-orientation.png     # active only
   expected-colors.png          # active only
 ```
 
-Directory mode `0700`, files `0600`.
+Directory mode `0700`, files `0600`. Paths are operator artifacts — typically gitignored locally.
 
 ### Shareable `report.toml`
+
+Key fields (see `src/transport/validation_report.rs` for the full schema):
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Report format revision |
+| `scope` | `passive` or `full` |
+| `origin` | `physical`, `synthetic`, or `replay` |
+| `result` | `pass`, `fail`, or `aborted` (present when finalized) |
+| `stage` | Last stage reached or failure point |
+| `checks.*` | Per-check tri-state: `pass`, `fail`, `not_applicable` |
+| `negotiated` | PM/SUB, resolution, transport — from observation only |
+| `build_commit` | Git commit of the validator binary |
 
 Shareable serialization omits:
 
@@ -204,6 +264,8 @@ Review `validator.log` and `descriptor.txt` before attaching to a public issue; 
 
 Failed and aborted bundles are still valuable for triage — attach them to device reports with the stage and error fields from `report.toml`.
 
+Required checks for a full **pass** include: `handshake`, `active_write`, `target_marker`, `orientation`, `colors`, `soak`, `reconnect`, `daemon_restored`, and `second_display_unchanged` (or `not_applicable` when no peer was attached).
+
 ## Safety rules
 
 - **No USB bus reset** and **no global `usbhid` unload** — the validator does not perform these; do not run them manually during a pass.
@@ -217,6 +279,7 @@ Failed and aborted bundles are still valuable for triage — attach them to devi
 Active validation defaults to **300 seconds** of soak (`THERMALWRITER_VALIDATE_SOAK_SECS` overrides when set). Total wall time is often **well over five minutes** with prompts and reconnect.
 
 - Run in a **visible terminal** (manual session or herdr pane) so prompts and the reconnect step are answered promptly.
+- **Herdr:** start interactive validation in a focused, visible tab — agents should run `herdr tab focus` after background-start so the operator sees card prompts immediately.
 - **Agents and CI** must not block a foreground shell on these runs. Background long jobs per the long-running-jobs skill (`/home/mike/.pi/agent/skills/long-running-jobs/SKILL.md`): herdr when `HERDR_ENV=1`, otherwise tmux plus a log file.
 - Do not claim a physical pass without the operator-attested prompts and a `result = "pass"` report from that run.
 
@@ -227,6 +290,13 @@ Active validation defaults to **300 seconds** of soak (`THERMALWRITER_VALIDATE_S
 | `THERMALWRITER_VALIDATE_SOAK_SECS` | Soak duration in seconds (default `300`) for active runs |
 
 Hardware-free daemon development (`THERMALWRITER_TRANSPORT=null`) does not substitute for `validate-device`; use null transport for layout and fixture work only.
+
+## Next session (USB coverage handoff)
+
+1. **Active `validate-device --device 0416:5302`** with default 300 s soak; keep both displays attached when possible to exercise the second-display check on the HID peer.
+2. Expect a **conservative stop** if negotiation yields PM ≠ 58 / SUB ≠ 0 — the report is still valuable for classification.
+3. **Do not claim wide-panel geometry** (for example 1280×480) until negotiation records it in `report.toml`.
+4. After review, complete **Task #23** (active guided pass) then **Task #21** (final hardware classifications from reviewed reports).
 
 ## Related docs
 
