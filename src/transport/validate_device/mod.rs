@@ -154,7 +154,7 @@ where
             usb,
             hidraw,
             sysfs,
-            ActiveOptions::default(),
+            ActiveOptions::from_user_config(),
         )
     }
 

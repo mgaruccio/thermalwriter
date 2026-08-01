@@ -337,7 +337,7 @@ fn user_abort_on_reconnect_prompt() {
         &sysfs,
         FakeControl::default(),
         FakeOwnership::default(),
-        &mut ScriptedPrompt::new([true, true, true, true, false]),
+        &mut ScriptedPrompt::new([true, true, true, false]),
         ActiveOptions {
             soak_secs: 0,
             ..Default::default()
@@ -437,7 +437,7 @@ fn second_display_isolation_abort() {
         &correlated_hidraw_fs(1, 14),
         FakeControl::default(),
         FakeOwnership::default(),
-        &mut ScriptedPrompt::new([true, false]),
+        &mut ScriptedPrompt::new([true, true, true, false]),
         ActiveOptions {
             soak_secs: 0,
             ..Default::default()

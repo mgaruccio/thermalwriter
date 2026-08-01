@@ -44,6 +44,11 @@ use super::super::hid_report::SysfsAccess;
 /// Default soak duration for active validation (5 minutes).
 pub const DEFAULT_SOAK_SECS: u64 = 300;
 
+/// How many times each test card is sent before prompting the operator.
+const CARD_RESEND_COUNT: usize = 3;
+/// Pause between card resends so the panel can latch the frame.
+const CARD_HOLD_MS: u64 = 150;
+
 /// Injectable yes/no prompts (stdin in production, scripted in tests).
 pub trait Prompt {
     fn yes_no(&mut self, question: &str) -> bool;
@@ -126,8 +131,20 @@ impl Default for ActiveOptions {
                     .map(|d| d.as_secs() & 0xFFFF)
                     .unwrap_or(0)
             ),
-            rotation: 0,
+            rotation: 180,
         }
+    }
+}
+
+impl ActiveOptions {
+    /// Load rotation and JPEG quality from the user's on-disk config when available.
+    pub fn from_user_config() -> Self {
+        let mut opts = Self::default();
+        if let Ok(config) = crate::config::Config::load(&crate::config::Config::default_path()) {
+            opts.rotation = config.display.rotation;
+            opts.jpeg_quality = config.display.jpeg_quality;
+        }
+        opts
     }
 }
 
@@ -688,6 +705,98 @@ fn negotiate_bulk<Io: HidReportIo>(
     })
 }
 
+struct VisualCardStep {
+    label: &'static str,
+    stage: ValidationStage,
+    check: CheckField,
+    png_name: &'static str,
+}
+
+const VISUAL_CARD_STEPS: [VisualCardStep; 3] = [
+    VisualCardStep {
+        label: "target marker",
+        stage: ValidationStage::TargetMarker,
+        check: CheckField::TargetMarker,
+        png_name: "expected-target-marker.png",
+    },
+    VisualCardStep {
+        label: "orientation",
+        stage: ValidationStage::Orientation,
+        check: CheckField::Orientation,
+        png_name: "expected-orientation.png",
+    },
+    VisualCardStep {
+        label: "colors",
+        stage: ValidationStage::Colors,
+        check: CheckField::Colors,
+        png_name: "expected-colors.png",
+    },
+];
+
+fn send_card_with_hold<Io: HidReportIo>(
+    output: &mut ActiveOutput<Io>,
+    frame: &EncodedFrame,
+    sleep: &mut impl FnMut(Duration),
+    report: &mut HardwareValidationReport,
+    log: &mut ValidatorLog,
+) -> Result<(), ValidationStage> {
+    for attempt in 0..CARD_RESEND_COUNT {
+        output.send_encoded(frame).map_err(|error| {
+            log.info(format!("send frame error: {error:#}"));
+            let _ = report.fail_at(
+                ValidationStage::ActiveWrite,
+                &[(
+                    ValidationErrorKind::Transport,
+                    "failed to send validation frame",
+                )],
+            );
+            ValidationStage::ActiveWrite
+        })?;
+        if attempt + 1 < CARD_RESEND_COUNT {
+            sleep(Duration::from_millis(CARD_HOLD_MS));
+        }
+    }
+    Ok(())
+}
+
+fn build_card_prompt(
+    label: &str,
+    vid: u16,
+    pid: u16,
+    bundle: &TestCardBundle,
+    expected_png: &Path,
+) -> String {
+    let vid_pid = format!("{vid:04X}:{pid:04X}");
+    let abs_png = expected_png
+        .canonicalize()
+        .unwrap_or_else(|_| expected_png.to_path_buf());
+    let expected_desc = match label {
+        "target marker" => format!(
+            "dark background, white top bar, text like \"{} {}\", magenta rectangle in the middle",
+            bundle.run_id, bundle.vid_pid_label
+        ),
+        "orientation" => "dark gray background, white TOP bar at the top, colored corner markers (top-left red, top-right green, bottom-left blue, bottom-right yellow)".to_string(),
+        "colors" => "six color blocks — top row red, green, blue; bottom row white, black, mid-gray".to_string(),
+        _ => "validation test pattern".to_string(),
+    };
+    format!(
+        "CARD: {label}\n\
+        Look at the SELECTED cooler LCD only (VID:PID {vid_pid}).\n\
+        Expected: {expected_desc}.\n\
+        Reference image: {}\n\
+        Open on desktop: xdg-open \"{}\"\n\
+        Does the selected display match this card?",
+        abs_png.display(),
+        abs_png.display(),
+    )
+}
+
+fn second_display_prompt() -> String {
+    "If you have another supported cooler LCD attached, check it now.\n\
+    Is the OTHER display unchanged (still showing its normal content, not these test cards)?"
+        .to_string()
+}
+
 fn run_visual_stream_reconnect<Io, I, P>(
     vid: u16,
     pid: u16,
@@ -727,34 +836,26 @@ where
         ValidationStage::TargetMarker
     })?;
 
-    for frame in &encoded {
-        output.send_encoded(frame).map_err(|error| {
-            log.info(format!("send frame error: {error:#}"));
-            let _ = report.fail_at(
-                ValidationStage::ActiveWrite,
-                &[(
-                    ValidationErrorKind::Transport,
-                    "failed to send validation frame",
-                )],
-            );
-            ValidationStage::ActiveWrite
-        })?;
-    }
-    let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
+    let mut active_write_recorded = false;
+    for (step, frame) in VISUAL_CARD_STEPS.iter().zip(encoded.iter()) {
+        send_card_with_hold(output, frame, sleep, report, log)?;
+        if !active_write_recorded {
+            let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
+            active_write_recorded = true;
+        }
 
-    let marker_q = format!(
-        "Does the target display show marker {} {}?",
-        bundle.run_id, bundle.vid_pid_label
-    );
-    if !prompt.yes_no(&marker_q) {
-        fail_visual(report, log, ValidationStage::TargetMarker);
-        return Err(ValidationStage::TargetMarker);
+        let expected_png = output_dir.join(step.png_name);
+        let question = build_card_prompt(step.label, vid, pid, &bundle, &expected_png);
+        if !prompt.yes_no(&question) {
+            fail_visual(report, log, step.stage);
+            return Err(step.stage);
+        }
+        let _ = report.record_check(step.check, CheckStatus::Pass);
     }
-    let _ = report.record_check(CheckField::TargetMarker, CheckStatus::Pass);
 
     if peers_before.is_empty() {
         let _ = report.record_check(CheckField::SecondDisplayUnchanged, CheckStatus::NotApplicable);
-    } else if !prompt.yes_no("Is the second display unchanged?") {
+    } else if !prompt.yes_no(&second_display_prompt()) {
         fail_visual(report, log, ValidationStage::SecondDisplayUnchanged);
         return Err(ValidationStage::SecondDisplayUnchanged);
     } else {
@@ -762,23 +863,18 @@ where
             .record_check(CheckField::SecondDisplayUnchanged, CheckStatus::Pass);
     }
 
-    if !prompt.yes_no(
-        "Does the orientation card show TOP with distinct corner colors (TL red, TR green, BL blue, BR yellow)?",
-    ) {
-        fail_visual(report, log, ValidationStage::Orientation);
-        return Err(ValidationStage::Orientation);
-    }
-    let _ = report.record_check(CheckField::Orientation, CheckStatus::Pass);
-
-    if !prompt.yes_no(
-        "Does the color card show red, green, blue, white, black, and mid-gray blocks?",
-    ) {
-        fail_visual(report, log, ValidationStage::Colors);
-        return Err(ValidationStage::Colors);
-    }
-    let _ = report.record_check(CheckField::Colors, CheckStatus::Pass);
-
-    run_soak(output, &encoded, options.soak_secs, sleep, report, log)?;
+    let colors_frame = encoded.last().ok_or_else(|| {
+        log.info("soak missing colors frame".to_string());
+        ValidationStage::Soak
+    })?;
+    run_soak(
+        output,
+        std::slice::from_ref(colors_frame),
+        options.soak_secs,
+        sleep,
+        report,
+        log,
+    )?;
 
     if !prompt.yes_no("Reconnect the USB cable now, then answer yes when the display is back.") {
         let _ = report.fail_at(
