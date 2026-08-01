@@ -20,8 +20,7 @@ use super::profile::{DeviceInfo, WireProtocol, device_info_from_fixture, fixture
 use super::scsi_lcd::ScsiLcd;
 use super::usb_fingerprint::{
     DerivedBulkPair, UsbDirection, UsbFingerprint, UsbTransferKind, derive_bulk_pair,
-    derive_vendor_bulk_pair, fingerprint_from_device, hid_interrupt_in_endpoints,
-    unsupported_known_shape_message,
+    derive_vendor_bulk_pair, fingerprint_from_device, unsupported_known_shape_message,
 };
 
 /// How the user selects which LCD to open.
@@ -311,8 +310,6 @@ fn bulk_endpoints(pair: Option<DerivedBulkPair>) -> Option<(u8, u8, u8)> {
 enum UsbBulkDiscoveryOutcome {
     /// Bulk IN+OUT pair suitable for `DevicePath::Usb`.
     Endpoints(u8, u8, u8),
-    /// HID Type2 interrupt-IN only — omit from bulk scan inventory (hidraw path).
-    SkipHidInterruptOnly,
     /// No supported route for this protocol/shape.
     Unsupported,
 }
@@ -324,8 +321,13 @@ fn usb_bulk_discovery_outcome(
     if let Some(endpoints) = bulk_endpoints(derive_bulk_pair(fingerprint)) {
         return UsbBulkDiscoveryOutcome::Endpoints(endpoints.0, endpoints.1, endpoints.2);
     }
-    if protocol == WireProtocol::HidType2 && !hid_interrupt_in_endpoints(fingerprint).is_empty() {
-        return UsbBulkDiscoveryOutcome::SkipHidInterruptOnly;
+    // HID Type2 panels often expose interrupt IN/OUT instead of bulk.
+    if protocol == WireProtocol::HidType2 {
+        if let Some((iface, ep_in, ep_out)) =
+            crate::transport::usb_fingerprint::derive_hid_interrupt_pair(fingerprint)
+        {
+            return UsbBulkDiscoveryOutcome::Endpoints(iface, ep_in, ep_out);
+        }
     }
     UsbBulkDiscoveryOutcome::Unsupported
 }
@@ -459,7 +461,6 @@ fn scan_usb(
                     },
                 });
             }
-            UsbBulkDiscoveryOutcome::SkipHidInterruptOnly => continue,
             UsbBulkDiscoveryOutcome::Unsupported => {
                 bail!(unsupported_known_shape_message(
                     vid,
@@ -1760,11 +1761,12 @@ mod tests {
     }
 
     #[test]
-    fn usb_bulk_discovery_skips_hid2_interrupt_only_shape() {
+    fn usb_bulk_discovery_includes_hid2_interrupt_shape() {
         let fp = hid2_interrupt_only_fingerprint();
+        // IN-only HID Type2 is still discovered (ep_out=0 → SET_REPORT / default).
         assert_eq!(
             usb_bulk_discovery_outcome(WireProtocol::HidType2, &fp),
-            UsbBulkDiscoveryOutcome::SkipHidInterruptOnly
+            UsbBulkDiscoveryOutcome::Endpoints(0, 0x81, 0)
         );
     }
 

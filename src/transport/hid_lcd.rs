@@ -80,16 +80,31 @@ impl HidIo for UsbHidIo<'_> {
         let timeout = self
             .write_timeout
             .unwrap_or_else(|| frame_timeout(data.len()));
+        // Prefer interrupt OUT (true HID Type2); fall back to bulk for dual-shape units.
         super::bulk_usb::write_all(data, |remaining| {
-            self.handle.write_bulk(self.ep_out, remaining, timeout)
+            match self.handle.write_interrupt(self.ep_out, remaining, timeout) {
+                Ok(n) => Ok(n),
+                Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => {
+                    self.handle.write_bulk(self.ep_out, remaining, timeout)
+                }
+                Err(e) => Err(e),
+            }
         })
     }
 
     fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
         let mut data = vec![0; max_len];
-        let len = self
+        let len = match self
             .handle
-            .read_bulk(self.ep_in, &mut data, self.read_timeout)?;
+            .read_interrupt(self.ep_in, &mut data, self.read_timeout)
+        {
+            Ok(n) => n,
+            Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => {
+                self.handle
+                    .read_bulk(self.ep_in, &mut data, self.read_timeout)?
+            }
+            Err(e) => return Err(e.into()),
+        };
         data.truncate(len);
         Ok(data)
     }

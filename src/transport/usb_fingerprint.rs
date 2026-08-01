@@ -256,6 +256,40 @@ pub fn hid_interrupt_in_endpoints(fingerprint: &UsbFingerprint) -> Vec<HidInterr
         .collect()
 }
 
+/// HID-class interface with interrupt IN and optional interrupt OUT.
+///
+/// Used by discovery to open Type2 panels that speak HID reports (no bulk pair).
+/// When interrupt OUT is absent, `ep_out` is 0 (open path may use SET_REPORT).
+pub fn derive_hid_interrupt_pair(fingerprint: &UsbFingerprint) -> Option<(u8, u8, u8)> {
+    let mut best: Option<(u8, u8, u8, bool)> = None; // iface, in, out, has_out
+    for shape in fingerprint
+        .interfaces
+        .iter()
+        .filter(|shape| shape.class == USB_CLASS_HID)
+    {
+        let Some(ep_in) = shape.endpoints.iter().find(|endpoint| {
+            endpoint.transfer == UsbTransferKind::Interrupt
+                && endpoint.direction == UsbDirection::In
+        }) else {
+            continue;
+        };
+        let ep_out = shape.endpoints.iter().find(|endpoint| {
+            endpoint.transfer == UsbTransferKind::Interrupt
+                && endpoint.direction == UsbDirection::Out
+        });
+        let out_addr = ep_out.map(|e| e.address).unwrap_or(0);
+        let has_out = ep_out.is_some();
+        match best {
+            None => best = Some((shape.number, ep_in.address, out_addr, has_out)),
+            Some((_, _, _, false)) if has_out => {
+                best = Some((shape.number, ep_in.address, out_addr, has_out));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(iface, ep_in, ep_out, _)| (iface, ep_in, ep_out))
+}
+
 /// Diagnostic for a known VID:PID whose observed shape has no supported route.
 pub fn unsupported_known_shape_message(
     vid: u16,
