@@ -226,14 +226,13 @@ async fn source_build_helper(
     result_tx: tokio::sync::mpsc::Sender<SourceBuildResult>,
 ) {
     while let Some(req) = req_rx.recv().await {
-        let source: Result<Box<dyn FrameSource>, String> = Ok(Box::new(SizedMockSource {
-            width: req.width,
-            height: req.height,
-        }));
+        let (width, height) = req.canvases.first().copied().unwrap_or((480, 480));
+        let sources: Result<Vec<Box<dyn FrameSource>>, String> =
+            Ok(vec![Box::new(SizedMockSource { width, height })]);
         if result_tx
             .send(SourceBuildResult {
                 generation: req.generation,
-                source,
+                sources,
                 source_revision: 0,
                 commit: None,
             })
@@ -285,13 +284,14 @@ async fn run_mock_tick(
         outputs,
         Some(bulk_info()),
         test_connector(),
-        frame_source,
+        vec![frame_source],
+        false,
         source_build_tx,
         &mut source_result_rx,
         &mut hub,
         fps,
         85,
-        0,
+        vec![0],
         template_rx,
         bg_rx,
         &mut background_apply_rx,
@@ -543,13 +543,14 @@ async fn tick_loop_mirrors_to_two_different_display_profiles() {
             Some(outputs),
             Some(bulk_info()),
             test_connector(),
-            Box::new(MockFrameSource),
+            vec![Box::new(MockFrameSource)],
+            false,
             source_build_tx,
             &mut source_result_rx,
             &mut hub,
             30,
             85,
-            0,
+            vec![0],
             template_rx,
             bg_rx,
             &mut bg_apply_rx,
@@ -635,9 +636,9 @@ async fn tick_loop_applies_template_updates() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(TemplateTrackingSource {
+            sources: Ok(vec![Box::new(TemplateTrackingSource {
                 applied_tx: Some(template_applied_tx),
-            })),
+            })]),
             source_revision: 0,
             commit: Some(source_commit_tx),
         })
@@ -720,7 +721,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
     let _ = source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(MockFrameSource)),
+            sources: Ok(vec![Box::new(MockFrameSource)]),
             source_revision: 0,
             commit: Some(matching_commit_tx),
         })
@@ -735,7 +736,7 @@ async fn tick_loop_accepts_generation_tagged_source_swap() {
     let _ = source_result_tx
         .send(SourceBuildResult {
             generation: generation.saturating_add(99),
-            source: Ok(Box::new(MockFrameSource)),
+            sources: Ok(vec![Box::new(MockFrameSource)]),
             source_revision: 0,
             commit: Some(stale_commit_tx),
         })
@@ -779,7 +780,7 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(MockFrameSource)),
+            sources: Ok(vec![Box::new(MockFrameSource)]),
             source_revision: 1,
             commit: Some(old_commit_tx),
         })
@@ -830,9 +831,9 @@ async fn tick_loop_rejects_stale_same_generation_source_revision() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(TemplateTrackingSource {
+            sources: Ok(vec![Box::new(TemplateTrackingSource {
                 applied_tx: Some(new_template_tx),
-            })),
+            })]),
             source_revision: 2,
             commit: Some(new_commit_tx),
         })
@@ -1004,7 +1005,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(StreamingMockSource)),
+            sources: Ok(vec![Box::new(StreamingMockSource)]),
             source_revision: 0,
             commit: Some(streaming_commit_tx),
         })
@@ -1029,7 +1030,7 @@ async fn tick_loop_clears_published_frame_when_streaming_source_is_replaced() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(MockFrameSource)),
+            sources: Ok(vec![Box::new(MockFrameSource)]),
             source_revision: 0,
             commit: Some(replacement_commit_tx),
         })
@@ -1104,10 +1105,10 @@ async fn tick_loop_accepts_background_updates() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(BackgroundTrackingSource {
+            sources: Ok(vec![Box::new(BackgroundTrackingSource {
                 applied_tx: Some(seed_background_tx),
                 release_rx: None,
-            })),
+            })]),
             source_revision: 0,
             commit: Some(seed_commit_tx),
         })
@@ -1143,10 +1144,10 @@ async fn tick_loop_accepts_background_updates() {
     source_result_tx
         .send(SourceBuildResult {
             generation,
-            source: Ok(Box::new(BackgroundTrackingSource {
+            sources: Ok(vec![Box::new(BackgroundTrackingSource {
                 applied_tx: Some(replacement_background_tx),
                 release_rx: Some(replacement_release_rx),
-            })),
+            })]),
             source_revision: 0,
             commit: Some(replacement_commit_tx),
         })
@@ -1228,13 +1229,14 @@ async fn tick_loop_skips_render_when_content_fingerprint_unchanged() {
             outputs,
             Some(bulk_info()),
             test_connector(),
-            Box::new(source),
+            vec![Box::new(source)],
+            false,
             source_build_tx,
             &mut source_result_rx,
             &mut hub,
             30,
             85,
-            0,
+            vec![0],
             template_rx,
             bg_rx,
             &mut bg_apply_rx,

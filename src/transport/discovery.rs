@@ -342,14 +342,13 @@ pub fn discovered_bulk_from_fingerprint(
 ) -> Result<DiscoveredDevice> {
     let protocol = protocol_for_id(vid, pid)
         .filter(|p| *p == WireProtocol::Bulk)
-        .ok_or_else(|| {
-            anyhow::anyhow!("{vid:04x}:{pid:04x} is not a bulk LCD in KNOWN_LCD_IDS")
+        .ok_or_else(|| anyhow::anyhow!("{vid:04x}:{pid:04x} is not a bulk LCD in KNOWN_LCD_IDS"))?;
+    let (interface, ep_in, ep_out) =
+        bulk_endpoints(derive_bulk_pair(fingerprint)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "bulk route missing same-interface bulk IN+OUT pair for {vid:04x}:{pid:04x}"
+            )
         })?;
-    let (interface, ep_in, ep_out) = bulk_endpoints(derive_bulk_pair(fingerprint)).ok_or_else(|| {
-        anyhow::anyhow!(
-            "bulk route missing same-interface bulk IN+OUT pair for {vid:04x}:{pid:04x}"
-        )
-    })?;
     Ok(DiscoveredDevice {
         vid,
         pid,
@@ -653,6 +652,72 @@ pub fn select_devices(
     }
 }
 
+/// Select one device per target `VID:PID` in config order.
+///
+/// Each target consumes the first unused match in stable discovery order.
+/// Missing or exhausted matches error with the failing selector. Duplicate
+/// targets in `targets` are rejected.
+pub fn select_target_devices(
+    devices: &[DiscoveredDevice],
+    targets: &[(u16, u16)],
+) -> Result<Vec<DiscoveredDevice>> {
+    if targets.is_empty() {
+        bail!("select_target_devices requires at least one VID:PID target");
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    for &(vid, pid) in targets {
+        if !seen_targets.insert((vid, pid)) {
+            bail!(
+                "duplicate independent target {:04x}:{:04x}; use distinct VID:PIDs or display.device=\"all\" to mirror duplicates",
+                vid,
+                pid
+            );
+        }
+    }
+
+    let mut pool = devices.to_vec();
+    sort_discovered(&mut pool);
+    let mut selected = Vec::with_capacity(targets.len());
+    let mut used = vec![false; pool.len()];
+
+    for &(vid, pid) in targets {
+        let mut found = None;
+        for (idx, candidate) in pool.iter().enumerate() {
+            if used[idx] {
+                continue;
+            }
+            if candidate.vid == vid && candidate.pid == pid {
+                found = Some(idx);
+                break;
+            }
+        }
+        match found {
+            Some(idx) => {
+                used[idx] = true;
+                selected.push(pool[idx].clone());
+            }
+            None => {
+                let available = if devices.is_empty() {
+                    "none".to_string()
+                } else {
+                    devices
+                        .iter()
+                        .map(|d| d.identity())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                bail!(
+                    "no matching LCD for independent target {:04x}:{:04x} (available: {available}). \
+                     Check udev rules, cable access, and that the cooler is plugged in.",
+                    vid,
+                    pid
+                );
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Select every device matching `selector` in deterministic order.
 ///
 /// For `all`, returns all supported displays (including duplicate VID:PID units).
@@ -803,11 +868,24 @@ fn null_connected_outputs(info: DeviceInfo) -> Result<ConnectedOutputs> {
 /// Opens, handshakes, and returns a negotiated transport pair.
 pub struct TransportConnector {
     pub selector: DeviceSelector,
+    /// When set, `connect_all` opens these ordered VID:PID targets (independent mode)
+    /// instead of using `selector`.
+    pub targets: Option<Vec<(u16, u16)>>,
 }
 
 impl TransportConnector {
     pub fn new(selector: DeviceSelector) -> Self {
-        Self { selector }
+        Self {
+            selector,
+            targets: None,
+        }
+    }
+
+    pub fn with_targets(targets: Vec<(u16, u16)>) -> Self {
+        Self {
+            selector: DeviceSelector::Auto,
+            targets: Some(targets),
+        }
     }
 
     pub fn from_config_device(device: &str) -> Result<Self> {
@@ -840,6 +918,21 @@ impl TransportConnector {
     /// `auto` and `VID:PID` return a single output. Null transport and fixture
     /// fallback always yield one output.
     pub fn connect_all(&self) -> Result<ConnectedOutputs> {
+        let owned = self.targets.as_deref();
+        self.connect_all_inner(owned)
+    }
+
+    /// Open an ordered list of distinct `VID:PID` targets (independent multi-display).
+    ///
+    /// Null transport / fixture env still yield a single output (existing constraint).
+    pub fn connect_targets(&self, targets: &[(u16, u16)]) -> Result<ConnectedOutputs> {
+        if targets.is_empty() {
+            bail!("connect_targets requires at least one VID:PID");
+        }
+        self.connect_all_inner(Some(targets))
+    }
+
+    fn connect_all_inner(&self, targets: Option<&[(u16, u16)]>) -> Result<ConnectedOutputs> {
         let profile_id = std::env::var("THERMALWRITER_PROFILE")
             .ok()
             .filter(|s| !s.is_empty());
@@ -854,6 +947,12 @@ impl TransportConnector {
         );
 
         if force_null {
+            if targets.map(|t| t.len()).unwrap_or(0) > 1 {
+                bail!(
+                    "independent multi-display with null transport is not supported (got {} targets)",
+                    targets.map(|t| t.len()).unwrap_or(0)
+                );
+            }
             let info = if let Some(id) = &profile_id {
                 device_info_from_fixture(id)?
             } else {
@@ -870,30 +969,54 @@ impl TransportConnector {
         if let Some(id) = &profile_id {
             // Prefer real hardware when present. A fixture fallback is valid only
             // after a successful scan positively establishes no selector match.
-            if let Some(connected) = hardware_or_no_device(self.connect_hardware_all())? {
+            if let Some(connected) = hardware_or_no_device(self.connect_hardware_all(targets))? {
                 return Ok(connected);
+            }
+            if targets.map(|t| t.len()).unwrap_or(0) > 1 {
+                bail!(
+                    "THERMALWRITER_PROFILE fixture fallback cannot satisfy {} independent targets",
+                    targets.map(|t| t.len()).unwrap_or(0)
+                );
             }
             let info = device_info_from_fixture(id)?;
             info!("THERMALWRITER_PROFILE={id}: using fixture profile without hardware");
             return null_connected_outputs(info);
         }
 
-        self.connect_hardware_all()
+        self.connect_hardware_all(targets)
             .map_err(HardwareConnectError::into_anyhow)
     }
 
-    fn connect_hardware_all(&self) -> std::result::Result<ConnectedOutputs, HardwareConnectError> {
+    fn connect_hardware_all(
+        &self,
+        targets: Option<&[(u16, u16)]>,
+    ) -> std::result::Result<ConnectedOutputs, HardwareConnectError> {
         let devices = scan_devices().map_err(HardwareConnectError::Failed)?;
-        if !devices
-            .iter()
-            .any(|device| selector_matches(device, &self.selector))
-        {
-            let error = select_all_devices(&devices, &self.selector)
-                .expect_err("zero matching devices must produce a selection error");
-            return Err(HardwareConnectError::NoDevice(error));
-        }
-        let selected =
-            select_all_devices(&devices, &self.selector).map_err(HardwareConnectError::Failed)?;
+        let selected = if let Some(targets) = targets {
+            match select_target_devices(&devices, targets) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    // Treat total absence of any target match as NoDevice for fixture fallback.
+                    let any_match = targets
+                        .iter()
+                        .any(|(vid, pid)| devices.iter().any(|d| d.vid == *vid && d.pid == *pid));
+                    if !any_match {
+                        return Err(HardwareConnectError::NoDevice(error));
+                    }
+                    return Err(HardwareConnectError::Failed(error));
+                }
+            }
+        } else {
+            if !devices
+                .iter()
+                .any(|device| selector_matches(device, &self.selector))
+            {
+                let error = select_all_devices(&devices, &self.selector)
+                    .expect_err("zero matching devices must produce a selection error");
+                return Err(HardwareConnectError::NoDevice(error));
+            }
+            select_all_devices(&devices, &self.selector).map_err(HardwareConnectError::Failed)?
+        };
         open_all_discovered(&selected)
             .map(|outputs| ConnectedOutputs { outputs })
             .map_err(HardwareConnectError::Failed)
@@ -1375,6 +1498,28 @@ mod tests {
                 ep_out: 0x01,
             },
         }
+    }
+
+    #[test]
+    fn select_targets_binds_in_config_order() {
+        let a = sample_device(2);
+        let mut b = sample_device(3);
+        b.vid = 0x0416;
+        b.pid = 0x5302;
+        let selected = select_target_devices(
+            &[b.clone(), a.clone()],
+            &[(0x87ad, 0x70db), (0x0416, 0x5302)],
+        )
+        .expect("targets");
+        assert_eq!(selected[0].pid, 0x70db);
+        assert_eq!(selected[1].pid, 0x5302);
+    }
+
+    #[test]
+    fn select_targets_errors_when_missing() {
+        let a = sample_device(2);
+        let err = select_target_devices(&[a], &[(0x0416, 0x5302)]).unwrap_err();
+        assert!(err.to_string().contains("0416:5302"), "{err}");
     }
 
     #[test]

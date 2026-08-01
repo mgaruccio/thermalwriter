@@ -336,6 +336,11 @@ letterboxes each output to its own negotiated resolution. D-Bus `connected`,
 `resolution`, and status `resolution` describe the primary display only;
 `display_count` in `get_status` reports how many outputs are active.
 
+For **independent** content on distinct coolers, configure `[[displays]]` with
+one `VID:PID` entry per panel (layout/mode/rotation per entry). See
+[Configuration](docs/configuration.md#displays-independent-multi-display).
+D-Bus layout/mode controls still target the primary (first) entry only.
+
 When multiple connected displays have distinct USB IDs and you want a single
 display, select one with an explicit hexadecimal `VID:PID`. Two devices
 sharing the same `VID:PID` cannot be targeted individually unless you use
@@ -343,9 +348,11 @@ sharing the same `VID:PID` cannot be targeted individually unless you use
 `THERMALWRITER_TRANSPORT=null` and optionally select a negotiated fixture with
 `THERMALWRITER_PROFILE=<fixture-id>`.
 
-Independent per-screen layouts and selectors remain a planned follow-up.
-
-Mirror membership is evaluated when the group connects. Plugging in an additional screen while another is already active currently requires a daemon restart. A fatal write/disconnect resets the whole mirror group; the daemon then reconnects the displays still present, so the surviving screen may pause briefly.
+Mirror/`[[displays]]` membership is evaluated when the group connects. Plugging
+in an additional screen while another is already active currently requires a
+daemon restart. A fatal write/disconnect resets the whole group; the daemon
+then reconnects the displays still present, so the surviving screen may pause
+briefly.
 
 List native resolutions and render the visual evidence matrix:
 

@@ -111,15 +111,56 @@ Per-layout variable overrides keyed by layout filename. This table contains cust
 
 ### `display.device`
 
-Selector for the LCD. The default, `"auto"` (case-insensitive), succeeds only
-when discovery finds exactly one supported physical device. Set `"all"` to open
-every supported display in deterministic order and mirror the same layout to
-each (including duplicate `VID:PID` units). When connected devices have
-distinct IDs and you want a single display, use a hexadecimal `"VID:PID"`
-selector with optional `0x` prefixes, for example `"87ad:70db"` or
-`"0x0416:0x5408"`. Two devices sharing the same `VID:PID` cannot be targeted
-individually except via `"all"`. Unknown, absent, and ambiguous selections fail
-explicitly rather than choosing an arbitrary device. Per-screen independent
-configuration is not available in this release.
+Selector for the LCD when `[[displays]]` is empty. The default, `"auto"`
+(case-insensitive), succeeds only when discovery finds exactly one supported
+physical device. Set `"all"` to open every supported display in deterministic
+order and **mirror** the same layout/mode/rotation to each (including duplicate
+`VID:PID` units). When connected devices have distinct IDs and you want a
+single display, use a hexadecimal `"VID:PID"` selector with optional `0x`
+prefixes, for example `"87ad:70db"` or `"0x0416:0x5408"`. Two devices sharing
+the same `VID:PID` cannot be targeted individually except via `"all"`. Unknown,
+absent, and ambiguous selections fail explicitly rather than choosing an
+arbitrary device.
 
-Mirror membership is refreshed on daemon startup and after a group reconnect; hot-plugging an additional display while another remains active requires restarting the daemon. A fatal output disconnect briefly resets the group before reconnecting the displays still present.
+Mirror membership is refreshed on daemon startup and after a group reconnect;
+hot-plugging an additional display while another remains active requires
+restarting the daemon. A fatal output disconnect briefly resets the group
+before reconnecting the displays still present.
+
+### `[[displays]]` (independent multi-display)
+
+When this array is **non-empty**, it owns device selection and runs an
+independent pipeline per entry. `display.device` is ignored for connection.
+Omitted per-entry fields inherit from `[display]`.
+
+```toml
+[display]
+tick_rate = 2
+jpeg_quality = 85
+# defaults for omitted per-output fields; also the D-Bus primary control surface
+
+[[displays]]
+device = "87ad:70db"                      # required VID:PID (not auto/all)
+default_layout = "svg/neon-dash-v2.svg"   # optional
+mode = "svg"                              # optional: svg | html | xvfb
+rotation = 180                            # optional
+
+[[displays]]
+device = "0416:5302"
+default_layout = "svg/arc-gauge.svg"
+mode = "svg"
+rotation = 0
+```
+
+Rules:
+
+- Each `device` must be a concrete `VID:PID`; duplicates are rejected (use
+  `display.device = "all"` to mirror identical IDs).
+- At most one entry may use `mode = "xvfb"`.
+- Primary = first entry. D-Bus `set_layout` / `set_mode` / status scalars
+  describe the primary only; `display_count` reports how many outputs are
+  active.
+- Each output renders at its own oriented size (no cross-output letterbox).
+- Shared sensors/theme/background; fatal disconnect still resets the whole
+  group then reconnects.
+

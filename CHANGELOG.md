@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+
+- Independent multi-display via `[[displays]]`: bind distinct `VID:PID` targets with per-output layout/mode/rotation while keeping `display.device = "all"` mirror mode.
+
+### Added
 - Tracked the ordered Thermalright Trofeo Vision 6.86-inch IPS 1280×480 panel as capture-pending, with a hardware-free HID Type 2 (`0416:5302`) PM68/FBL192 profile fixture.
 - Mirrored multi-display mode via `display.device = "all"`: opens every attached supported LCD, renders once at a deterministic primary resolution, letterboxes per output, encodes for each negotiated profile, and reports `display_count` in status.
 - `thermalwriter validate-device`: guided hardware validation CLI (passive inventory preflight, active visual cards with hold-while-prompt, soak, reconnect, daemon restore, sanitized `report.toml` bundles). Documented in `docs/hardware-validation.md`.

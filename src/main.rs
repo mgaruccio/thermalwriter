@@ -39,14 +39,14 @@ async fn commit_frame_source(
     sender: &mpsc::Sender<SourceBuildResult>,
     generation: u64,
     source_revision: u64,
-    source: Box<dyn FrameSource>,
+    sources: Vec<Box<dyn FrameSource>>,
 ) -> Result<()> {
     let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
     sender
         .send(SourceBuildResult {
             generation,
             source_revision,
-            source: Ok(source),
+            sources: Ok(sources),
             commit: Some(commit_tx),
         })
         .await
@@ -212,14 +212,33 @@ async fn main() -> Result<()> {
     // Setup transport via connector. Absence of the display at daemon startup must
     // not prevent D-Bus from coming up; the tick loop rediscovers until it appears.
     // THERMALWRITER_TRANSPORT=null / THERMALWRITER_PROFILE select headless fixtures.
-    let connector =
+    let independent_outputs = if config.has_independent_displays() {
+        Some(config.resolved_display_outputs()?)
+    } else {
+        None
+    };
+    let independent = independent_outputs.is_some();
+    let connector = if let Some(ref outputs) = independent_outputs {
+        let targets: Vec<(u16, u16)> = outputs.iter().map(|o| o.usb_id()).collect();
+        info!(
+            "Independent multi-display: {} target(s): {}",
+            targets.len(),
+            outputs
+                .iter()
+                .map(|o| o.identity())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        TransportConnector::with_targets(targets)
+    } else {
         TransportConnector::from_config_device(&config.display.device).unwrap_or_else(|e| {
             warn!(
                 "Invalid display.device={:?}: {e:#}; falling back to auto",
                 config.display.device
             );
             TransportConnector::new(DeviceSelector::Auto)
-        });
+        })
+    };
     let (initial_outputs, device_info, connected, display, display_count): (
         Option<Vec<OpenedDisplay>>,
         Option<DeviceInfo>,
@@ -259,8 +278,12 @@ async fn main() -> Result<()> {
     const INTERNAL_CANVAS_W: u32 = 480;
     const INTERNAL_CANVAS_H: u32 = 480;
     // Internal authoring canvas when disconnected; never published on D-Bus as connected dims.
+    let primary_rotation = independent_outputs
+        .as_ref()
+        .and_then(|o| o.first().map(|x| x.rotation))
+        .unwrap_or(config.display.rotation);
     let source_display = if let Some(info) = device_info.as_ref() {
-        let (width, height) = info.oriented_dimensions(config.display.rotation)?;
+        let (width, height) = info.oriented_dimensions(primary_rotation)?;
         RuntimeDisplayDimensions::new(width, height)
     } else {
         RuntimeDisplayDimensions::new(INTERNAL_CANVAS_W, INTERNAL_CANVAS_H)
@@ -319,7 +342,7 @@ async fn main() -> Result<()> {
     let initial_sensor_history: Option<Arc<std::sync::Mutex<SensorHistory>>> =
         Some(Arc::new(std::sync::Mutex::new(SensorHistory::new())));
     let (initial_frame_source, initial_xvfb_handle, active_tick_rate, resolved_active_layout) =
-        if config.display.mode == "xvfb" {
+        if !independent && config.display.mode == "xvfb" {
             if config.xvfb.command.is_empty() {
                 anyhow::bail!("xvfb mode requires [xvfb] command in config");
             }
@@ -415,6 +438,166 @@ async fn main() -> Result<()> {
             (boxed, None, config.display.tick_rate, resolved_layout)
         };
 
+    // Expand to per-output sources for independent multi-display.
+    let mut initial_frame_sources: Vec<Box<dyn FrameSource>> = vec![initial_frame_source];
+    let mut independent_layout_specs: Vec<(
+        String,
+        String,
+        std::collections::HashMap<String, String>,
+    )> = Vec::new();
+    let tick_rotations: Vec<u16>;
+    let (initial_xvfb_handle, active_tick_rate, resolved_active_layout) =
+        if let Some(specs) = independent_outputs.as_ref() {
+            independent_layout_specs = specs
+                .iter()
+                .map(|spec| {
+                    let vars = config
+                        .layout_vars
+                        .get(&spec.default_layout)
+                        .cloned()
+                        .unwrap_or_default();
+                    (spec.mode.clone(), spec.default_layout.clone(), vars)
+                })
+                .collect();
+            tick_rotations = specs.iter().map(|s| s.rotation).collect();
+
+            let theme_palette: ThemePalette = config
+                .theme
+                .resolve_palette()
+                .map_err(|e| anyhow::anyhow!("invalid theme configuration: {e}"))?;
+
+            let mut sources: Vec<Box<dyn FrameSource>> = Vec::with_capacity(specs.len());
+            let mut xvfb_handle = None;
+            let mut union_needed: HashSet<String> = HashSet::new();
+            let known: HashSet<String> = sensor_hub
+                .available_sensors()
+                .into_iter()
+                .map(|d| d.key)
+                .collect();
+            let declared: HashSet<String> = sensor_hub.declared_keys();
+
+            for (idx, spec) in specs.iter().enumerate() {
+                let dims = if let Some(outputs) = initial_outputs.as_ref() {
+                    let info = &outputs
+                        .get(idx)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "independent connect returned fewer outputs than configured targets"
+                            )
+                        })?
+                        .info;
+                    let (w, h) = info.oriented_dimensions(spec.rotation)?;
+                    RuntimeDisplayDimensions::new(w, h)
+                } else {
+                    RuntimeDisplayDimensions::new(INTERNAL_CANVAS_W, INTERNAL_CANVAS_H)
+                };
+
+                if spec.mode == "xvfb" {
+                    if idx != 0 {
+                        anyhow::bail!("only displays[0] may use mode=\"xvfb\"");
+                    }
+                    if config.xvfb.command.is_empty() {
+                        anyhow::bail!("xvfb mode requires [xvfb] command in config");
+                    }
+                    let (handle, source) = dims.start_xvfb_shell(&config.xvfb.command)?;
+                    xvfb_handle = Some(handle);
+                    sources.push(Box::new(source));
+                    continue;
+                }
+
+                let layout_path = layout_dir.join(&spec.default_layout);
+                let on_disk = if layout_path.exists() {
+                    Some(std::fs::read_to_string(&layout_path)?)
+                } else {
+                    None
+                };
+                let (resolved_layout, template) =
+                    builtin_layouts::resolve_layout_identity(&spec.default_layout, on_disk);
+                let frontmatter = LayoutFrontmatter::parse(&template);
+                if let Some(ref hist) = initial_sensor_history
+                    && let Ok(mut h) = hist.lock()
+                {
+                    for (metric, cfg) in &frontmatter.history_configs {
+                        h.configure_metric(metric, cfg.duration);
+                    }
+                }
+                let layout_vars = config
+                    .layout_vars
+                    .get(&resolved_layout)
+                    .cloned()
+                    .unwrap_or_default();
+                let needed =
+                    layout_needed_keys(&frontmatter, &layout_vars, &template, &known, &declared);
+                union_needed.extend(needed);
+
+                let source = dims.build_layout_source(
+                    // build from temp file path equivalent: use mode_handler via path
+                    &layout_dir.join(&resolved_layout),
+                    layout_vars,
+                    initial_background.clone(),
+                    initial_sensor_history.clone(),
+                    theme_palette.clone(),
+                );
+                let source = match source {
+                    Ok(s) => s,
+                    Err(_) => {
+                        // Layout may only exist as builtin content — write through identity path.
+                        // Fall back to constructing via temporary content already resolved:
+                        let is_svg = resolved_layout.ends_with(".svg");
+                        if is_svg {
+                            let mut renderer =
+                                SvgRenderer::new(&template, dims.width(), dims.height())?;
+                            if let Some(ref hist) = initial_sensor_history {
+                                renderer.set_history(hist.clone());
+                            }
+                            renderer.set_theme(theme_palette.clone());
+                            renderer.set_layout_vars(
+                                config
+                                    .layout_vars
+                                    .get(&resolved_layout)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            );
+                            let _ = renderer.set_background(initial_background.clone());
+                            Box::new(renderer) as Box<dyn FrameSource>
+                        } else {
+                            let mut renderer =
+                                TemplateRenderer::new(&template, dims.width(), dims.height())?;
+                            renderer.set_layout_vars(
+                                config
+                                    .layout_vars
+                                    .get(&resolved_layout)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            );
+                            Box::new(renderer)
+                        }
+                    }
+                };
+                sources.push(source);
+            }
+
+            if !union_needed.is_empty() {
+                let _ = needed_tx.send(Some(union_needed));
+            }
+            // Primary layout identity for D-Bus.
+            let primary_layout = specs[0].default_layout.clone();
+            let tick_rate = if specs.iter().any(|s| s.mode == "xvfb") {
+                xvfb_tick_rate
+            } else {
+                config.display.tick_rate
+            };
+            initial_frame_sources = sources;
+            (xvfb_handle, tick_rate, primary_layout)
+        } else {
+            tick_rotations = vec![config.display.rotation];
+            (
+                initial_xvfb_handle,
+                active_tick_rate,
+                resolved_active_layout,
+            )
+        };
+
     // Shared state for D-Bus ↔ tick loop communication
     let state = Arc::new(Mutex::new(ServiceState {
         active_layout: resolved_active_layout.clone(),
@@ -495,7 +678,10 @@ async fn main() -> Result<()> {
     let mut display_rx = display_tx.subscribe();
     let mut generation_rx_listener = generation_rx.clone();
     let source_revision_tx_listener = source_revision_tx.clone();
-    let initial_mode = config.display.mode.clone();
+    let initial_mode = independent_outputs
+        .as_ref()
+        .and_then(|s| s.first().map(|o| o.mode.clone()))
+        .unwrap_or_else(|| config.display.mode.clone());
     let initial_active_layout = resolved_active_layout;
     let initial_layout_vars = config
         .layout_vars
@@ -506,9 +692,12 @@ async fn main() -> Result<()> {
     let initial_xvfb_command = (config.display.mode == "xvfb").then(|| config.xvfb.command.clone());
     let needed_tx_listener = needed_tx.clone();
     let sensor_descriptors_listener = Arc::clone(&sensor_descriptors);
+    let mut independent_layout_specs = independent_layout_specs;
     tokio::spawn(async move {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
+        // (mode, layout, vars) per independent output; empty in single/mirror mode.
+        let mut independent_layout_specs = independent_layout_specs;
         // Tracks the active background so layout switches preserve it.
         let mut current_background: Option<Arc<BackgroundImage>> = initial_background;
         let mut current_display = source_display;
@@ -525,73 +714,101 @@ async fn main() -> Result<()> {
                 // Generation-tagged rebuild requests from the tick loop (reconnect path).
                 req = source_build_rx.recv() => {
                     let Some(req) = req else { break; };
-                    let dims = RuntimeDisplayDimensions::new(req.width, req.height);
-                    let result = if active_mode == "xvfb" {
-                        if let Some(argv) = active_xvfb_argv.clone() {
-                            match dims.start_xvfb_argv(&argv) {
-                                Ok((new_handle, source)) => {
-                                    if let Some(h) = xvfb_handle.take() {
-                                        drop(h);
+                    let result = (|| {
+                        let mut built: Vec<Box<dyn FrameSource>> = Vec::with_capacity(req.canvases.len());
+                        for (idx, (width, height)) in req.canvases.iter().copied().enumerate() {
+                            let dims = RuntimeDisplayDimensions::new(width, height);
+                            // Independent secondary outputs use stored per-output layout specs when present.
+                            let (mode, layout_name, layout_vars) = if idx == 0 {
+                                (active_mode.as_str(), active_layout.as_str(), active_layout_vars.clone())
+                            } else if let Some(spec) = independent_layout_specs.get(idx) {
+                                (spec.0.as_str(), spec.1.as_str(), spec.2.clone())
+                            } else {
+                                (active_mode.as_str(), active_layout.as_str(), active_layout_vars.clone())
+                            };
+
+                            if mode == "xvfb" {
+                                if idx != 0 {
+                                    return Err("only the primary output may use xvfb mode".into());
+                                }
+                                if let Some(argv) = active_xvfb_argv.clone() {
+                                    match dims.start_xvfb_argv(&argv) {
+                                        Ok((new_handle, source)) => {
+                                            if let Some(h) = xvfb_handle.take() {
+                                                drop(h);
+                                            }
+                                            xvfb_handle = Some(new_handle);
+                                            current_display = dims;
+                                            built.push(Box::new(source));
+                                        }
+                                        Err(e) => return Err(format!("xvfb argv rebuild failed: {e:#}")),
                                     }
-                                    xvfb_handle = Some(new_handle);
-                                    current_display = dims;
-                                    Ok(Box::new(source) as Box<dyn FrameSource>)
-                                }
-                                Err(e) => Err(format!("xvfb argv rebuild failed: {e:#}")),
-                            }
-                        } else if let Some(command) = active_xvfb_shell.clone() {
-                            match dims.start_xvfb_shell(&command) {
-                                Ok((new_handle, source)) => {
-                                    if let Some(h) = xvfb_handle.take() {
-                                        drop(h);
+                                } else if let Some(command) = active_xvfb_shell.clone() {
+                                    match dims.start_xvfb_shell(&command) {
+                                        Ok((new_handle, source)) => {
+                                            if let Some(h) = xvfb_handle.take() {
+                                                drop(h);
+                                            }
+                                            xvfb_handle = Some(new_handle);
+                                            current_display = dims;
+                                            built.push(Box::new(source));
+                                        }
+                                        Err(e) => return Err(format!("xvfb shell rebuild failed: {e:#}")),
                                     }
-                                    xvfb_handle = Some(new_handle);
-                                    current_display = dims;
-                                    Ok(Box::new(source) as Box<dyn FrameSource>)
+                                } else {
+                                    return Err("xvfb mode has no tracked stream command".into());
                                 }
-                                Err(e) => Err(format!("xvfb shell rebuild failed: {e:#}")),
-                            }
-                        } else {
-                            Err("xvfb mode has no tracked stream command".into())
-                        }
-                    } else {
-                        let layout_path = layout_dir_clone.join(&active_layout);
-                        match dims.build_layout_source(
-                            &layout_path,
-                            active_layout_vars.clone(),
-                            current_background.clone(),
-                            reload_history.clone(),
-                            reload_theme.clone(),
-                        ) {
-                            Ok(source) => {
-                                if let Some(h) = xvfb_handle.take() {
-                                    drop(h);
+                            } else {
+                                let layout_path = layout_dir_clone.join(layout_name);
+                                match dims.build_layout_source(
+                                    &layout_path,
+                                    layout_vars,
+                                    current_background.clone(),
+                                    reload_history.clone(),
+                                    reload_theme.clone(),
+                                ) {
+                                    Ok(source) => {
+                                        if idx == 0 {
+                                            if let Some(h) = xvfb_handle.take() {
+                                                drop(h);
+                                            }
+                                            current_display = dims;
+                                        }
+                                        built.push(source);
+                                    }
+                                    Err(e) => {
+                                        return Err(format!(
+                                            "layout rebuild for '{layout_name}' failed: {e:#}"
+                                        ));
+                                    }
                                 }
-                                current_display = dims;
-                                Ok(source)
                             }
-                            Err(e) => Err(format!(
-                                "layout rebuild for '{}' failed: {e:#}",
-                                active_layout
-                            )),
                         }
-                    };
-                    if result.is_ok() {
-                        info!(
-                            "Built source for generation {} at {}x{}",
-                            req.generation, req.width, req.height
-                        );
-                    } else if let Err(ref e) = result {
-                        log::warn!(
-                            "Source build for generation {} failed: {e}",
-                            req.generation
-                        );
+                        Ok(built)
+                    })();
+                    match &result {
+                        Ok(sources) => {
+                            let (w, h) = req.canvases.first().copied().unwrap_or((0, 0));
+                            info!(
+                                "Built {} source(s) for generation {} (primary {}x{})",
+                                sources.len(),
+                                req.generation,
+                                w,
+                                h
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Source build for generation {} failed: {e}",
+                                req.generation
+                            );
+                        }
                     }
                     if source_result_tx
                         .send(SourceBuildResult {
                             generation: req.generation,
                             source_revision,
-                            source: result,
+                            sources: result,
                             commit: None,
                         })
                         .await
@@ -690,7 +907,7 @@ async fn main() -> Result<()> {
                                         &source_result_tx,
                                         generation,
                                         source_revision,
-                                        new_source,
+                                        vec![new_source],
                                     )
                                     .await
                                     {
@@ -708,6 +925,11 @@ async fn main() -> Result<()> {
                                         "svg".to_string()
                                     };
                                     active_layout = name.clone();
+                                    if let Some(spec) = independent_layout_specs.get_mut(0) {
+                                        spec.0 = active_mode.clone();
+                                        spec.1 = name.clone();
+                                        spec.2 = vars.clone();
+                                    }
                                     send_layout_needed_keys(
                                         &layout_path,
                                         &vars,
@@ -803,7 +1025,7 @@ async fn main() -> Result<()> {
                                         &source_result_tx,
                                         generation,
                                         source_revision,
-                                        Box::new(source),
+                                        vec![Box::new(source)],
                                     )
                                     .await
                                     {
@@ -866,7 +1088,7 @@ async fn main() -> Result<()> {
                                         &source_result_tx,
                                         generation,
                                         source_revision,
-                                        Box::new(source),
+                                        vec![Box::new(source)],
                                     )
                                     .await
                                     {
@@ -905,7 +1127,6 @@ async fn main() -> Result<()> {
 
     // Run tick loop — blocks until shutdown signal or process signal
     let jpeg_quality = state.lock().await.jpeg_quality;
-    let rotation = config.display.rotation;
     let sensor_poll_interval = Duration::from_millis(config.sensors.poll_interval_ms);
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -916,13 +1137,14 @@ async fn main() -> Result<()> {
             initial_outputs,
             device_info,
             connector,
-            initial_frame_source,
+            initial_frame_sources,
+            independent,
             source_build_tx,
             &mut source_result_rx,
             &mut sensor_hub,
             active_tick_rate,
             jpeg_quality,
-            rotation,
+            tick_rotations,
             template_rx,
             background_rx,
             &mut background_apply_rx,

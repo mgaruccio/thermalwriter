@@ -16,9 +16,18 @@ fn parse_device_selector(s: &str) -> Result<(), String> {
     if s.eq_ignore_ascii_case("auto") || s.eq_ignore_ascii_case("all") {
         return Ok(());
     }
+    parse_usb_id(s).map(|_| ())
+}
+
+/// Parse a concrete `VID:PID` (hex, optional `0x`). Rejects `auto`/`all`.
+pub fn parse_usb_id(s: &str) -> Result<(u16, u16), String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") || s.eq_ignore_ascii_case("all") {
+        return Err(format!("must be 'VID:PID', got {s:?}"));
+    }
     let (vid_s, pid_s) = s
         .split_once(':')
-        .ok_or_else(|| format!("must be 'auto', 'all', or 'VID:PID', got {s:?}"))?;
+        .ok_or_else(|| format!("must be 'VID:PID', got {s:?}"))?;
     let parse = |part: &str| -> Result<u16, String> {
         let part = part
             .trim()
@@ -26,8 +35,30 @@ fn parse_device_selector(s: &str) -> Result<(), String> {
             .trim_start_matches("0X");
         u16::from_str_radix(part, 16).map_err(|_| format!("not a hex u16: {part:?}"))
     };
-    parse(vid_s)?;
-    parse(pid_s)?;
+    Ok((parse(vid_s)?, parse(pid_s)?))
+}
+
+fn validate_mode_layout(label: &str, mode: &str, default_layout: &str) -> Result<()> {
+    match mode {
+        "svg" => {
+            if !default_layout.ends_with(".svg") {
+                anyhow::bail!(
+                    "{label}.default_layout='{default_layout}' must end with .svg when {label}.mode is svg"
+                );
+            }
+        }
+        "html" => {
+            if !(default_layout.ends_with(".html") || default_layout.ends_with(".htm")) {
+                anyhow::bail!(
+                    "{label}.default_layout='{default_layout}' must end with .html/.htm when {label}.mode is html"
+                );
+            }
+        }
+        "xvfb" => {}
+        other => {
+            anyhow::bail!("{label}.mode='{other}' must be one of svg, html, xvfb")
+        }
+    }
     Ok(())
 }
 
@@ -71,6 +102,41 @@ impl Default for DisplayConfig {
             mode: "svg".to_string(),
             device: "auto".to_string(),
         }
+    }
+}
+
+/// One independently configured LCD target (`[[displays]]` entry).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DisplayOutputConfig {
+    /// Required `VID:PID` when `[[displays]]` is non-empty.
+    pub device: String,
+    /// Layout filename; defaults to `[display].default_layout` when omitted.
+    pub default_layout: Option<String>,
+    /// `svg`, `html`, or `xvfb`; defaults to `[display].mode` when omitted.
+    pub mode: Option<String>,
+    /// Degrees; defaults to `[display].rotation` when omitted.
+    pub rotation: Option<u16>,
+}
+
+/// Fully resolved independent output used by discovery and the tick loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDisplayOutput {
+    pub vid: u16,
+    pub pid: u16,
+    pub default_layout: String,
+    pub mode: String,
+    pub rotation: u16,
+    pub jpeg_quality: u8,
+}
+
+impl ResolvedDisplayOutput {
+    pub fn usb_id(&self) -> (u16, u16) {
+        (self.vid, self.pid)
+    }
+
+    pub fn identity(&self) -> String {
+        format!("{:04x}:{:04x}", self.vid, self.pid)
     }
 }
 
@@ -154,6 +220,10 @@ pub struct Config {
     /// Per-layout variable overrides keyed by layout filename.
     /// The outer map is `{layout_name: {var_name: value}}`.
     pub layout_vars: HashMap<String, HashMap<String, String>>,
+    /// Independent multi-display targets. When non-empty, overrides
+    /// `display.device` selection and runs one pipeline per entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displays: Vec<DisplayOutputConfig>,
 }
 
 impl Config {
@@ -209,33 +279,80 @@ impl Config {
                 self.xvfb.tick_rate
             );
         }
-        match self.display.mode.as_str() {
-            "svg" => {
-                if !self.display.default_layout.ends_with(".svg") {
-                    anyhow::bail!(
-                        "display.default_layout='{}' must end with .svg when display.mode is svg",
-                        self.display.default_layout
-                    );
-                }
-            }
-            "html" => {
-                if !(self.display.default_layout.ends_with(".html")
-                    || self.display.default_layout.ends_with(".htm"))
-                {
-                    anyhow::bail!(
-                        "display.default_layout='{}' must end with .html/.htm when display.mode is html",
-                        self.display.default_layout
-                    );
-                }
-            }
-            "xvfb" => {}
-            other => {
-                anyhow::bail!("display.mode='{other}' must be one of svg, html, xvfb")
-            }
+        validate_mode_layout("display", &self.display.mode, &self.display.default_layout)?;
+        if self.has_independent_displays() {
+            // Ensure independent entries resolve cleanly (duplicates, modes, etc.).
+            let _ = self.resolved_display_outputs()?;
         }
         // Validate theme.source the same way resolve_palette does.
         let _ = self.theme.resolve_palette()?;
         Ok(())
+    }
+
+    /// True when `[[displays]]` is non-empty (independent multi-output mode).
+    pub fn has_independent_displays(&self) -> bool {
+        !self.displays.is_empty()
+    }
+
+    /// Resolve `[[displays]]` against `[display]` defaults.
+    ///
+    /// Errors if the list is empty or any entry is invalid. Callers should
+    /// check [`Self::has_independent_displays`] first for the single/mirror path.
+    pub fn resolved_display_outputs(&self) -> Result<Vec<ResolvedDisplayOutput>> {
+        if self.displays.is_empty() {
+            anyhow::bail!("resolved_display_outputs requires a non-empty [[displays]] list");
+        }
+        let mut out = Vec::with_capacity(self.displays.len());
+        let mut seen = std::collections::HashSet::new();
+        let mut xvfb_count = 0usize;
+        for (index, entry) in self.displays.iter().enumerate() {
+            let label = format!("displays[{index}]");
+            if entry.device.trim().is_empty() {
+                anyhow::bail!("{label}.device is required (VID:PID)");
+            }
+            let (vid, pid) = parse_usb_id(&entry.device).map_err(|e| {
+                anyhow::anyhow!(
+                    "{label}.device invalid: {e} (independent outputs require concrete VID:PID, not auto/all)"
+                )
+            })?;
+            if !seen.insert((vid, pid)) {
+                anyhow::bail!(
+                    "duplicate {label}.device={vid:04x}:{pid:04x}; independent mode cannot target identical VID:PID twice (use display.device=\"all\" to mirror duplicates)"
+                );
+            }
+            let mode = entry
+                .mode
+                .as_deref()
+                .unwrap_or(self.display.mode.as_str())
+                .to_string();
+            let default_layout = entry
+                .default_layout
+                .as_deref()
+                .unwrap_or(self.display.default_layout.as_str())
+                .to_string();
+            let rotation = entry.rotation.unwrap_or(self.display.rotation);
+            if !matches!(rotation, 0 | 90 | 180 | 270) {
+                anyhow::bail!("{label}.rotation={rotation} must be one of 0, 90, 180, 270");
+            }
+            validate_mode_layout(&label, &mode, &default_layout)?;
+            if mode == "xvfb" {
+                xvfb_count += 1;
+            }
+            out.push(ResolvedDisplayOutput {
+                vid,
+                pid,
+                default_layout,
+                mode,
+                rotation,
+                jpeg_quality: self.display.jpeg_quality,
+            });
+        }
+        if xvfb_count > 1 {
+            anyhow::bail!(
+                "at most one [[displays]] entry may use mode=\"xvfb\" (found {xvfb_count})"
+            );
+        }
+        Ok(out)
     }
 
     /// Returns the default config file path: ~/.config/thermalwriter/config.toml
@@ -576,7 +693,7 @@ pub mod builtin_layouts {
 #[cfg(test)]
 mod tests {
     use super::builtin_layouts;
-    use super::{Config, ThemeConfig};
+    use super::{Config, DisplayOutputConfig, ThemeConfig};
     use crate::render::svg::SvgRenderer;
     use crate::theme::ThemePalette;
 
@@ -849,5 +966,103 @@ mod tests {
         cfg.validate().unwrap();
         cfg.theme.source = String::new();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn independent_displays_resolve_defaults_from_display() {
+        let mut cfg = Config::default();
+        cfg.display.default_layout = "svg/neon-dash-v2.svg".into();
+        cfg.display.mode = "svg".into();
+        cfg.display.rotation = 180;
+        cfg.displays = vec![
+            DisplayOutputConfig {
+                device: "87ad:70db".into(),
+                ..Default::default()
+            },
+            DisplayOutputConfig {
+                device: "0416:5302".into(),
+                default_layout: Some("svg/arc-gauge.svg".into()),
+                mode: Some("svg".into()),
+                rotation: Some(0),
+            },
+        ];
+        cfg.validate().expect("independent displays must validate");
+        let resolved = cfg.resolved_display_outputs().unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].vid, 0x87ad);
+        assert_eq!(resolved[0].pid, 0x70db);
+        assert_eq!(resolved[0].default_layout, "svg/neon-dash-v2.svg");
+        assert_eq!(resolved[0].rotation, 180);
+        assert_eq!(resolved[1].identity(), "0416:5302");
+        assert_eq!(resolved[1].default_layout, "svg/arc-gauge.svg");
+        assert_eq!(resolved[1].rotation, 0);
+    }
+
+    #[test]
+    fn independent_displays_reject_auto_all_and_duplicates() {
+        let mut cfg = Config::default();
+        cfg.displays = vec![DisplayOutputConfig {
+            device: "all".into(),
+            ..Default::default()
+        }];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("VID:PID"), "{err}");
+
+        cfg.displays = vec![
+            DisplayOutputConfig {
+                device: "87ad:70db".into(),
+                ..Default::default()
+            },
+            DisplayOutputConfig {
+                device: "87AD:70DB".into(),
+                ..Default::default()
+            },
+        ];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn independent_displays_reject_two_xvfb() {
+        let mut cfg = Config::default();
+        cfg.displays = vec![
+            DisplayOutputConfig {
+                device: "87ad:70db".into(),
+                mode: Some("xvfb".into()),
+                ..Default::default()
+            },
+            DisplayOutputConfig {
+                device: "0416:5302".into(),
+                mode: Some("xvfb".into()),
+                ..Default::default()
+            },
+        ];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("xvfb"), "{err}");
+    }
+
+    #[test]
+    fn independent_toml_round_trip() {
+        let toml = r#"
+[display]
+tick_rate = 3
+
+[[displays]]
+device = "87ad:70db"
+default_layout = "svg/neon-dash-v2.svg"
+
+[[displays]]
+device = "0x0416:0x5302"
+rotation = 90
+mode = "svg"
+default_layout = "svg/arc-gauge.svg"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        cfg.validate().unwrap();
+        let resolved = cfg.resolved_display_outputs().unwrap();
+        assert_eq!(resolved[0].usb_id(), (0x87ad, 0x70db));
+        assert_eq!(resolved[1].usb_id(), (0x0416, 0x5302));
+        assert_eq!(resolved[1].rotation, 90);
+        assert!(cfg.has_independent_displays());
     }
 }

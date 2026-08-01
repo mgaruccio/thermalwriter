@@ -22,12 +22,13 @@ use crate::transport::{DeviceInfo, EncodedFrame};
 
 pub use crate::transport::encode::rotate_pixels;
 
-/// Request that the mode listener rebuild the frame source for a generation.
-#[derive(Debug, Clone, Copy)]
+/// Request that the mode listener rebuild frame source(s) for a generation.
+#[derive(Debug, Clone)]
 pub struct SourceBuildRequest {
     pub generation: u64,
-    pub width: u32,
-    pub height: u32,
+    /// Oriented canvas size per source to build.
+    /// Mirror/single mode: one entry (primary). Independent: one per output.
+    pub canvases: Vec<(u32, u32)>,
 }
 
 /// Result of a generation- and source-revision-tagged source rebuild (layout
@@ -35,7 +36,7 @@ pub struct SourceBuildRequest {
 pub struct SourceBuildResult {
     pub generation: u64,
     pub source_revision: u64,
-    pub source: Result<Box<dyn FrameSource>, String>,
+    pub sources: Result<Vec<Box<dyn FrameSource>>, String>,
     /// Optional acknowledgement for D-Bus mode changes. Sent only after this
     /// generation and source revision are accepted and the source is committed
     /// (or rejected).
@@ -96,13 +97,16 @@ pub async fn run_tick_loop(
     mut initial_outputs: Option<Vec<OpenedDisplay>>,
     mut primary_info: Option<DeviceInfo>,
     connector: TransportConnector,
-    mut frame_source: Box<dyn FrameSource>,
+    mut frame_sources: Vec<Box<dyn FrameSource>>,
+    // When true, one source per output with per-output rotation (no letterbox).
+    independent: bool,
     source_build_tx: tokio::sync::mpsc::Sender<SourceBuildRequest>,
     source_result_rx: &mut tokio::sync::mpsc::Receiver<SourceBuildResult>,
     sensor_hub: &mut SensorHub,
     tick_rate_fps: u32,
     jpeg_quality: u8,
-    rotation: u16,
+    // Per-output rotations when independent; otherwise exactly one shared value.
+    rotations: Vec<u16>,
     mut template_rx: tokio::sync::watch::Receiver<String>,
     mut background_rx: tokio::sync::watch::Receiver<Option<Arc<BackgroundImage>>>,
     background_apply_rx: &mut tokio::sync::mpsc::Receiver<BackgroundApply>,
@@ -120,10 +124,26 @@ pub async fn run_tick_loop(
     mut needed_rx: tokio::sync::watch::Receiver<Option<HashSet<String>>>,
     mut recipe_rx: tokio::sync::watch::Receiver<Option<crate::sensor::LayoutSensorRecipe>>,
 ) -> Result<()> {
+    let shared_rotation = rotations.first().copied().unwrap_or(0);
     info!(
-        "Tick loop started: {} FPS, JPEG quality={}, rotation={}°",
-        tick_rate_fps, jpeg_quality, rotation
+        "Tick loop started: {} FPS, JPEG quality={}, independent={}, rotations={:?}",
+        tick_rate_fps, jpeg_quality, independent, rotations
     );
+
+    if frame_sources.is_empty() {
+        anyhow::bail!("tick loop requires at least one frame source");
+    }
+    if independent {
+        if rotations.len() != frame_sources.len() {
+            anyhow::bail!(
+                "independent mode requires rotations.len() == sources.len() ({} vs {})",
+                rotations.len(),
+                frame_sources.len()
+            );
+        }
+    } else if rotations.len() != 1 {
+        anyhow::bail!("mirror/single mode requires exactly one rotation entry");
+    }
 
     let mut generation: u64 = 0;
     let mut source_revision: u64 = 0;
@@ -133,13 +153,11 @@ pub async fn run_tick_loop(
     let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
     let mut last_poll = Instant::now() - sensor_poll_interval;
     let mut next_reconnect_at: Option<Instant> = None;
-    // Dirty-frame skip: when the active source can fingerprint its inputs and
-    // the fingerprint is unchanged, skip render/encode/send. LCD holds last
-    // frame (no keepalive required). Invalidated on source/template/bg swap.
-    let mut last_frame_fingerprint: Option<u64> = None;
+    // Dirty-frame skip per source. LCD holds last frame (no keepalive required).
+    let mut last_frame_fingerprints: Vec<Option<u64>> = vec![None; frame_sources.len()];
 
-    // Startup: if we already have outputs+primary, the caller built the source
-    // at the primary oriented dimensions — commit ActiveConnection immediately.
+    // Startup: if we already have outputs+primary, the caller built sources
+    // at oriented dimensions — commit ActiveConnection immediately.
     match (initial_outputs.take(), primary_info.take()) {
         (Some(outputs), Some(info)) if !outputs.is_empty() => {
             generation = 1;
@@ -149,7 +167,9 @@ pub async fn run_tick_loop(
             let _ = connected_tx.send(true);
             let _ = generation_tx.send(generation);
             if let Some(bg) = &cached_background {
-                let _ = frame_source.set_background(Some(bg.clone()));
+                for source in &mut frame_sources {
+                    let _ = source.set_background(Some(bg.clone()));
+                }
             }
             active = Some(ActiveConnection {
                 generation,
@@ -239,7 +259,7 @@ pub async fn run_tick_loop(
                 result,
                 &mut pending,
                 &mut active,
-                &mut frame_source,
+                &mut frame_sources,
                 &cached_background,
                 &display_tx,
                 &display_count_tx,
@@ -247,7 +267,7 @@ pub async fn run_tick_loop(
                 &generation_tx,
                 &mut source_revision,
                 &mut next_reconnect_at,
-                &mut last_frame_fingerprint,
+                &mut last_frame_fingerprints,
             );
         }
 
@@ -255,8 +275,9 @@ pub async fn run_tick_loop(
         if template_rx.has_changed().unwrap_or(false) {
             let template = template_rx.borrow_and_update().clone();
             if !template.is_empty() {
-                frame_source.set_template(&template);
-                last_frame_fingerprint = None;
+                // Primary-only template hot-reload (D-Bus layout path).
+                frame_sources[0].set_template(&template);
+                last_frame_fingerprints[0] = None;
             }
         }
 
@@ -264,15 +285,24 @@ pub async fn run_tick_loop(
         // set_background succeeds; on failure keep prior cache/source state.
         while let Ok(apply) = background_apply_rx.try_recv() {
             let prior_cache = cached_background.clone();
-            match frame_source.set_background(apply.image.clone()) {
-                Ok(()) => {
+            let mut apply_err = None;
+            for source in &mut frame_sources {
+                if let Err(e) = source.set_background(apply.image.clone()) {
+                    apply_err = Some(e);
+                    break;
+                }
+            }
+            match apply_err {
+                None => {
                     cached_background = apply.image;
-                    last_frame_fingerprint = None;
+                    last_frame_fingerprints.fill(None);
                     let _ = apply.ack.send(Ok(()));
                 }
-                Err(e) => {
+                Some(e) => {
                     // Restore prior source background if possible.
-                    let _ = frame_source.set_background(prior_cache.clone());
+                    for source in &mut frame_sources {
+                        let _ = source.set_background(prior_cache.clone());
+                    }
                     cached_background = prior_cache;
                     // Pending connection must abort on background raster failure.
                     if pending.is_some() {
@@ -290,11 +320,18 @@ pub async fn run_tick_loop(
         // when no oneshot is involved, e.g. startup).
         if background_rx.has_changed().unwrap_or(false) {
             let bg = background_rx.borrow_and_update().clone();
-            if let Err(e) = frame_source.set_background(bg.clone()) {
+            let mut err = None;
+            for source in &mut frame_sources {
+                if let Err(e) = source.set_background(bg.clone()) {
+                    err = Some(e);
+                    break;
+                }
+            }
+            if let Some(e) = err {
                 warn!("Background watch apply failed: {e:#}");
             } else {
                 cached_background = bg;
-                last_frame_fingerprint = None;
+                last_frame_fingerprints.fill(None);
             }
         }
 
@@ -331,12 +368,19 @@ pub async fn run_tick_loop(
                             primary.protocol,
                             primary.encoding()
                         );
-                        let (display_width, display_height) =
-                            primary.oriented_dimensions(rotation)?;
+                        let canvases = if independent {
+                            let mut list = Vec::with_capacity(connected.outputs.len());
+                            for (idx, output) in connected.outputs.iter().enumerate() {
+                                let rot = rotations.get(idx).copied().unwrap_or(shared_rotation);
+                                list.push(output.info.oriented_dimensions(rot)?);
+                            }
+                            list
+                        } else {
+                            vec![primary.oriented_dimensions(shared_rotation)?]
+                        };
                         let req = SourceBuildRequest {
                             generation,
-                            width: display_width,
-                            height: display_height,
+                            canvases,
                         };
                         if source_build_tx.try_send(req).is_err() {
                             warn!(
@@ -398,39 +442,51 @@ pub async fn run_tick_loop(
             // or the cache was invalidated (None). Computing on invalidation
             // ensures one redraw rather than repeated redraws until the next
             // sensor poll (up to 2s with the 2000ms default).
-            let fingerprint = if sensors_refreshed
-                || frame_source.is_time_varying()
-                || last_frame_fingerprint.is_none()
-            {
-                frame_source.content_fingerprint(sensors)
-            } else {
-                last_frame_fingerprint
-            };
-            let skip = matches!(
-                (fingerprint, last_frame_fingerprint),
-                (Some(now), Some(prev)) if now == prev
-            );
-            if skip {
-                debug!("Skipping unchanged frame (fingerprint match)");
-            } else {
-                let rendered = tokio::task::block_in_place(|| {
-                    let frame = match frame_source.render(sensors) {
-                        Ok(frame) => frame,
-                        Err(error) => return Err((false, error)),
-                    };
-                    let mut fatal_disconnect = false;
-                    let mut send_error = None;
-                    for output in &mut conn.outputs {
-                        let (target_w, target_h) = match output.info.oriented_dimensions(rotation) {
-                            Ok(dimensions) => dimensions,
-                            Err(error) => return Err((false, error)),
+            // Ensure fingerprint slots track source count after rebuilds.
+            if last_frame_fingerprints.len() != frame_sources.len() {
+                last_frame_fingerprints.resize(frame_sources.len(), None);
+            }
+
+            let rendered = tokio::task::block_in_place(|| {
+                let mut fatal_disconnect = false;
+                let mut send_error = None;
+                let mut dump_frame = None;
+
+                if independent {
+                    if frame_sources.len() != conn.outputs.len() {
+                        return Err((
+                            false,
+                            anyhow::anyhow!(
+                                "independent source/output count mismatch: {} vs {}",
+                                frame_sources.len(),
+                                conn.outputs.len()
+                            ),
+                        ));
+                    }
+                    for (idx, output) in conn.outputs.iter_mut().enumerate() {
+                        let source = &mut frame_sources[idx];
+                        let rotation = rotations[idx];
+                        let fingerprint = if sensors_refreshed
+                            || source.is_time_varying()
+                            || last_frame_fingerprints[idx].is_none()
+                        {
+                            source.content_fingerprint(sensors)
+                        } else {
+                            last_frame_fingerprints[idx]
                         };
-                        let adapted = match adapt_frame_contain(&frame, target_w, target_h) {
+                        let skip = matches!(
+                            (fingerprint, last_frame_fingerprints[idx]),
+                            (Some(now), Some(prev)) if now == prev
+                        );
+                        if skip {
+                            continue;
+                        }
+                        let frame = match source.render(sensors) {
                             Ok(frame) => frame,
                             Err(error) => return Err((false, error)),
                         };
                         let encoded =
-                            match encode_frame(&adapted, &output.info, rotation, jpeg_quality) {
+                            match encode_frame(&frame, &output.info, rotation, jpeg_quality) {
                                 Ok(encoded) => encoded,
                                 Err(error) => return Err((false, error)),
                             };
@@ -441,17 +497,73 @@ pub async fn run_tick_loop(
                             send_error = Some(error);
                             break;
                         }
+                        last_frame_fingerprints[idx] = fingerprint;
+                        if idx == 0 {
+                            dump_frame = Some((frame, rotation, source.is_streaming()));
+                        }
                     }
-                    if let Some(error) = send_error {
-                        return Err((fatal_disconnect, error));
+                } else {
+                    let source = &mut frame_sources[0];
+                    let rotation = shared_rotation;
+                    let fingerprint = if sensors_refreshed
+                        || source.is_time_varying()
+                        || last_frame_fingerprints[0].is_none()
+                    {
+                        source.content_fingerprint(sensors)
+                    } else {
+                        last_frame_fingerprints[0]
+                    };
+                    let skip = matches!(
+                        (fingerprint, last_frame_fingerprints[0]),
+                        (Some(now), Some(prev)) if now == prev
+                    );
+                    if !skip {
+                        let frame = match source.render(sensors) {
+                            Ok(frame) => frame,
+                            Err(error) => return Err((false, error)),
+                        };
+                        for output in &mut conn.outputs {
+                            let (target_w, target_h) =
+                                match output.info.oriented_dimensions(rotation) {
+                                    Ok(dimensions) => dimensions,
+                                    Err(error) => return Err((false, error)),
+                                };
+                            let adapted = match adapt_frame_contain(&frame, target_w, target_h) {
+                                Ok(frame) => frame,
+                                Err(error) => return Err((false, error)),
+                            };
+                            let encoded = match encode_frame(
+                                &adapted,
+                                &output.info,
+                                rotation,
+                                jpeg_quality,
+                            ) {
+                                Ok(encoded) => encoded,
+                                Err(error) => return Err((false, error)),
+                            };
+                            if let Err(error) = output.transport.send_frame(&encoded) {
+                                if !output.transport.is_connected() {
+                                    fatal_disconnect = true;
+                                }
+                                send_error = Some(error);
+                                break;
+                            }
+                        }
+                        last_frame_fingerprints[0] = fingerprint;
+                        dump_frame = Some((frame, rotation, source.is_streaming()));
                     }
-                    Ok(frame)
-                });
-                match rendered {
-                    Ok(frame) => {
-                        debug!("Frame rendered for {} display(s)", conn.outputs.len());
+                }
 
-                        if frame_source.is_streaming() {
+                if let Some(error) = send_error {
+                    return Err((fatal_disconnect, error));
+                }
+                Ok(dump_frame)
+            });
+            match rendered {
+                Ok(dump_frame) => {
+                    if let Some((frame, rotation, streaming)) = dump_frame {
+                        debug!("Frame rendered for {} display(s)", conn.outputs.len());
+                        if streaming {
                             match frame_dump::frame_dir() {
                                 Ok(dir) => {
                                     let dump_bytes = encode_jpeg(&frame, jpeg_quality, rotation)
@@ -467,28 +579,26 @@ pub async fn run_tick_loop(
                                 Err(e) => warn!("frame_dump disabled: {e}"),
                             }
                         }
-
-                        last_frame_fingerprint = fingerprint;
                     }
-                    Err((fatal_disconnect, error)) => {
-                        if fatal_disconnect {
-                            warn!("Failed to send mirrored frame: {error:#}");
-                            warn!(
-                                "Fatal send — dropping generation {} and reconnecting mirror group",
-                                conn.generation
-                            );
-                            close_outputs(&mut conn.outputs);
-                            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                            let _ = display_count_tx.send(0);
-                            let _ = connected_tx.send(false);
-                            let _ = generation_tx.send(0);
-                            active = None;
-                            pending = None;
-                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
-                            last_frame_fingerprint = None;
-                        } else {
-                            warn!("Render/encode/send failed: {error:#}");
-                        }
+                }
+                Err((fatal_disconnect, error)) => {
+                    if fatal_disconnect {
+                        warn!("Failed to send frame: {error:#}");
+                        warn!(
+                            "Fatal send — dropping generation {} and reconnecting display group",
+                            conn.generation
+                        );
+                        close_outputs(&mut conn.outputs);
+                        let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                        let _ = display_count_tx.send(0);
+                        let _ = connected_tx.send(false);
+                        let _ = generation_tx.send(0);
+                        active = None;
+                        pending = None;
+                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        last_frame_fingerprints.fill(None);
+                    } else {
+                        warn!("Render/encode/send failed: {error:#}");
                     }
                 }
             }
@@ -501,8 +611,9 @@ pub async fn run_tick_loop(
             //   (need to render every frame).
             // - Non-time-varying: sleep until min(next_sensor_poll, tick_start + 250ms)
             //   so D-Bus/source channels still drain at ≥4 Hz without 2 Hz render wakeups.
-            let time_varying = frame_source.is_time_varying();
-            let sleep_dur = if frame_source.is_streaming() || time_varying {
+            let time_varying = frame_sources.iter().any(|s| s.is_time_varying());
+            let streaming = frame_sources.iter().any(|s| s.is_streaming());
+            let sleep_dur = if streaming || time_varying {
                 tick_duration - elapsed
             } else {
                 let next_sensor = last_poll + sensor_poll_interval;
@@ -537,7 +648,7 @@ fn handle_source_result(
     result: SourceBuildResult,
     pending: &mut Option<PendingConnection>,
     active: &mut Option<ActiveConnection>,
-    frame_source: &mut Box<dyn FrameSource>,
+    frame_sources: &mut Vec<Box<dyn FrameSource>>,
     cached_background: &Option<Arc<BackgroundImage>>,
     display_tx: &tokio::sync::watch::Sender<RuntimeDisplayDimensions>,
     display_count_tx: &tokio::sync::watch::Sender<u32>,
@@ -545,7 +656,7 @@ fn handle_source_result(
     generation_tx: &tokio::sync::watch::Sender<u64>,
     current_source_revision: &mut u64,
     next_reconnect_at: &mut Option<Instant>,
-    last_frame_fingerprint: &mut Option<u64>,
+    last_frame_fingerprints: &mut Vec<Option<u64>>,
 ) {
     let generation = result.generation;
     let source_revision = result.source_revision;
@@ -569,31 +680,39 @@ fn handle_source_result(
         return;
     }
 
-    match result.source {
-        Ok(mut source) => {
-            if let Some(background) = cached_background
-                && let Err(error) = source.set_background(Some(background.clone()))
-            {
-                warn!("Failed to apply background to rebuilt source: {error:#}");
-                if pending_match {
-                    let _ = pending.take();
-                    let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
-                    let _ = display_count_tx.send(0);
-                    let _ = connected_tx.send(false);
-                    let _ = generation_tx.send(0);
-                    *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
-                }
+    match result.sources {
+        Ok(mut sources) => {
+            if sources.is_empty() {
                 if let Some(commit) = commit.take() {
-                    let _ = commit.send(Err(format!(
-                        "failed to apply background to source: {error:#}"
-                    )));
+                    let _ = commit.send(Err("source rebuild returned zero sources".into()));
                 }
                 return;
             }
+            if let Some(background) = cached_background {
+                for source in &mut sources {
+                    if let Err(error) = source.set_background(Some(background.clone())) {
+                        warn!("Failed to apply background to rebuilt source: {error:#}");
+                        if pending_match {
+                            let _ = pending.take();
+                            let _ = display_tx.send(RuntimeDisplayDimensions::new(0, 0));
+                            let _ = display_count_tx.send(0);
+                            let _ = connected_tx.send(false);
+                            let _ = generation_tx.send(0);
+                            *next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        }
+                        if let Some(commit) = commit.take() {
+                            let _ = commit.send(Err(format!(
+                                "failed to apply background to source: {error:#}"
+                            )));
+                        }
+                        return;
+                    }
+                }
+            }
 
             *current_source_revision = (*current_source_revision).max(source_revision);
-            let was_streaming = frame_source.is_streaming();
-            let is_streaming = source.is_streaming();
+            let was_streaming = frame_sources.iter().any(|s| s.is_streaming());
+            let is_streaming = sources.iter().any(|s| s.is_streaming());
             if was_streaming && !is_streaming {
                 match frame_dump::frame_dir() {
                     Ok(dir) => {
@@ -604,8 +723,14 @@ fn handle_source_result(
                     }
                 }
             }
-            *frame_source = source;
-            *last_frame_fingerprint = None;
+            // Primary-only D-Bus swap: single rebuilt source into multi-source set.
+            if !pending_match && sources.len() == 1 && frame_sources.len() > 1 {
+                frame_sources[0] = sources.into_iter().next().expect("len checked");
+            } else {
+                *frame_sources = sources;
+            }
+            last_frame_fingerprints.clear();
+            last_frame_fingerprints.resize(frame_sources.len(), None);
             if pending_match {
                 let connection = pending.take().expect("pending_match");
                 let primary = connection
