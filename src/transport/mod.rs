@@ -23,6 +23,7 @@ pub mod hid_report;
 pub mod ly_lcd;
 pub mod scsi_lcd;
 pub mod type2_policy;
+pub mod validate_device;
 pub mod validation_report;
 
 use anyhow::Result;
@@ -53,6 +54,7 @@ pub use usb_fingerprint::{
     UsbInterfaceShape, UsbRunIdentity, UsbTransferKind, derive_bulk_pair, derive_vendor_bulk_pair,
     format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
 };
+pub use validate_device::{ValidateDeviceArgs, run_validate_device};
 pub use validation_report::{
     BuildProvenance, CheckField, CheckStatus, DescriptorCaptureStatus, DisplayDimensions,
     EvidenceOrigin, FinalizeError, HardwareValidationReport, HidBackendProvenance,

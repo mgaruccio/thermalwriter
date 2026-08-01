@@ -3,8 +3,10 @@ use crate::dbus_types::DisplayProxy;
 use crate::render::RawFrame;
 use crate::transport::discovery::TransportConnector;
 use crate::transport::encode::encode_frame;
+use crate::transport::validate_device::{ValidateDeviceArgs, run_validate_device};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Thermalright cooler LCD display daemon and control CLI.
@@ -37,6 +39,19 @@ pub enum Command {
     /// Install the udev rule that grants the daemon read access to CPU power (RAPL) counters.
     /// Re-execs under sudo if run as non-root.
     SetupUdev,
+    /// Guided hardware validation for a connected LCD (passive preflight today).
+    ValidateDevice {
+        /// VID:PID e.g. 0416:5302
+        #[arg(long)]
+        device: String,
+        /// Required when duplicate VID:PIDs; always converted internally to explicit bus/address
+        #[arg(long)]
+        bus_address: Option<String>,
+        #[arg(long)]
+        passive: bool,
+        #[arg(long, default_value = "validation-results")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -68,6 +83,12 @@ pub enum CtlCommand {
         /// Preset name (conky, cava, or btop).
         preset: String,
     },
+}
+
+/// Run passive or active hardware validation for one USB display.
+pub fn run_validate_device_cmd(args: ValidateDeviceArgs) -> Result<()> {
+    run_validate_device(args)?;
+    Ok(())
 }
 
 /// Execute a `ctl` subcommand against the running daemon over D-Bus.
@@ -447,6 +468,54 @@ mod tests {
         assert!(UDEV_RULE.contains("thermalreader"));
         assert!(UDEV_RULE.contains("0440"));
         assert!(!UDEV_RULE.contains("0444"));
+    }
+
+    #[test]
+    fn cli_parses_validate_device_passive() {
+        let cli = Cli::try_parse_from([
+            "thermalwriter",
+            "validate-device",
+            "--device",
+            "0416:5302",
+            "--passive",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ValidateDevice {
+                ref device,
+                bus_address: None,
+                passive: true,
+                ref output,
+            } if device == "0416:5302" && output == &PathBuf::from("validation-results")
+        ));
+    }
+
+    #[test]
+    fn cli_parses_validate_device_with_bus_address_and_output() {
+        let cli = Cli::try_parse_from([
+            "thermalwriter",
+            "validate-device",
+            "--device",
+            "0416:5302",
+            "--bus-address",
+            "1:14",
+            "--passive",
+            "--output",
+            "/tmp/validation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ValidateDevice {
+                ref device,
+                ref bus_address,
+                passive: true,
+                ref output,
+            } if device == "0416:5302"
+                && bus_address.as_deref() == Some("1:14")
+                && output == &PathBuf::from("/tmp/validation")
+        ));
     }
 
     #[test]

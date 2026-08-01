@@ -144,6 +144,21 @@ async fn main() -> Result<()> {
         Command::SetupUdev => {
             return thermalwriter::cli::run_setup_udev();
         }
+        Command::ValidateDevice {
+            device,
+            bus_address,
+            passive,
+            output,
+        } => {
+            return thermalwriter::cli::run_validate_device_cmd(
+                thermalwriter::transport::ValidateDeviceArgs {
+                    device,
+                    bus_address,
+                    passive,
+                    output,
+                },
+            );
+        }
         Command::Daemon => {} // fall through to daemon startup below
     }
 
