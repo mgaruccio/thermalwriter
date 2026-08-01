@@ -697,7 +697,7 @@ async fn main() -> Result<()> {
         // xvfb_handle owns the Xvfb process — dropping it kills the process.
         let mut xvfb_handle: Option<thermalwriter::service::xvfb::XvfbHandle> = initial_xvfb_handle;
         // (mode, layout, vars) per independent output; empty in single/mirror mode.
-        let independent_layout_specs = independent_layout_specs;
+        let mut independent_layout_specs = independent_layout_specs;
         // Tracks the active background so layout switches preserve it.
         let mut current_background: Option<Arc<BackgroundImage>> = initial_background;
         let mut current_display = source_display;

@@ -15,11 +15,11 @@ use std::time::Duration;
 pub use super::hid_report::linux::{LinuxHidrawIo, open_correlated_read_session};
 pub use super::hid_report::{
     HidChunkedWriteFailure, HidReadObservation, HidReportAuthorizeError, HidReportBackendContract,
-    HidReportProbeError, HidReportReadError, HidReportReadSession, HidReportWriteAuthorization,
-    HidReportWriteError, HidReportWriteSession, HidWriteObservation, HidrawCandidate,
-    HidrawCorrelation, KERNEL_HIDRAW_DOC_REF, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
-    REPORT_ID_UNNUMBERED, REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
-    authenticate_opened_hidraw, correlate_hidraw_to_usb,
+    HidReportIo, HidReportProbeError, HidReportReadError, HidReportReadSession,
+    HidReportWriteAuthorization, HidReportWriteError, HidReportWriteSession, HidWriteObservation,
+    HidrawCandidate, HidrawCorrelation, KERNEL_HIDRAW_DOC_REF, LINUX_HIDRAW_BACKEND_CONTRACT,
+    PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED, REVIEWED_HIDAPI_EVIDENCE_COMMIT,
+    USERSPACE_SUBMIT_BYTES, UsbBusAddress, authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
 
 use super::profile::{WireProtocol, build_device_info};
@@ -106,6 +106,60 @@ impl HidIo for UsbHidIo<'_> {
             Err(e) => return Err(e.into()),
         };
         data.truncate(len);
+        Ok(data)
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// Hidraw-backed HID I/O with unnumbered report-ID framing (0x00 prefix).
+///
+/// Type2 firmware on 0416:5302 accepts frames on this path; raw libusb interrupt
+/// writes of the same 512-byte protocol chunks often complete without updating
+/// the panel (TRCC #228: hidapi reports vs pyusb bulk).
+#[cfg(feature = "daemon")]
+struct HidrawReportIo {
+    io: super::hid_report::linux::LinuxHidrawIo,
+    read_timeout: Duration,
+}
+
+#[cfg(feature = "daemon")]
+impl HidIo for HidrawReportIo {
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            !data.is_empty() && data.len().is_multiple_of(PROTOCOL_CHUNK_BYTES),
+            "hidraw Type2 write expects a multiple of {PROTOCOL_CHUNK_BYTES} bytes, got {}",
+            data.len()
+        );
+        for chunk in data.chunks(PROTOCOL_CHUNK_BYTES) {
+            let mut buf = [0_u8; USERSPACE_SUBMIT_BYTES];
+            buf[0] = REPORT_ID_UNNUMBERED;
+            buf[1..].copy_from_slice(chunk);
+            let returned = self
+                .io
+                .write(&buf)
+                .context("hidraw Type2 report write failed")?;
+            anyhow::ensure!(
+                returned as usize == USERSPACE_SUBMIT_BYTES,
+                "hidraw Type2 write returned {returned}, expected {USERSPACE_SUBMIT_BYTES}"
+            );
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
+        let mut data = vec![0_u8; max_len];
+        let timeout_ms = u32::try_from(self.read_timeout.as_millis()).unwrap_or(u32::MAX);
+        let returned = self
+            .io
+            .read_timeout(&mut data, timeout_ms)
+            .context("hidraw Type2 read failed")?;
+        if returned < 0 {
+            bail!("hidraw Type2 read returned {returned}");
+        }
+        data.truncate(returned as usize);
         Ok(data)
     }
 
@@ -249,20 +303,39 @@ pub fn handshake_type3_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HID Type3 handshake failed")))
 }
 
+enum HidBackend {
+    /// libusb claim + interrupt/bulk endpoints (Type3 and Type2 fallback).
+    Libusb {
+        handle: Option<DeviceHandle<GlobalContext>>,
+        ep_out: u8,
+        ep_in: u8,
+    },
+    /// Kernel hidraw with report-ID framing (preferred Type2 path).
+    #[cfg(feature = "daemon")]
+    Hidraw(Option<super::hid_report::linux::LinuxHidrawIo>),
+}
+
 pub struct HidLcd {
-    handle: Option<DeviceHandle<GlobalContext>>,
+    backend: HidBackend,
     vid: u16,
     pid: u16,
     interface: u8,
-    ep_out: u8,
-    ep_in: u8,
     kind: HidType,
     info: Option<DeviceInfo>,
 }
 
 impl HidLcd {
     pub fn open_type2(bus: u8, address: u8, interface: u8, ep_in: u8, ep_out: u8) -> Result<Self> {
-        Self::open(HidType::Type2, 0, bus, address, interface, ep_in, ep_out)
+        #[cfg(feature = "daemon")]
+        {
+            match Self::open_type2_hidraw(bus, address, interface) {
+                Ok(device) => return Ok(device),
+                Err(error) => {
+                    warn!("HID Type2 hidraw open failed ({error:#}); falling back to libusb claim");
+                }
+            }
+        }
+        Self::open_libusb(HidType::Type2, 0, bus, address, interface, ep_in, ep_out)
     }
 
     pub fn open_type3(
@@ -273,10 +346,59 @@ impl HidLcd {
         ep_in: u8,
         ep_out: u8,
     ) -> Result<Self> {
-        Self::open(HidType::Type3, pid, bus, address, interface, ep_in, ep_out)
+        Self::open_libusb(HidType::Type3, pid, bus, address, interface, ep_in, ep_out)
     }
 
-    fn open(
+    #[cfg(feature = "daemon")]
+    fn open_type2_hidraw(bus: u8, address: u8, interface: u8) -> Result<Self> {
+        use super::hid_report::linux::LinuxHidrawIo;
+        use super::hid_report::{
+            HidrawCandidate, RealSysfs, UsbBusAddress, correlate_hidraw_to_usb,
+        };
+        use std::path::PathBuf;
+
+        let device = find_device(bus, address)?;
+        let desc = device.device_descriptor().context("device descriptor")?;
+        let vid = desc.vendor_id();
+        let pid = desc.product_id();
+        let selector = UsbBusAddress { bus, address };
+        let mut candidates = Vec::new();
+        let class_root = PathBuf::from("/sys/class/hidraw");
+        if class_root.exists() {
+            for entry in std::fs::read_dir(&class_root).context("read /sys/class/hidraw")? {
+                let entry = entry.context("enumerate hidraw")?;
+                if let Ok(candidate) = HidrawCandidate::from_sysfs_class_entry(entry.path()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        anyhow::ensure!(
+            !candidates.is_empty(),
+            "no hidraw nodes found for Type2 open"
+        );
+        let correlation = correlate_hidraw_to_usb(selector, &candidates, &RealSysfs)
+            .context("correlate hidraw to USB for Type2")?;
+        let io = LinuxHidrawIo::open_authenticated(&correlation, selector, &RealSysfs)
+            .context("open correlated hidraw for Type2")?;
+        info!(
+            "Opened HID Type2 {:04x}:{:04x} bus={} addr={} via hidraw {} (iface={interface})",
+            vid,
+            pid,
+            bus,
+            address,
+            correlation.devnode.display()
+        );
+        Ok(Self {
+            backend: HidBackend::Hidraw(Some(io)),
+            vid,
+            pid,
+            interface,
+            kind: HidType::Type2,
+            info: None,
+        })
+    }
+
+    fn open_libusb(
         kind: HidType,
         expected_pid: u16,
         bus: u8,
@@ -314,24 +436,30 @@ impl HidLcd {
         let ep_in = if ep_in == 0 { EP_READ_DEFAULT } else { ep_in };
 
         info!(
-            "Opened HID {:?} {:04x}:{:04x} bus={} addr={} OUT=0x{:02x} IN=0x{:02x}",
+            "Opened HID {:?} {:04x}:{:04x} bus={} addr={} OUT=0x{:02x} IN=0x{:02x} (libusb)",
             kind, vid, pid, bus, address, ep_out, ep_in
         );
 
         Ok(Self {
-            handle: Some(handle),
+            backend: HidBackend::Libusb {
+                handle: Some(handle),
+                ep_out,
+                ep_in,
+            },
             vid,
             pid,
             interface,
-            ep_out,
-            ep_in,
             kind,
             info: None,
         })
     }
 
     fn mark_disconnected(&mut self) {
-        self.handle = None;
+        match &mut self.backend {
+            HidBackend::Libusb { handle, .. } => *handle = None,
+            #[cfg(feature = "daemon")]
+            HidBackend::Hidraw(io) => *io = None,
+        }
         self.info = None;
     }
 
@@ -471,10 +599,24 @@ fn send_frame_with_io(
         HidType::Type2 => build_frame_type2(&frame.data, frame.width, frame.height, frame.encoding),
         HidType::Type3 => build_frame_type3(&frame.data)?,
     };
-    io.write(&packet).context("HID frame write failed")?;
     match kind {
-        HidType::Type2 => io.sleep(DELAY_FRAME_TYPE2),
+        HidType::Type2 => {
+            // Firmware latches Type2 frames only as sequential 512-byte reports
+            // (TRCC #150 / #228). Never submit the whole multi-KB blob at once.
+            const CHUNK: usize = 512;
+            anyhow::ensure!(
+                packet.len().is_multiple_of(CHUNK),
+                "Type2 frame length {} is not a multiple of {CHUNK}",
+                packet.len()
+            );
+            for chunk in packet.chunks(CHUNK) {
+                io.write(chunk)
+                    .with_context(|| "HID Type2 512-byte chunk write failed")?;
+            }
+            io.sleep(DELAY_FRAME_TYPE2);
+        }
         HidType::Type3 => {
+            io.write(&packet).context("HID frame write failed")?;
             let ack = io
                 .read(TYPE3_ACK_SIZE)
                 .context("HID Type3 ACK read failed")?;
@@ -502,26 +644,23 @@ fn frame_timeout(packet_size: usize) -> Duration {
 
 impl Transport for HidLcd {
     fn handshake(&mut self) -> Result<DeviceInfo> {
-        let result = {
-            let handle = self.handle.as_ref().context("HID device not open")?;
-            let mut io = UsbHidIo {
-                handle,
-                ep_out: self.ep_out,
-                ep_in: self.ep_in,
-                write_timeout: Some(HANDSHAKE_TIMEOUT),
-                read_timeout: HANDSHAKE_TIMEOUT,
-            };
-            match self.kind {
-                HidType::Type2 => handshake_type2_with_io(&mut io, self.vid, self.pid),
-                HidType::Type3 => handshake_type3_with_io(&mut io, self.vid, self.pid),
-            }
-        };
+        let vid = self.vid;
+        let pid = self.pid;
+        let kind = self.kind;
+        let result = self.with_io(
+            Some(HANDSHAKE_TIMEOUT),
+            HANDSHAKE_TIMEOUT,
+            |io| match kind {
+                HidType::Type2 => handshake_type2_with_io(io, vid, pid),
+                HidType::Type3 => handshake_type3_with_io(io, vid, pid),
+            },
+        );
 
         match result {
             Ok(info) => {
                 info!(
                     "HID {:?} handshake OK: PM={} SUB={} {}x{} {}",
-                    self.kind,
+                    kind,
                     info.pm,
                     info.sub,
                     info.width(),
@@ -539,22 +678,15 @@ impl Transport for HidLcd {
     }
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
-        let send_result = {
-            let info = self.info.as_ref().context("Handshake not performed")?;
-            let handle = self.handle.as_ref().context("HID device not open")?;
-            let mut io = UsbHidIo {
-                handle,
-                ep_out: self.ep_out,
-                ep_in: self.ep_in,
-                write_timeout: None,
-                read_timeout: DEFAULT_FRAME_TIMEOUT,
-            };
-            send_frame_with_io(&mut io, self.kind, info, frame)
-        };
+        let info = self.info.clone().context("Handshake not performed")?;
+        let kind = self.kind;
+        let send_result = self.with_io(None, DEFAULT_FRAME_TIMEOUT, |io| {
+            send_frame_with_io(io, kind, &info, frame)
+        });
 
         match send_result {
             Ok(packet_len) => {
-                debug!("HID {:?} frame sent ({} bytes)", self.kind, packet_len);
+                debug!("HID {:?} frame sent ({} bytes)", kind, packet_len);
                 Ok(())
             }
             Err(error) => {
@@ -565,15 +697,67 @@ impl Transport for HidLcd {
     }
 
     fn close(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.release_interface(self.interface);
-            info!("HidLcd closed");
+        match &mut self.backend {
+            HidBackend::Libusb { handle, .. } => {
+                if let Some(handle) = handle.take() {
+                    let _ = handle.release_interface(self.interface);
+                    info!("HidLcd libusb closed");
+                }
+            }
+            #[cfg(feature = "daemon")]
+            HidBackend::Hidraw(io) => {
+                if io.take().is_some() {
+                    info!("HidLcd hidraw closed");
+                }
+            }
         }
         self.info = None;
     }
 
     fn is_connected(&self) -> bool {
-        self.handle.is_some() && self.info.is_some()
+        match &self.backend {
+            HidBackend::Libusb { handle, .. } => handle.is_some(),
+            #[cfg(feature = "daemon")]
+            HidBackend::Hidraw(io) => io.is_some(),
+        }
+    }
+}
+
+impl HidLcd {
+    fn with_io<R>(
+        &mut self,
+        write_timeout: Option<Duration>,
+        read_timeout: Duration,
+        f: impl FnOnce(&mut dyn HidIo) -> Result<R>,
+    ) -> Result<R> {
+        match &mut self.backend {
+            HidBackend::Libusb {
+                handle,
+                ep_out,
+                ep_in,
+            } => {
+                let handle = handle.as_ref().context("HID device not open")?;
+                let mut io = UsbHidIo {
+                    handle,
+                    ep_out: *ep_out,
+                    ep_in: *ep_in,
+                    write_timeout,
+                    read_timeout,
+                };
+                f(&mut io)
+            }
+            #[cfg(feature = "daemon")]
+            HidBackend::Hidraw(slot) => {
+                let io = slot.take().context("HID hidraw device not open")?;
+                let mut report_io = HidrawReportIo { io, read_timeout };
+                let result = f(&mut report_io);
+                // Restore unless mark_disconnected cleared the backend mid-call.
+                if let HidBackend::Hidraw(slot) = &mut self.backend {
+                    *slot = Some(report_io.io);
+                }
+                result
+            }
+        }
     }
 }
 
