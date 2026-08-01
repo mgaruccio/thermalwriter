@@ -835,7 +835,7 @@ impl TransportConnector {
     }
 }
 
-fn open_discovered(dev: &DiscoveredDevice) -> Result<(Box<dyn Transport>, DeviceInfo)> {
+pub(crate) fn open_discovered(dev: &DiscoveredDevice) -> Result<(Box<dyn Transport>, DeviceInfo)> {
     match (&dev.path, dev.protocol) {
         (
             DevicePath::Usb {

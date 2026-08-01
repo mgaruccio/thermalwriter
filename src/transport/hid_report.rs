@@ -528,6 +528,11 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
     }
 
     fn new(io: Io) -> Self {
+        Self::from_io(io)
+    }
+
+    /// Construct a read session from an opened I/O handle.
+    pub fn from_io(io: Io) -> Self {
         Self {
             core: HidReportSessionCore::new(io, &LINUX_HIDRAW_BACKEND_CONTRACT),
             session_auth: None,
