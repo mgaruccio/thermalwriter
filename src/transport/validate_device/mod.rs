@@ -5,6 +5,9 @@
 mod active;
 mod cards;
 
+#[doc(hidden)]
+pub mod test_support;
+
 pub use active::{
     ActiveOptions, ActiveOutput, DEFAULT_SOAK_SECS, PeerIdentity, Prompt, ScriptedPrompt,
     SpyTransport, StdioPrompt,
@@ -106,7 +109,9 @@ pub fn run_validate_device(args: ValidateDeviceArgs) -> Result<PathBuf> {
     )
 }
 
-pub(crate) fn run_validate_device_with<I, H, F>(
+/// Run passive validate-device with injectable inventory backends (test hook).
+#[doc(hidden)]
+pub fn run_validate_device_with<I, H, F>(
     args: ValidateDeviceArgs,
     usb: &I,
     hidraw: &H,
@@ -219,24 +224,28 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PassiveOutcome {
+/// Passive preflight outcome for integration tests.
+#[doc(hidden)]
+pub struct PassiveOutcome {
     pub result: PreflightResult,
     pub selected: Option<InventoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PreflightResult {
+#[doc(hidden)]
+pub enum PreflightResult {
     Pass,
     Fail(ValidationStage, Vec<(ValidationErrorKind, &'static str)>),
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct ValidatorLog {
+#[doc(hidden)]
+pub struct ValidatorLog {
     lines: Vec<String>,
 }
 
 impl ValidatorLog {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { lines: Vec::new() }
     }
 
@@ -245,18 +254,20 @@ impl ValidatorLog {
     }
 }
 
-pub(crate) struct PassivePreflightContext<'a, I, H, F> {
-    vid: u16,
-    pid: u16,
-    bus_address: Option<&'a str>,
-    usb: &'a I,
-    hidraw: &'a H,
-    sysfs: &'a F,
-    report: &'a mut HardwareValidationReport,
-    log: &'a mut ValidatorLog,
+#[doc(hidden)]
+pub struct PassivePreflightContext<'a, I, H, F> {
+    pub vid: u16,
+    pub pid: u16,
+    pub bus_address: Option<&'a str>,
+    pub usb: &'a I,
+    pub hidraw: &'a H,
+    pub sysfs: &'a F,
+    pub report: &'a mut HardwareValidationReport,
+    pub log: &'a mut ValidatorLog,
 }
 
-pub(crate) fn run_passive_preflight<I, H, F>(ctx: PassivePreflightContext<'_, I, H, F>) -> PassiveOutcome
+#[doc(hidden)]
+pub fn run_passive_preflight<I, H, F>(ctx: PassivePreflightContext<'_, I, H, F>) -> PassiveOutcome
 where
     I: UsbInventory,
     H: HidrawInventory,

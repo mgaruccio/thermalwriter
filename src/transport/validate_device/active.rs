@@ -244,7 +244,8 @@ fn open_production_hid_session(
     Ok(HidReportReadSession::from_io(io))
 }
 
-pub(crate) fn run_active_validation_with<I, H, F, C, O, P, Io>(
+#[doc(hidden)]
+pub fn run_active_validation_with<I, H, F, C, O, P, Io>(
     vid: u16,
     pid: u16,
     bus_address: Option<&str>,
@@ -927,7 +928,8 @@ fn discovered_for_selector(vid: u16, pid: u16, selector: UsbBusAddress) -> Resul
     Ok(first)
 }
 
-pub(crate) fn resolve_reconnect(
+#[doc(hidden)]
+pub fn resolve_reconnect(
     entries: &[InventoryEntry],
     previous: UsbBusAddress,
     bus_address_hint: Option<&str>,
@@ -959,7 +961,8 @@ pub(crate) fn resolve_reconnect(
     Ok(selector)
 }
 
-pub(crate) fn snapshot_peers<I: UsbInventory>(
+#[doc(hidden)]
+pub fn snapshot_peers<I: UsbInventory>(
     usb: &I,
     target: UsbBusAddress,
 ) -> BTreeSet<PeerIdentity> {
@@ -1497,7 +1500,7 @@ mod active_tests {
         );
         let recorded = calls.borrow();
         assert!(
-            recorded.iter().any(|call| *call == "start"),
+            recorded.contains(&"start"),
             "expected daemon restore start, got {recorded:?}"
         );
     }

@@ -55,6 +55,8 @@ pub use usb_fingerprint::{
     format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
 };
 pub use validate_device::{ValidateDeviceArgs, run_validate_device};
+#[doc(hidden)]
+pub use validate_device::test_support;
 pub use validation_report::{
     BuildProvenance, CheckField, CheckStatus, DescriptorCaptureStatus, DisplayDimensions,
     EvidenceOrigin, FinalizeError, HardwareValidationReport, HidBackendProvenance,
