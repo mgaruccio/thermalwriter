@@ -43,6 +43,7 @@ use super::super::hid_report::SysfsAccess;
 
 /// Default soak duration for active validation (5 minutes).
 pub const DEFAULT_SOAK_SECS: u64 = 300;
+const SOAK_PROGRESS_INTERVAL_SECS: u64 = 10;
 
 /// Pause between card refresh sends while waiting for an operator answer.
 const CARD_PROMPT_HOLD_MS: u64 = 200;
@@ -951,14 +952,16 @@ where
 
     if peers_before.is_empty() {
         let _ = report.record_check(CheckField::SecondDisplayUnchanged, CheckStatus::NotApplicable);
-    } else if !prompt.yes_no_with_hold(
-        &second_display_prompt(),
-        || send_card_frame(output, colors_frame, report, log),
-        sleep,
-    )? {
-        fail_visual(report, log, ValidationStage::SecondDisplayUnchanged);
-        return Err(ValidationStage::SecondDisplayUnchanged);
     } else {
+        println!("Second display check — verify the other cooler LCD is unchanged.");
+        if !prompt.yes_no_with_hold(
+            &second_display_prompt(),
+            || send_card_frame(output, colors_frame, report, log),
+            sleep,
+        )? {
+            fail_visual(report, log, ValidationStage::SecondDisplayUnchanged);
+            return Err(ValidationStage::SecondDisplayUnchanged);
+        }
         let _ = report
             .record_check(CheckField::SecondDisplayUnchanged, CheckStatus::Pass);
     }
@@ -976,6 +979,8 @@ where
         log,
     )?;
 
+    println!();
+    println!("Reconnect test — unplug and replug the USB cable when ready.");
     if !prompt.yes_no("Reconnect the USB cable now, then answer yes when the display is back.") {
         let _ = report.fail_at(
             ValidationStage::Reconnect,
@@ -1037,8 +1042,12 @@ fn run_soak<Io: HidReportIo>(
             log.info("soak missing encoded frame".to_string());
             ValidationStage::Soak
         })?;
+    println!(
+        "Soak: streaming for {soak_secs}s (progress every {SOAK_PROGRESS_INTERVAL_SECS}s)..."
+    );
+    let progress_every = SOAK_PROGRESS_INTERVAL_SECS.saturating_mul(5);
     let iterations = soak_secs.saturating_mul(5);
-    for _ in 0..iterations {
+    for i in 0..iterations {
         output.send_encoded(frame).map_err(|error| {
             log.info(format!("soak send error: {error:#}"));
             let _ = report.fail_at(
@@ -1048,7 +1057,12 @@ fn run_soak<Io: HidReportIo>(
             ValidationStage::Soak
         })?;
         sleep(Duration::from_millis(200));
+        let elapsed_secs = (i + 1) / 5;
+        if progress_every > 0 && elapsed_secs % SOAK_PROGRESS_INTERVAL_SECS == 0 {
+            println!("Soak progress: {elapsed_secs}/{soak_secs}s");
+        }
     }
+    println!("Soak complete.");
     let _ = report.record_check(CheckField::Soak, CheckStatus::Pass);
     Ok(())
 }
