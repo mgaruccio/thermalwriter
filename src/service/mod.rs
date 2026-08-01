@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub mod dbus;
 pub mod frame_dump;
+pub mod guard;
 pub mod mode_handler;
 pub mod tick;
 pub mod xvfb;
