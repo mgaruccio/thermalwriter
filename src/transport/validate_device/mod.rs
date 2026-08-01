@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// `thermalwriter validate-device` passive preflight and guided active workflow.
+// `thermalwriter validate-device`: active guided validation by default; `--passive` for descriptor-only preflight.
 
 mod active;
 mod cards;
@@ -98,7 +98,7 @@ impl HidrawInventory for SysfsHidrawInventory {
     }
 }
 
-/// Run passive validate-device using production inventory backends.
+/// Run validate-device using production inventory backends (active by default).
 pub fn run_validate_device(args: ValidateDeviceArgs) -> Result<PathBuf> {
     run_validate_device_with(
         args,
@@ -109,7 +109,7 @@ pub fn run_validate_device(args: ValidateDeviceArgs) -> Result<PathBuf> {
     )
 }
 
-/// Run passive validate-device with injectable inventory backends (test hook).
+/// Run validate-device with injectable inventory backends (test hook).
 #[doc(hidden)]
 pub fn run_validate_device_with<I, H, F>(
     args: ValidateDeviceArgs,

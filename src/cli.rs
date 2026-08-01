@@ -39,7 +39,7 @@ pub enum Command {
     /// Install the udev rule that grants the daemon read access to CPU power (RAPL) counters.
     /// Re-execs under sudo if run as non-root.
     SetupUdev,
-    /// Guided hardware validation for a connected LCD (passive preflight today).
+    /// Guided hardware validation for a connected LCD (active pass by default).
     ValidateDevice {
         /// VID:PID e.g. 0416:5302
         #[arg(long)]
@@ -47,6 +47,7 @@ pub enum Command {
         /// Required when duplicate VID:PIDs; always converted internally to explicit bus/address
         #[arg(long)]
         bus_address: Option<String>,
+        /// Read-only USB/hidraw inventory and descriptor capture (no handshake or frames).
         #[arg(long)]
         passive: bool,
         #[arg(long, default_value = "validation-results")]
@@ -85,7 +86,7 @@ pub enum CtlCommand {
     },
 }
 
-/// Run passive or active hardware validation for one USB display.
+/// Run hardware validation for one USB display (active guided pass or `--passive` preflight).
 pub fn run_validate_device_cmd(args: ValidateDeviceArgs) -> Result<()> {
     run_validate_device(args)?;
     Ok(())
