@@ -64,20 +64,81 @@ pub trait Prompt {
     }
 }
 
-/// Production prompt reading a single line from stdin.
-#[derive(Debug, Default)]
-pub struct StdioPrompt;
+/// One durable stdin line source for the whole validation session.
+struct StdinLineSource {
+    lines: std::sync::mpsc::Receiver<String>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StdinLineSource {
+    fn new() -> Self {
+        use std::io::{self, BufRead};
+        use std::sync::mpsc;
+        let (tx, lines) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut reader = stdin.lock();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            lines,
+            reader_thread: Some(reader_thread),
+        }
+    }
+
+    fn read_line_blocking(&mut self) -> String {
+        self.lines.recv().unwrap_or_default()
+    }
+
+    fn try_read_line(&self) -> Option<String> {
+        self.lines.try_recv().ok()
+    }
+}
+
+impl Drop for StdinLineSource {
+    fn drop(&mut self) {
+        // Detach rather than join: the reader may block on stdin between prompts.
+        self.reader_thread.take();
+    }
+}
+
+/// Production prompt reading lines from one shared stdin reader.
+pub struct StdioPrompt {
+    stdin: StdinLineSource,
+}
+
+impl StdioPrompt {
+    pub fn new() -> Self {
+        Self {
+            stdin: StdinLineSource::new(),
+        }
+    }
+}
+
+impl Default for StdioPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Prompt for StdioPrompt {
     fn yes_no(&mut self, question: &str) -> bool {
         use std::io::{self, Write};
         let _ = writeln!(io::stdout(), "{question} [y/N]");
         let _ = io::stdout().flush();
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
-            return false;
-        }
-        parse_yes_no_line(&line)
+        parse_yes_no_line(&self.stdin.read_line_blocking())
     }
 
     fn yes_no_with_hold(
@@ -87,25 +148,13 @@ impl Prompt for StdioPrompt {
         sleep: &mut impl FnMut(Duration),
     ) -> Result<bool, ValidationStage> {
         use std::io::{self, Write};
-        use std::sync::mpsc;
         let _ = writeln!(io::stdout(), "{question} [y/N]");
         let _ = io::stdout().flush();
-
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let response = if io::stdin().read_line(&mut line).is_ok() {
-                line
-            } else {
-                String::new()
-            };
-            let _ = tx.send(response);
-        });
 
         loop {
             hold()?;
             sleep(Duration::from_millis(CARD_PROMPT_HOLD_MS));
-            if let Ok(line) = rx.try_recv() {
+            if let Some(line) = self.stdin.try_read_line() {
                 return Ok(parse_yes_no_line(&line));
             }
         }
@@ -327,7 +376,7 @@ where
     H: HidrawInventory,
     F: SysfsAccess,
 {
-    let mut prompt = StdioPrompt;
+    let mut prompt = StdioPrompt::new();
     run_active_validation_with(
         vid,
         pid,
@@ -474,16 +523,22 @@ where
     ) {
         Ok(result) => result,
         Err(stage) => {
+            println!("=== Stage: restore daemon ===");
             restore_daemon(&mut guard, &mut report, &mut log);
+            println!("=== Stage: write report ===");
             write_validation_output(output_dir, &report, Some(&selected), &mut log)?;
+            println!("Done: {}", output_dir.display());
             bail!("validate-device failed at {stage:?}");
         }
     };
 
     if !negotiation.active_writes_allowed {
         conservative_stop(&mut report);
+        println!("=== Stage: restore daemon ===");
         restore_daemon(&mut guard, &mut report, &mut log);
+        println!("=== Stage: write report ===");
         write_validation_output(output_dir, &report, Some(&selected), &mut log)?;
+        println!("Done: {}", output_dir.display());
         bail!(
             "validate-device stopped before output: negotiated profile does not authorize active writes"
         );
@@ -509,12 +564,16 @@ where
         &mut log,
     ) {
         output.close();
+        println!("=== Stage: restore daemon ===");
         restore_daemon(&mut guard, &mut report, &mut log);
+        println!("=== Stage: write report ===");
         write_validation_output(output_dir, &report, Some(&selected), &mut log)?;
+        println!("Done: {}", output_dir.display());
         bail!("validate-device failed at {stage:?}");
     }
 
     output.close();
+    println!("=== Stage: restore daemon ===");
     restore_daemon(&mut guard, &mut report, &mut log);
 
     if let Err(error) = report.finalize_full_pass() {
@@ -526,12 +585,15 @@ where
             )],
         );
         log.info(format!("finalize error: {error}"));
+        println!("=== Stage: write report ===");
         write_validation_output(output_dir, &report, Some(&selected), &mut log)?;
+        println!("Done: {}", output_dir.display());
         bail!("validate-device failed to finalize: {error}");
     }
 
+    println!("=== Stage: write report ===");
     write_validation_output(output_dir, &report, Some(&selected), &mut log)?;
-    println!("{}", output_dir.display());
+    println!("Done: {}", output_dir.display());
     Ok(output_dir.to_path_buf())
 }
 
@@ -925,6 +987,8 @@ where
         ValidationStage::TargetMarker
     })?;
 
+    println!("=== Stage: visual cards ===");
+
     let mut active_write_recorded = false;
     for (step, frame) in VISUAL_CARD_STEPS.iter().zip(encoded.iter()) {
         if !active_write_recorded {
@@ -980,6 +1044,7 @@ where
     )?;
 
     println!();
+    println!("=== Stage: reconnect ===");
     println!("Reconnect test — unplug and replug the USB cable when ready.");
     if !prompt.yes_no("Reconnect the USB cable now, then answer yes when the display is back.") {
         let _ = report.fail_at(
@@ -992,23 +1057,53 @@ where
         return Err(ValidationStage::Reconnect);
     }
 
-    let entries = usb.inventory_matching(vid, pid).map_err(|error| {
-        log.info(format!("reconnect inventory error: {error:#}"));
-        ValidationStage::Reconnect
-    })?;
-    let new_selector = resolve_reconnect(&entries, previous_selector, bus_address_hint).map_err(
-        |error| {
+    println!("Re-scanning USB for {vid:04X}:{pid:04X}...");
+    let entries = match usb.inventory_matching(vid, pid) {
+        Ok(entries) => entries,
+        Err(error) => {
+            println!("USB re-scan failed: {error:#}");
+            log.info(format!("reconnect inventory error: {error:#}"));
+            let _ = report.fail_at(
+                ValidationStage::Reconnect,
+                &[(
+                    ValidationErrorKind::Device,
+                    "USB re-scan failed after reconnect",
+                )],
+            );
+            return Err(ValidationStage::Reconnect);
+        }
+    };
+    for entry in &entries {
+        println!(
+            "  found bus {} address {}",
+            entry.identity.bus,
+            entry.identity.address
+        );
+    }
+    if entries.is_empty() {
+        println!("No matching devices found after reconnect.");
+    }
+
+    let new_selector = match resolve_reconnect(&entries, previous_selector, bus_address_hint) {
+        Ok(selector) => selector,
+        Err(error) => {
+            println!("Reconnect failed: {error:#}");
             log.info(format!("reconnect selection error: {error:#}"));
             let _ = report.abort_at(
                 ValidationStage::Reconnect,
                 &[(
                     ValidationErrorKind::Device,
-                    "reconnect could not resolve a new bus/address",
+                    "reconnect could not resolve target bus/address",
                 )],
             );
-            ValidationStage::Reconnect
-        },
-    )?;
+            return Err(ValidationStage::Reconnect);
+        }
+    };
+    println!(
+        "Reconnect OK: bus {} address {}",
+        new_selector.bus,
+        new_selector.address
+    );
 
     // Exclude the reconnected target identity, not the pre-unplug address.
     let peers_after = snapshot_peers(usb, new_selector);
@@ -1043,7 +1138,7 @@ fn run_soak<Io: HidReportIo>(
             ValidationStage::Soak
         })?;
     println!(
-        "Soak: streaming for {soak_secs}s (progress every {SOAK_PROGRESS_INTERVAL_SECS}s)..."
+        "=== Stage: soak ({soak_secs} seconds, keeps last card on screen) ==="
     );
     let progress_every = SOAK_PROGRESS_INTERVAL_SECS.saturating_mul(5);
     let iterations = soak_secs.saturating_mul(5);
@@ -1084,8 +1179,12 @@ fn restore_daemon<C: ServiceControl, O: DeviceOwnership>(
     log: &mut ValidatorLog,
 ) {
     let restored = match guard.restore() {
-        Ok(()) => CheckStatus::Pass,
+        Ok(()) => {
+            println!("Daemon restored.");
+            CheckStatus::Pass
+        }
         Err(error) => {
+            println!("Daemon restore failed: {error:#}");
             log.info(format!("daemon restore error: {error:#}"));
             CheckStatus::Fail
         }
@@ -1146,31 +1245,47 @@ pub fn resolve_reconnect(
     previous: UsbBusAddress,
     bus_address_hint: Option<&str>,
 ) -> Result<UsbBusAddress> {
-    let candidates: Vec<_> = entries
+    if entries.is_empty() {
+        bail!("reconnect inventory found no matching devices; is the cooler plugged in?");
+    }
+
+    if let Some(hint) = bus_address_hint {
+        let (selector, _) = resolve_selection(entries, Some(hint))?;
+        return Ok(selector);
+    }
+
+    let new_address_candidates: Vec<_> = entries
         .iter()
         .filter(|entry| {
             entry.identity.bus != previous.bus || entry.identity.address != previous.address
         })
         .collect();
-    if candidates.is_empty() {
-        bail!("reconnect inventory has no device at a new bus/address");
-    }
-    if candidates.len() == 1 && bus_address_hint.is_none() {
-        let entry = candidates[0];
+
+    if new_address_candidates.len() == 1 {
+        let entry = new_address_candidates[0];
         return Ok(UsbBusAddress {
             bus: entry.identity.bus,
             address: entry.identity.address,
         });
     }
-    let hint = bus_address_hint.ok_or_else(|| {
-        anyhow::anyhow!("multiple reconnect candidates; pass --bus-address BUS:ADDRESS")
-    })?;
-    let (selector, _) = resolve_selection(entries, Some(hint))?;
-    ensure!(
-        selector.bus != previous.bus || selector.address != previous.address,
-        "reconnect resolved the same bus/address as before"
+
+    if new_address_candidates.len() > 1 {
+        bail!("multiple reconnect candidates at new bus/addresses; pass --bus-address BUS:ADDRESS");
+    }
+
+    // Device renumerated to the same bus/address (common on replug).
+    if entries.len() == 1 {
+        let entry = &entries[0];
+        return Ok(UsbBusAddress {
+            bus: entry.identity.bus,
+            address: entry.identity.address,
+        });
+    }
+
+    bail!(
+        "reconnect inventory has {} devices but none at a new bus/address; pass --bus-address BUS:ADDRESS",
+        entries.len()
     );
-    Ok(selector)
 }
 
 #[doc(hidden)]
@@ -1540,7 +1655,7 @@ mod active_tests {
     }
 
     #[test]
-    fn reconnect_requires_new_address() {
+    fn reconnect_prefers_new_address_when_available() {
         let entries = vec![
             inventory_entry(1, 5, hid_in_fingerprint(), false),
             inventory_entry(1, 8, hid_in_fingerprint(), false),
@@ -1548,6 +1663,21 @@ mod active_tests {
         let selector = resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None)
             .unwrap();
         assert_eq!(selector, UsbBusAddress { bus: 1, address: 8 });
+    }
+
+    #[test]
+    fn reconnect_allows_same_address_when_single_device() {
+        let entries = vec![inventory_entry(1, 5, hid_in_fingerprint(), false)];
+        let selector = resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None)
+            .unwrap();
+        assert_eq!(selector, UsbBusAddress { bus: 1, address: 5 });
+    }
+
+    #[test]
+    fn reconnect_empty_inventory_fails_fast() {
+        let error = resolve_reconnect(&[], UsbBusAddress { bus: 1, address: 5 }, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("no matching devices"));
     }
 
     #[test]
@@ -1563,7 +1693,20 @@ mod active_tests {
             None,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("multiple reconnect candidates"));
+        assert!(
+            error
+                .to_string()
+                .contains("multiple reconnect candidates at new bus/addresses")
+        );
+    }
+
+    #[test]
+    fn parse_yes_no_line_accepts_y_prefix() {
+        assert!(parse_yes_no_line("y"));
+        assert!(parse_yes_no_line("Y\n"));
+        assert!(parse_yes_no_line("  yes please"));
+        assert!(!parse_yes_no_line("n"));
+        assert!(!parse_yes_no_line(""));
     }
 
     #[test]
