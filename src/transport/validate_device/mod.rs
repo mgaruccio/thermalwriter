@@ -9,8 +9,8 @@ mod cards;
 pub mod test_support;
 
 pub use active::{
-    ActiveOptions, ActiveOutput, DEFAULT_SOAK_SECS, PeerIdentity, Prompt, ScriptedPrompt,
-    SpyTransport, StdioPrompt,
+    ActiveOptions, ActiveOutput, DEFAULT_SOAK_SECS, HoldScriptedPrompt, PeerIdentity, Prompt,
+    ScriptedPrompt, SpyTransport, StdioPrompt,
 };
 pub use cards::{TestCardBundle, encode_and_save_expected, generate_test_cards, pad_to_hid_chunks};
 

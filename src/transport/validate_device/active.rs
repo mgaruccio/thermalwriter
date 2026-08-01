@@ -44,14 +44,23 @@ use super::super::hid_report::SysfsAccess;
 /// Default soak duration for active validation (5 minutes).
 pub const DEFAULT_SOAK_SECS: u64 = 300;
 
-/// How many times each test card is sent before prompting the operator.
-const CARD_RESEND_COUNT: usize = 3;
-/// Pause between card resends so the panel can latch the frame.
-const CARD_HOLD_MS: u64 = 150;
+/// Pause between card refresh sends while waiting for an operator answer.
+const CARD_PROMPT_HOLD_MS: u64 = 200;
 
 /// Injectable yes/no prompts (stdin in production, scripted in tests).
 pub trait Prompt {
     fn yes_no(&mut self, question: &str) -> bool;
+
+    /// Send frames via `hold` until the operator answers the question.
+    fn yes_no_with_hold(
+        &mut self,
+        question: &str,
+        mut hold: impl FnMut() -> Result<(), ValidationStage>,
+        _sleep: &mut impl FnMut(Duration),
+    ) -> Result<bool, ValidationStage> {
+        hold()?;
+        Ok(self.yes_no(question))
+    }
 }
 
 /// Production prompt reading a single line from stdin.
@@ -67,8 +76,43 @@ impl Prompt for StdioPrompt {
         if io::stdin().read_line(&mut line).is_err() {
             return false;
         }
-        matches!(line.trim().chars().next(), Some('y' | 'Y'))
+        parse_yes_no_line(&line)
     }
+
+    fn yes_no_with_hold(
+        &mut self,
+        question: &str,
+        mut hold: impl FnMut() -> Result<(), ValidationStage>,
+        sleep: &mut impl FnMut(Duration),
+    ) -> Result<bool, ValidationStage> {
+        use std::io::{self, Write};
+        use std::sync::mpsc;
+        let _ = writeln!(io::stdout(), "{question} [y/N]");
+        let _ = io::stdout().flush();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let response = if io::stdin().read_line(&mut line).is_ok() {
+                line
+            } else {
+                String::new()
+            };
+            let _ = tx.send(response);
+        });
+
+        loop {
+            hold()?;
+            sleep(Duration::from_millis(CARD_PROMPT_HOLD_MS));
+            if let Ok(line) = rx.try_recv() {
+                return Ok(parse_yes_no_line(&line));
+            }
+        }
+    }
+}
+
+fn parse_yes_no_line(line: &str) -> bool {
+    matches!(line.trim().chars().next(), Some('y' | 'Y'))
 }
 
 /// Scripted prompt for unit tests.
@@ -95,6 +139,57 @@ impl Prompt for ScriptedPrompt {
         let answer = self.answers.get(self.index).copied().unwrap_or(false);
         self.index += 1;
         answer
+    }
+}
+
+/// Scripted prompt that only answers after a minimum number of hold callbacks.
+#[derive(Debug)]
+pub struct HoldScriptedPrompt {
+    pub answers: Vec<bool>,
+    pub index: usize,
+    pub asked: Vec<String>,
+    pub min_holds: usize,
+    holds_this_question: usize,
+}
+
+impl HoldScriptedPrompt {
+    pub fn new(answers: impl IntoIterator<Item = bool>, min_holds: usize) -> Self {
+        Self {
+            answers: answers.into_iter().collect(),
+            index: 0,
+            asked: Vec::new(),
+            min_holds,
+            holds_this_question: 0,
+        }
+    }
+}
+
+impl Prompt for HoldScriptedPrompt {
+    fn yes_no(&mut self, question: &str) -> bool {
+        self.asked.push(question.to_string());
+        let answer = self.answers.get(self.index).copied().unwrap_or(false);
+        self.index += 1;
+        answer
+    }
+
+    fn yes_no_with_hold(
+        &mut self,
+        question: &str,
+        mut hold: impl FnMut() -> Result<(), ValidationStage>,
+        sleep: &mut impl FnMut(Duration),
+    ) -> Result<bool, ValidationStage> {
+        self.asked.push(question.to_string());
+        self.holds_this_question = 0;
+        loop {
+            hold()?;
+            self.holds_this_question += 1;
+            sleep(Duration::from_millis(CARD_PROMPT_HOLD_MS));
+            if self.holds_this_question >= self.min_holds {
+                let answer = self.answers.get(self.index).copied().unwrap_or(false);
+                self.index += 1;
+                return Ok(answer);
+            }
+        }
     }
 }
 
@@ -733,30 +828,23 @@ const VISUAL_CARD_STEPS: [VisualCardStep; 3] = [
     },
 ];
 
-fn send_card_with_hold<Io: HidReportIo>(
+fn send_card_frame<Io: HidReportIo>(
     output: &mut ActiveOutput<Io>,
     frame: &EncodedFrame,
-    sleep: &mut impl FnMut(Duration),
     report: &mut HardwareValidationReport,
     log: &mut ValidatorLog,
 ) -> Result<(), ValidationStage> {
-    for attempt in 0..CARD_RESEND_COUNT {
-        output.send_encoded(frame).map_err(|error| {
-            log.info(format!("send frame error: {error:#}"));
-            let _ = report.fail_at(
-                ValidationStage::ActiveWrite,
-                &[(
-                    ValidationErrorKind::Transport,
-                    "failed to send validation frame",
-                )],
-            );
-            ValidationStage::ActiveWrite
-        })?;
-        if attempt + 1 < CARD_RESEND_COUNT {
-            sleep(Duration::from_millis(CARD_HOLD_MS));
-        }
-    }
-    Ok(())
+    output.send_encoded(frame).map_err(|error| {
+        log.info(format!("send frame error: {error:#}"));
+        let _ = report.fail_at(
+            ValidationStage::ActiveWrite,
+            &[(
+                ValidationErrorKind::Transport,
+                "failed to send validation frame",
+            )],
+        );
+        ValidationStage::ActiveWrite
+    })
 }
 
 fn build_card_prompt(
@@ -838,7 +926,6 @@ where
 
     let mut active_write_recorded = false;
     for (step, frame) in VISUAL_CARD_STEPS.iter().zip(encoded.iter()) {
-        send_card_with_hold(output, frame, sleep, report, log)?;
         if !active_write_recorded {
             let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
             active_write_recorded = true;
@@ -846,16 +933,29 @@ where
 
         let expected_png = output_dir.join(step.png_name);
         let question = build_card_prompt(step.label, vid, pid, &bundle, &expected_png);
-        if !prompt.yes_no(&question) {
+        if !prompt.yes_no_with_hold(
+            &question,
+            || send_card_frame(output, frame, report, log),
+            sleep,
+        )? {
             fail_visual(report, log, step.stage);
             return Err(step.stage);
         }
         let _ = report.record_check(step.check, CheckStatus::Pass);
     }
 
+    let colors_frame = encoded.last().ok_or_else(|| {
+        log.info("second-display prompt missing colors frame".to_string());
+        ValidationStage::SecondDisplayUnchanged
+    })?;
+
     if peers_before.is_empty() {
         let _ = report.record_check(CheckField::SecondDisplayUnchanged, CheckStatus::NotApplicable);
-    } else if !prompt.yes_no(&second_display_prompt()) {
+    } else if !prompt.yes_no_with_hold(
+        &second_display_prompt(),
+        || send_card_frame(output, colors_frame, report, log),
+        sleep,
+    )? {
         fail_visual(report, log, ValidationStage::SecondDisplayUnchanged);
         return Err(ValidationStage::SecondDisplayUnchanged);
     } else {
@@ -1502,6 +1602,42 @@ mod active_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("ExclusiveOwner"), "{error}");
+    }
+
+    #[test]
+    fn visual_prompt_holds_card_until_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let (usb, hidraw, sysfs) = active_fixture();
+        let mut io = Some(FakeHidIo::with_probe(&pm58()));
+        let writes = Arc::clone(&io.as_ref().unwrap().writes);
+        let writes_before = writes.lock().unwrap().len();
+        let error = run_active_validation_with(
+            0x0416,
+            0x5302,
+            None,
+            temp.path(),
+            &usb,
+            &hidraw,
+            &sysfs,
+            FakeControl::default(),
+            FakeOwnership::default(),
+            &mut HoldScriptedPrompt::new([false], 5),
+            ActiveOptions {
+                soak_secs: 0,
+                ..Default::default()
+            },
+            |_| {},
+            |_, _| Ok(HidReportReadSession::from_io(io.take().unwrap())),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("TargetMarker"), "{error}");
+        let writes_after = writes.lock().unwrap().len();
+        assert!(
+            writes_after >= writes_before + 5,
+            "expected at least 5 hold sends before answer, got {} -> {}",
+            writes_before,
+            writes_after
+        );
     }
 
     #[test]
