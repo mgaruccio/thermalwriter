@@ -14,7 +14,9 @@ use crate::service::guard::{
     DEFAULT_SERVICE_UNIT, DefaultDeviceOwnership, DeviceOwnership, OwnershipTarget, ServiceControl,
     ServiceGuard, SystemdUserControl,
 };
-use crate::transport::discovery::{open_discovered, scan_devices, DiscoveredDevice, KNOWN_LCD_IDS};
+use crate::transport::discovery::{
+    discovered_bulk_from_fingerprint, open_discovered, DiscoveredDevice, KNOWN_LCD_IDS,
+};
 use crate::transport::hid_report::{
     HidReadObservation, HidReportIo, HidReportProbeError, HidReportReadSession,
     HidReportWriteSession, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
@@ -643,11 +645,12 @@ fn negotiate_bulk<Io: HidReportIo>(
     vid: u16,
     pid: u16,
     selector: UsbBusAddress,
-    _selected: &InventoryEntry,
+    selected: &InventoryEntry,
     report: &mut HardwareValidationReport,
     log: &mut ValidatorLog,
 ) -> Result<NegotiationResult<Io>, ValidationStage> {
-    let discovered = discovered_for_selector(vid, pid, selector).map_err(|error| {
+    let discovered =
+        discovered_for_selector(vid, pid, selector, selected).map_err(|error| {
         log.info(format!("discovery error: {error:#}"));
         let _ = report.fail_at(
             ValidationStage::Handshake,
@@ -904,28 +907,27 @@ fn fail_visual(
     log.info(format!("visual check failed at {stage:?}"));
 }
 
-fn discovered_for_selector(vid: u16, pid: u16, selector: UsbBusAddress) -> Result<DiscoveredDevice> {
-    let devices = scan_devices()?;
-    let mut matches = devices.into_iter().filter(|device| {
-        device.vid == vid
-            && device.pid == pid
-            && matches!(
-                device.path,
-                crate::transport::discovery::DevicePath::Usb {
-                    bus,
-                    address,
-                    ..
-                } if bus == selector.bus && address == selector.address
-            )
-    });
-    let first = matches
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no discovered device at selected bus/address"))?;
+fn discovered_for_selector(
+    vid: u16,
+    pid: u16,
+    selector: UsbBusAddress,
+    selected: &InventoryEntry,
+) -> Result<DiscoveredDevice> {
     ensure!(
-        matches.next().is_none(),
-        "multiple discovered devices at selected bus/address"
+        selected.identity.bus == selector.bus && selected.identity.address == selector.address,
+        "selected inventory entry does not match bus/address selector"
     );
-    Ok(first)
+    ensure!(
+        selected.identity.fingerprint.vid == vid && selected.identity.fingerprint.pid == pid,
+        "selected inventory VID:PID does not match validate target"
+    );
+    discovered_bulk_from_fingerprint(
+        vid,
+        pid,
+        selector.bus,
+        selector.address,
+        &selected.identity.fingerprint,
+    )
 }
 
 #[doc(hidden)]
@@ -1527,5 +1529,52 @@ mod active_tests {
         let _ = spy.handshake();
         let _ = spy.send_frame(&frame);
         assert_eq!(spy.writes, 1);
+    }
+
+    #[test]
+    fn bulk_discovered_from_inventory_ignores_peer_hid_presence() {
+        let bulk_fp = UsbFingerprint {
+            vid: 0x87ad,
+            pid: 0x70db,
+            bcd_device: "1.00".to_string(),
+            interfaces: vec![UsbInterfaceShape {
+                number: 1,
+                alternate_setting: 0,
+                class: 0xff,
+                subclass: 0,
+                protocol: 0,
+                endpoints: vec![
+                    UsbEndpointCapability {
+                        address: 0x81,
+                        direction: UsbDirection::In,
+                        transfer: UsbTransferKind::Bulk,
+                        max_packet_size: 512,
+                        interval: 0,
+                    },
+                    UsbEndpointCapability {
+                        address: 0x02,
+                        direction: UsbDirection::Out,
+                        transfer: UsbTransferKind::Bulk,
+                        max_packet_size: 512,
+                        interval: 0,
+                    },
+                ],
+            }],
+        };
+        let bulk_entry = inventory_entry(1, 10, bulk_fp, false);
+        let selector = UsbBusAddress { bus: 1, address: 10 };
+        let discovered =
+            discovered_for_selector(0x87ad, 0x70db, selector, &bulk_entry).expect("bulk path");
+        assert_eq!(discovered.protocol, WireProtocol::Bulk);
+        assert_eq!(
+            discovered.path,
+            crate::transport::discovery::DevicePath::Usb {
+                bus: 1,
+                address: 10,
+                interface: 1,
+                ep_in: 0x81,
+                ep_out: 0x02,
+            }
+        );
     }
 }
