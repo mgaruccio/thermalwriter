@@ -15,3 +15,6 @@ gui/src-tauri/gen/
 
 # Release QA generated reports
 scripts/release-qa/out/
+
+# Local hardware validation bundles (may contain private topology in logs)
+/validation-results/
