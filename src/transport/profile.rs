@@ -254,10 +254,11 @@ const FBL_128: FblBase = FblBase {
     encoding: FrameEncoding::Jpeg,
     rotate_panel: true,
     widescreen: true,
+    // TRCC parity: base 0, invert true, no phantom sub overrides (#203).
     encode_base: 0,
     encode_invert: true,
     encode_pm_bases: &[],
-    encode_sub_bases: &[(2, 90)],
+    encode_sub_bases: &[],
 };
 const FBL_129: FblBase = FBL_72;
 const FBL_192: FblBase = FblBase {

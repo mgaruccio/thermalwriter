@@ -176,7 +176,22 @@ pub fn encode_frame(
         );
     }
 
-    let angle = wire_angle(&info.profile, rotation)?;
+    // Trofeo Vision / FBL128 (and TRCC solid-color path): rotate_panel JPEG
+    // panels need a 90° wire transform so the payload is portrait while the
+    // Type2 header keeps native landscape dims. Without this the firmware
+    // accepts USB writes but never leaves the boot logo.
+    let mut angle = wire_angle(&info.profile, rotation)?;
+    // HID Type2 Trofeo (FBL128) solid-color parity with TRCC: portrait JPEG
+    // payload + native landscape header. Bulk widescreen panels keep wire_angle only.
+    if matches!(
+        info.protocol,
+        crate::transport::profile::WireProtocol::HidType2
+    ) && info.profile.rotate_panel
+        && info.profile.widescreen
+        && info.encoding().is_jpeg()
+    {
+        angle = ((u32::from(angle) + 90) % 360) as u16;
+    }
     let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, angle)?;
 
     let encoding = info.encoding();

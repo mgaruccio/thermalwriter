@@ -545,16 +545,6 @@ pub fn build_frame_type3(image_data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) -> Result<()> {
-    let (wire_width, wire_height) = info.wire_dimensions()?;
-    if frame.width != wire_width || frame.height != wire_height {
-        bail!(
-            "frame {}x{} does not match wire dimensions {}x{}",
-            frame.width,
-            frame.height,
-            wire_width,
-            wire_height
-        );
-    }
     if frame.encoding != info.encoding() {
         bail!(
             "frame encoding {} does not match device {}",
@@ -565,11 +555,25 @@ fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) ->
     if kind == HidType::Type3 && !frame.encoding.is_rgb565() {
         bail!("HID Type3 requires RGB565, got {}", frame.encoding);
     }
+    // Type2 JPEG: payload may be portrait-rotated while the header carries
+    // native landscape dims (TRCC Trofeo / FBL128 solid-color parity).
+    if !(kind == HidType::Type2 && frame.encoding.is_jpeg()) {
+        let (wire_width, wire_height) = info.wire_dimensions()?;
+        if frame.width != wire_width || frame.height != wire_height {
+            bail!(
+                "frame {}x{} does not match wire dimensions {}x{}",
+                frame.width,
+                frame.height,
+                wire_width,
+                wire_height
+            );
+        }
+    }
     if frame.encoding.is_rgb565() {
-        let expected_len = usize::try_from(wire_width)
+        let expected_len = usize::try_from(frame.width)
             .ok()
             .and_then(|width| {
-                usize::try_from(wire_height)
+                usize::try_from(frame.height)
                     .ok()
                     .and_then(|height| width.checked_mul(height))
             })
@@ -577,10 +581,10 @@ fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) ->
             .context("HID RGB565 wire payload size overflow")?;
         if frame.data.len() != expected_len {
             bail!(
-                "RGB565 payload length {} does not match {}x{} wire frame ({} bytes)",
+                "RGB565 payload length {} does not match {}x{} frame ({} bytes)",
                 frame.data.len(),
-                wire_width,
-                wire_height,
+                frame.width,
+                frame.height,
                 expected_len
             );
         }
@@ -596,6 +600,10 @@ fn send_frame_with_io(
 ) -> Result<usize> {
     validate_hid_frame(kind, info, frame)?;
     let packet = match kind {
+        // JPEG header carries native profile dims; payload may be portrait-rotated.
+        HidType::Type2 if frame.encoding.is_jpeg() => {
+            build_frame_type2(&frame.data, info.width(), info.height(), frame.encoding)
+        }
         HidType::Type2 => build_frame_type2(&frame.data, frame.width, frame.height, frame.encoding),
         HidType::Type3 => build_frame_type3(&frame.data)?,
     };
