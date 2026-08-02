@@ -15,16 +15,18 @@ use crate::service::guard::{
     ServiceGuard, SystemdUserControl,
 };
 use crate::transport::discovery::{
-    discovered_bulk_from_fingerprint, open_discovered, DiscoveredDevice, KNOWN_LCD_IDS,
+    DiscoveredDevice, KNOWN_LCD_IDS, discovered_exact_square_from_fingerprint, open_discovered,
 };
+use crate::transport::hid_lcd::HidLcd;
 use crate::transport::hid_report::{
     HidReadObservation, HidReportIo, HidReportProbeError, HidReportReadSession,
-    HidReportWriteSession, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT,
-    PROTOCOL_CHUNK_BYTES, UsbBusAddress,
+    HidReportWriteSession, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
+    UsbBusAddress,
 };
+use crate::transport::policy::{ExactDevicePolicy, PM58_RESPONSE, PM128_RESPONSE};
 use crate::transport::profile::{DeviceInfo, WireProtocol, build_device_info};
 use crate::transport::type2_policy::{
-    Type2NegotiatedObservation, Type2PreHandshakePolicy, TYPE2_PROBE_READ_BOUND,
+    TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy,
     select_type2_pre_handshake_policy,
 };
 use crate::transport::validation_report::{
@@ -33,13 +35,15 @@ use crate::transport::validation_report::{
 };
 use crate::transport::{EncodedFrame, Transport};
 
-use super::cards::{encode_and_save_expected, generate_test_cards, pad_to_hid_chunks, TestCardBundle};
-use super::{
-    InventoryEntry, PassivePreflightContext, PreflightResult, UsbInventory, ValidatorLog,
-    correlate_hidraw_if_needed, device_has_hid_shape, resolve_selection, run_passive_preflight,
-    write_validation_output, HidrawInventory,
-};
 use super::super::hid_report::SysfsAccess;
+use super::cards::{
+    TestCardBundle, encode_and_save_expected, generate_test_cards, pad_to_hid_chunks,
+};
+use super::{
+    HidrawInventory, InventoryEntry, PassivePreflightContext, PreflightResult, UsbInventory,
+    ValidatorLog, correlate_hidraw_if_needed, device_has_hid_shape, resolve_selection,
+    run_passive_preflight, write_validation_output,
+};
 
 /// Default soak duration for active validation (5 minutes).
 pub const DEFAULT_SOAK_SECS: u64 = 300;
@@ -433,10 +437,8 @@ where
     P: Prompt,
     Io: HidReportIo,
 {
-    let mut report = HardwareValidationReport::new_in_progress(
-        EvidenceOrigin::Physical,
-        ValidationScope::Full,
-    );
+    let mut report =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Physical, ValidationScope::Full);
     let mut log = ValidatorLog::new();
 
     let passive = run_passive_preflight(PassivePreflightContext {
@@ -469,8 +471,13 @@ where
     };
     let peers_before = snapshot_peers(usb, selector);
 
-    let ownership_target =
-        build_ownership_target(&selected.identity.fingerprint, selector, hidraw, sysfs, &mut log)?;
+    let ownership_target = build_ownership_target(
+        &selected.identity.fingerprint,
+        selector,
+        hidraw,
+        sysfs,
+        &mut log,
+    )?;
 
     let mut guard = match ServiceGuard::acquire(
         service_control,
@@ -623,6 +630,19 @@ where
     let _ = report.set_pre_handshake_policy(policy);
     match policy {
         Type2PreHandshakePolicy::Hid407ReadOnlyProbe => {
+            if !matches!(
+                crate::transport::policy::exact_descriptor_policy(&selected.identity.fingerprint),
+                Ok(crate::transport::policy::ExactDescriptorPolicy::Type2)
+            ) {
+                let _ = report.fail_at(
+                    ValidationStage::PassiveAllowlist,
+                    &[(
+                        ValidationErrorKind::Policy,
+                        "descriptor is not the exact Type2 production shape",
+                    )],
+                );
+                return Err(ValidationStage::PassiveAllowlist);
+            }
             negotiate_hid407(vid, pid, selector, hidraw, sysfs, open_hid, report, log)
         }
         Type2PreHandshakePolicy::LegacyBulkInit => {
@@ -692,10 +712,9 @@ where
     })?;
 
     let _ = report.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
-    let _ = report
-        .set_hid_descriptor_status(DescriptorCaptureStatus::Captured);
+    let _ = report.set_hid_descriptor_status(DescriptorCaptureStatus::Captured);
 
-    let observation = match session.probe_type2_read_only(500) {
+    let observation = match session.probe_type2_passive(500) {
         Ok(obs) => obs,
         Err(HidReportProbeError::Read(read_error)) => {
             log.info(format!("HID probe read error: {read_error}"));
@@ -708,10 +727,7 @@ where
             );
             let _ = report.fail_at(
                 ValidationStage::Handshake,
-                &[(
-                    ValidationErrorKind::Transport,
-                    "HID read-only probe failed",
-                )],
+                &[(ValidationErrorKind::Transport, "HID read-only probe failed")],
             );
             let _ = report.record_check(CheckField::Handshake, CheckStatus::Fail);
             return Err(ValidationStage::Handshake);
@@ -744,7 +760,33 @@ where
     }
     let _ = report.record_check(CheckField::Handshake, CheckStatus::Pass);
 
-    if !observation.policy().active_writes_allowed() {
+    if observation.response() == PM128_RESPONSE || !observation.policy().active_writes_allowed() {
+        if observation.response() == PM128_RESPONSE {
+            // The passive hidraw observation never authorizes PM128. Close it,
+            // then use the same fresh libusb transition as production output.
+            drop(session);
+            let mut transport =
+                HidLcd::open_type2_libusb(selector.bus, selector.address, 0, 0x83, 0x02).map_err(
+                    |error| {
+                        log.info(format!("PM128 libusb open error: {error:#}"));
+                        ValidationStage::Negotiation
+                    },
+                )?;
+            let device_info = transport.handshake().map_err(|error| {
+                log.info(format!("PM128 libusb negotiation error: {error:#}"));
+                ValidationStage::Negotiation
+            })?;
+            let transport: Box<dyn Transport> = Box::new(transport);
+            if device_info.authorized_policy() != Some(ExactDevicePolicy::Type2Pm128) {
+                return Err(ValidationStage::Negotiation);
+            }
+            let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
+            return Ok(NegotiationResult {
+                device_info,
+                active_writes_allowed: true,
+                output: ActiveOutput::Bulk(transport),
+            });
+        }
         let device_info = build_device_info(
             WireProtocol::HidType2,
             vid,
@@ -754,7 +796,6 @@ where
             None,
         )
         .map_err(|_| ValidationStage::Negotiation)?;
-        let _ = session;
         return Ok(NegotiationResult {
             device_info,
             active_writes_allowed: false,
@@ -784,15 +825,19 @@ where
     );
     let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
 
-    let device_info = build_device_info(
-        WireProtocol::HidType2,
-        vid,
-        pid,
-        observation.pm(),
-        observation.sub(),
-        None,
-    )
-    .map_err(|_| ValidationStage::Negotiation)?;
+    let device_info = if observation.response() == PM58_RESPONSE {
+        ExactDevicePolicy::Type2Pm58.device_info()
+    } else {
+        build_device_info(
+            WireProtocol::HidType2,
+            vid,
+            pid,
+            observation.pm(),
+            observation.sub(),
+            None,
+        )
+        .map_err(|_| ValidationStage::Negotiation)?
+    };
 
     Ok(NegotiationResult {
         active_writes_allowed: true,
@@ -824,8 +869,7 @@ fn negotiate_bulk<Io: HidReportIo>(
     report: &mut HardwareValidationReport,
     log: &mut ValidatorLog,
 ) -> Result<NegotiationResult<Io>, ValidationStage> {
-    let discovered =
-        discovered_for_selector(vid, pid, selector, selected).map_err(|error| {
+    let discovered = discovered_for_selector(vid, pid, selector, selected).map_err(|error| {
         log.info(format!("discovery error: {error:#}"));
         let _ = report.fail_at(
             ValidationStage::Handshake,
@@ -1015,7 +1059,10 @@ where
     })?;
 
     if peers_before.is_empty() {
-        let _ = report.record_check(CheckField::SecondDisplayUnchanged, CheckStatus::NotApplicable);
+        let _ = report.record_check(
+            CheckField::SecondDisplayUnchanged,
+            CheckStatus::NotApplicable,
+        );
     } else {
         println!("Second display check — verify the other cooler LCD is unchanged.");
         if !prompt.yes_no_with_hold(
@@ -1026,8 +1073,7 @@ where
             fail_visual(report, log, ValidationStage::SecondDisplayUnchanged);
             return Err(ValidationStage::SecondDisplayUnchanged);
         }
-        let _ = report
-            .record_check(CheckField::SecondDisplayUnchanged, CheckStatus::Pass);
+        let _ = report.record_check(CheckField::SecondDisplayUnchanged, CheckStatus::Pass);
     }
 
     let colors_frame = encoded.last().ok_or_else(|| {
@@ -1076,8 +1122,7 @@ where
     for entry in &entries {
         println!(
             "  found bus {} address {}",
-            entry.identity.bus,
-            entry.identity.address
+            entry.identity.bus, entry.identity.address
         );
     }
     if entries.is_empty() {
@@ -1101,8 +1146,7 @@ where
     };
     println!(
         "Reconnect OK: bus {} address {}",
-        new_selector.bus,
-        new_selector.address
+        new_selector.bus, new_selector.address
     );
 
     // Exclude the reconnected target identity, not the pre-unplug address.
@@ -1131,15 +1175,11 @@ fn run_soak<Io: HidReportIo>(
     report: &mut HardwareValidationReport,
     log: &mut ValidatorLog,
 ) -> Result<(), ValidationStage> {
-    let frame = encoded
-        .first()
-        .ok_or_else(|| {
-            log.info("soak missing encoded frame".to_string());
-            ValidationStage::Soak
-        })?;
-    println!(
-        "=== Stage: soak ({soak_secs} seconds, keeps last card on screen) ==="
-    );
+    let frame = encoded.first().ok_or_else(|| {
+        log.info("soak missing encoded frame".to_string());
+        ValidationStage::Soak
+    })?;
+    println!("=== Stage: soak ({soak_secs} seconds, keeps last card on screen) ===");
     let progress_every = SOAK_PROGRESS_INTERVAL_SECS.saturating_mul(5);
     let iterations = soak_secs.saturating_mul(5);
     for i in 0..iterations {
@@ -1230,13 +1270,29 @@ fn discovered_for_selector(
         selected.identity.fingerprint.vid == vid && selected.identity.fingerprint.pid == pid,
         "selected inventory VID:PID does not match validate target"
     );
-    discovered_bulk_from_fingerprint(
-        vid,
-        pid,
+    match discovered_exact_square_from_fingerprint(
         selector.bus,
         selector.address,
         &selected.identity.fingerprint,
-    )
+    ) {
+        Ok(device) => Ok(device),
+        Err(error) => {
+            #[cfg(test)]
+            {
+                return crate::transport::discovery::discovered_bulk_from_fingerprint(
+                    vid,
+                    pid,
+                    selector.bus,
+                    selector.address,
+                    &selected.identity.fingerprint,
+                );
+            }
+            #[cfg(not(test))]
+            {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -1289,10 +1345,7 @@ pub fn resolve_reconnect(
 }
 
 #[doc(hidden)]
-pub fn snapshot_peers<I: UsbInventory>(
-    usb: &I,
-    target: UsbBusAddress,
-) -> BTreeSet<PeerIdentity> {
+pub fn snapshot_peers<I: UsbInventory>(usb: &I, target: UsbBusAddress) -> BTreeSet<PeerIdentity> {
     let mut peers = BTreeSet::new();
     for (vid, pid, _) in KNOWN_LCD_IDS {
         let Ok(entries) = usb.inventory_matching(*vid, *pid) else {
@@ -1356,14 +1409,14 @@ mod active_tests {
     use super::*;
     use crate::service::guard::{DeviceOwnership, OwnershipTarget, ServiceControl};
     use crate::transport::hid_report::{HidReportIo, HidReportReadSession, PROTOCOL_CHUNK_BYTES};
-    use crate::transport::validation_report::{
-        EvidenceOrigin, HardwareValidationReport, ValidationScope,
-    };
-    use crate::transport::{EncodedFrame, FrameEncoding};
     use crate::transport::usb_fingerprint::{
         UsbDirection, UsbEndpointCapability, UsbFingerprint, UsbInterfaceShape, UsbRunIdentity,
         UsbTransferKind,
     };
+    use crate::transport::validation_report::{
+        EvidenceOrigin, HardwareValidationReport, ValidationScope,
+    };
+    use crate::transport::{EncodedFrame, FrameEncoding};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -1442,20 +1495,39 @@ mod active_tests {
             vid: 0x0416,
             pid: 0x5302,
             bcd_device: "4.07".to_string(),
-            interfaces: vec![UsbInterfaceShape {
-                number: 0,
-                alternate_setting: 0,
-                class: 3,
-                subclass: 0,
-                protocol: 0,
-                endpoints: vec![UsbEndpointCapability {
-                    address: 0x81,
-                    direction: UsbDirection::In,
-                    transfer: UsbTransferKind::Interrupt,
-                    max_packet_size: 8,
-                    interval: 1,
-                }],
-            }],
+            interfaces: vec![
+                UsbInterfaceShape {
+                    number: 0,
+                    alternate_setting: 0,
+                    class: 3,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        UsbEndpointCapability {
+                            address: 0x83,
+                            direction: UsbDirection::In,
+                            transfer: UsbTransferKind::Interrupt,
+                            max_packet_size: 8,
+                            interval: 1,
+                        },
+                        UsbEndpointCapability {
+                            address: 0x02,
+                            direction: UsbDirection::Out,
+                            transfer: UsbTransferKind::Interrupt,
+                            max_packet_size: 512,
+                            interval: 1,
+                        },
+                    ],
+                },
+                UsbInterfaceShape {
+                    number: 1,
+                    alternate_setting: 0,
+                    class: 255,
+                    subclass: 255,
+                    protocol: 255,
+                    endpoints: vec![],
+                },
+            ],
         }
     }
 
@@ -1660,23 +1732,22 @@ mod active_tests {
             inventory_entry(1, 5, hid_in_fingerprint(), false),
             inventory_entry(1, 8, hid_in_fingerprint(), false),
         ];
-        let selector = resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None)
-            .unwrap();
+        let selector =
+            resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None).unwrap();
         assert_eq!(selector, UsbBusAddress { bus: 1, address: 8 });
     }
 
     #[test]
     fn reconnect_allows_same_address_when_single_device() {
         let entries = vec![inventory_entry(1, 5, hid_in_fingerprint(), false)];
-        let selector = resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None)
-            .unwrap();
+        let selector =
+            resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None).unwrap();
         assert_eq!(selector, UsbBusAddress { bus: 1, address: 5 });
     }
 
     #[test]
     fn reconnect_empty_inventory_fails_fast() {
-        let error = resolve_reconnect(&[], UsbBusAddress { bus: 1, address: 5 }, None)
-            .unwrap_err();
+        let error = resolve_reconnect(&[], UsbBusAddress { bus: 1, address: 5 }, None).unwrap_err();
         assert!(error.to_string().contains("no matching devices"));
     }
 
@@ -1687,12 +1758,8 @@ mod active_tests {
             inventory_entry(1, 8, hid_in_fingerprint(), false),
             inventory_entry(1, 9, hid_in_fingerprint(), false),
         ];
-        let error = resolve_reconnect(
-            &entries,
-            UsbBusAddress { bus: 1, address: 5 },
-            None,
-        )
-        .unwrap_err();
+        let error =
+            resolve_reconnect(&entries, UsbBusAddress { bus: 1, address: 5 }, None).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1722,7 +1789,13 @@ mod active_tests {
                 inventory_entry(3, 21, hid_in_fingerprint(), false),
             ],
         };
-        let peers = snapshot_peers(&usb, UsbBusAddress { bus: 3, address: 21 });
+        let peers = snapshot_peers(
+            &usb,
+            UsbBusAddress {
+                bus: 3,
+                address: 21,
+            },
+        );
         assert!(peers.contains(&PeerIdentity {
             vid: 0x87ad,
             pid: 0x70db,
@@ -1755,7 +1828,11 @@ mod active_tests {
             &mut ScriptedPrompt::default(),
             ActiveOptions::default(),
             |_| {},
-            |_, _| Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(&pm58()))),
+            |_, _| {
+                Ok(HidReportReadSession::from_io(
+                    FakeHidIo::with_probe(&pm58()),
+                ))
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("ExclusiveOwner"), "{error}");
@@ -1817,7 +1894,11 @@ mod active_tests {
                 ..Default::default()
             },
             |_| {},
-            |_, _| Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(&pm58()))),
+            |_, _| {
+                Ok(HidReportReadSession::from_io(
+                    FakeHidIo::with_probe(&pm58()),
+                ))
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("TargetMarker"), "{error}");
@@ -1851,7 +1932,11 @@ mod active_tests {
                 ..Default::default()
             },
             |_| {},
-            |_, _| Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(&pm58()))),
+            |_, _| {
+                Ok(HidReportReadSession::from_io(
+                    FakeHidIo::with_probe(&pm58()),
+                ))
+            },
         )
         .unwrap_err();
         assert!(
@@ -1887,7 +1972,11 @@ mod active_tests {
                 ..Default::default()
             },
             |_| {},
-            |_, _| Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(&pm58()))),
+            |_, _| {
+                Ok(HidReportReadSession::from_io(
+                    FakeHidIo::with_probe(&pm58()),
+                ))
+            },
         );
         let recorded = calls.borrow();
         assert!(
@@ -1898,8 +1987,10 @@ mod active_tests {
 
     #[test]
     fn synthetic_origin_not_tested_eligible() {
-        let report =
-            HardwareValidationReport::new_in_progress(EvidenceOrigin::Synthetic, ValidationScope::Full);
+        let report = HardwareValidationReport::new_in_progress(
+            EvidenceOrigin::Synthetic,
+            ValidationScope::Full,
+        );
         assert!(!report.eligible_for_tested());
     }
 
@@ -1951,7 +2042,10 @@ mod active_tests {
             }],
         };
         let bulk_entry = inventory_entry(1, 10, bulk_fp, false);
-        let selector = UsbBusAddress { bus: 1, address: 10 };
+        let selector = UsbBusAddress {
+            bus: 1,
+            address: 10,
+        };
         let discovered =
             discovered_for_selector(0x87ad, 0x70db, selector, &bulk_entry).expect("bulk path");
         assert_eq!(discovered.protocol, WireProtocol::Bulk);

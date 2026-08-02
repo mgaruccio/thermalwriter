@@ -18,9 +18,10 @@ use super::ly_lcd::LyLcd;
 use super::null::{NullTransport, TransportKind, transport_from_env};
 use super::profile::{DeviceInfo, WireProtocol, device_info_from_fixture, fixture_by_id};
 use super::scsi_lcd::ScsiLcd;
+use super::usb_device::find_device;
 use super::usb_fingerprint::{
     DerivedBulkPair, UsbDirection, UsbFingerprint, UsbTransferKind, derive_bulk_pair,
-    derive_vendor_bulk_pair, fingerprint_from_device, unsupported_known_shape_message,
+    derive_vendor_bulk_pair, fingerprint_from_device,
 };
 
 /// How the user selects which LCD to open.
@@ -366,6 +367,34 @@ pub fn discovered_bulk_from_fingerprint(
     })
 }
 
+/// Build the only production bulk route from a complete exact fingerprint.
+pub fn discovered_exact_square_from_fingerprint(
+    bus: u8,
+    address: u8,
+    fingerprint: &UsbFingerprint,
+) -> Result<DiscoveredDevice> {
+    anyhow::ensure!(
+        matches!(
+            crate::transport::policy::exact_descriptor_policy(fingerprint),
+            Ok(crate::transport::policy::ExactDescriptorPolicy::Square87ad)
+        ),
+        "fingerprint is not the exact square production descriptor"
+    );
+    Ok(DiscoveredDevice {
+        vid: fingerprint.vid,
+        pid: fingerprint.pid,
+        protocol: WireProtocol::Bulk,
+        serial: None,
+        path: DevicePath::Usb {
+            bus,
+            address,
+            interface: 0,
+            ep_in: 0x81,
+            ep_out: 0x01,
+        },
+    })
+}
+
 fn read_fingerprint<T: rusb::UsbContext>(
     device: &rusb::Device<T>,
     bus: u8,
@@ -387,7 +416,7 @@ pub fn scan_devices() -> Result<Vec<DiscoveredDevice>> {
 
 fn scan_usb(
     out: &mut Vec<DiscoveredDevice>,
-    scsi_candidates: &mut Vec<ScsiUsbCandidate>,
+    _scsi_candidates: &mut Vec<ScsiUsbCandidate>,
 ) -> Result<()> {
     let list = rusb::devices().context("libusb device list failed")?;
     for device in list.iter() {
@@ -398,132 +427,52 @@ fn scan_usb(
         })?;
         let vid = desc.vendor_id();
         let pid = desc.product_id();
-        let Some(protocol) = protocol_for_id(vid, pid) else {
-            continue;
-        };
-
-        // 0416:5406 — prefer vendor bulk endpoints; else leave for SCSI scan.
-        if vid == 0x0416 && pid == 0x5406 {
-            let fingerprint = read_fingerprint(&device, bus, address)?;
-            let endpoints = vendor_bulk_endpoints(derive_vendor_bulk_pair(&fingerprint));
-            if let Some((iface, ep_in, ep_out)) = endpoints {
-                out.push(DiscoveredDevice {
-                    vid,
-                    pid,
-                    protocol: WireProtocol::Bulk,
-                    serial: None,
-                    path: DevicePath::Usb {
-                        bus,
-                        address,
-                        interface: iface,
-                        ep_in,
-                        ep_out,
-                    },
-                });
-            } else {
-                // Mass-storage bulk endpoints are the SCSI shape, not the
-                // vendor-bulk shape. Defer them to scsi_generic discovery.
-                scsi_candidates.push(ScsiUsbCandidate {
-                    vid,
-                    pid,
-                    bus,
-                    address,
-                });
-            }
-            continue;
-        }
-
-        // SCSI IDs are claimed via /dev/sg* (scan_scsi), not raw bulk.
-        if matches!(protocol, WireProtocol::Scsi) {
-            scsi_candidates.push(ScsiUsbCandidate {
-                vid,
-                pid,
-                bus,
-                address,
-            });
+        if protocol_for_id(vid, pid).is_none() {
             continue;
         }
 
         let fingerprint = read_fingerprint(&device, bus, address)?;
-        match usb_bulk_discovery_outcome(protocol, &fingerprint) {
-            UsbBulkDiscoveryOutcome::Endpoints(iface, ep_in, ep_out) => {
-                out.push(DiscoveredDevice {
+        let descriptor = match crate::transport::policy::exact_descriptor_policy(&fingerprint) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                log::warn!(
+                    "ignoring unsupported known LCD {:04x}:{:04x}: {error:#}",
                     vid,
-                    pid,
-                    protocol,
-                    serial: None,
-                    path: DevicePath::Usb {
-                        bus,
-                        address,
-                        interface: iface,
-                        ep_in,
-                        ep_out,
-                    },
-                });
+                    pid
+                );
+                continue;
             }
-            UsbBulkDiscoveryOutcome::Unsupported => {
-                bail!(unsupported_known_shape_message(
-                    vid,
-                    pid,
-                    protocol.as_str(),
-                    &fingerprint
-                ));
+        };
+        let (protocol, interface, ep_in, ep_out) = match descriptor {
+            crate::transport::policy::ExactDescriptorPolicy::Square87ad => {
+                (WireProtocol::Bulk, 0, 0x81, 0x01)
             }
-        }
-    }
-    Ok(())
-}
-
-fn scan_scsi(out: &mut Vec<DiscoveredDevice>) -> Result<()> {
-    let sg_root = Path::new("/sys/class/scsi_generic");
-    if !sg_root.exists() {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(sg_root)
-        .with_context(|| format!("failed to read {}", sg_root.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("failed to enumerate {}", sg_root.display()))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("sg") {
-            continue;
-        }
-        let sysfs = entry.path();
-        let Some(ancestor) = resolve_usb_ancestor(&sysfs) else {
-            continue;
+            crate::transport::policy::ExactDescriptorPolicy::Type2 => {
+                (WireProtocol::HidType2, 0, 0x83, 0x02)
+            }
         };
-        let (vid, pid) = (ancestor.vid, ancestor.pid);
-        // Prefer a vendor-bulk interface only when it belongs to this same
-        // physical dual-path device. Identical coolers remain distinct.
-        let bulk_claimed = out
-            .iter()
-            .any(|device| belongs_to_usb_ancestor(device, ancestor));
-        let Some(protocol) = scsi_protocol_for_id(vid, pid, bulk_claimed) else {
-            continue;
-        };
-        let devnode = PathBuf::from(format!("/dev/{name}"));
-        if !devnode.exists() {
-            bail!(
-                "SCSI LCD {:04x}:{:04x} discovered at {} but {} is unavailable",
-                vid,
-                pid,
-                sysfs.display(),
-                devnode.display()
-            );
+        if protocol_for_id(vid, pid) != Some(protocol) {
+            bail!("production descriptor/protocol mismatch for {vid:04x}:{pid:04x}");
         }
         out.push(DiscoveredDevice {
             vid,
             pid,
             protocol,
             serial: None,
-            path: DevicePath::Scsi {
-                devnode,
-                sysfs_device: sysfs,
-                usb_bus: ancestor.bus,
-                usb_address: ancestor.address,
+            path: DevicePath::Usb {
+                bus,
+                address,
+                interface,
+                ep_in,
+                ep_out,
             },
         });
     }
+    Ok(())
+}
+
+fn scan_scsi(_out: &mut Vec<DiscoveredDevice>) -> Result<()> {
+    // No SCSI identity has an evidence-backed production row.
     Ok(())
 }
 
@@ -1025,6 +974,64 @@ impl TransportConnector {
 }
 
 pub(crate) fn open_discovered(dev: &DiscoveredDevice) -> Result<(Box<dyn Transport>, DeviceInfo)> {
+    if (dev.vid, dev.pid)
+        != (
+            crate::transport::policy::SQUARE_VID,
+            crate::transport::policy::SQUARE_PID,
+        )
+        && (dev.vid, dev.pid)
+            != (
+                crate::transport::policy::WINBOND_VID,
+                crate::transport::policy::WINBOND_PID,
+            )
+    {
+        bail!(
+            "unsupported exact production identity {:04x}:{:04x}; no output route",
+            dev.vid,
+            dev.pid
+        );
+    }
+    if !matches!(dev.protocol, WireProtocol::Bulk | WireProtocol::HidType2) {
+        bail!(
+            "unsupported exact production identity {:04x}:{:04x}; no output route",
+            dev.vid,
+            dev.pid
+        );
+    }
+    let (bus, address) = match &dev.path {
+        DevicePath::Usb { bus, address, .. } => (*bus, *address),
+        _ => bail!("production LCD requires an exact USB descriptor path"),
+    };
+    let device = find_device(bus, address)?;
+    let fingerprint = fingerprint_from_device(&device)?;
+    let descriptor = crate::transport::policy::exact_descriptor_policy(&fingerprint)?;
+    let expected_protocol = match descriptor {
+        crate::transport::policy::ExactDescriptorPolicy::Square87ad => WireProtocol::Bulk,
+        crate::transport::policy::ExactDescriptorPolicy::Type2 => WireProtocol::HidType2,
+    };
+    if dev.protocol != expected_protocol || fingerprint.vid != dev.vid || fingerprint.pid != dev.pid
+    {
+        bail!("discovered device does not match exact production identity");
+    }
+    if let DevicePath::Usb {
+        interface,
+        ep_in,
+        ep_out,
+        ..
+    } = &dev.path
+    {
+        let valid_path = match descriptor {
+            crate::transport::policy::ExactDescriptorPolicy::Square87ad => {
+                (*interface, *ep_in, *ep_out) == (0, 0x81, 0x01)
+            }
+            crate::transport::policy::ExactDescriptorPolicy::Type2 => {
+                (*interface, *ep_in, *ep_out) == (0, 0x83, 0x02)
+            }
+        };
+        if !valid_path {
+            bail!("discovered endpoint path is not the exact policy path");
+        }
+    }
     match (&dev.path, dev.protocol) {
         (
             DevicePath::Usb {

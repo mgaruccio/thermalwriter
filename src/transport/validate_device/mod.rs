@@ -131,21 +131,13 @@ where
 
     #[cfg(feature = "daemon")]
     {
-        let selected_bcd = usb
-            .inventory_matching(vid, pid)
-            .ok()
-            .and_then(|entries| {
-                resolve_selection(&entries, args.bus_address.as_deref())
-                    .ok()
-                    .map(|(_, entry)| entry.identity.fingerprint.bcd_device.clone())
-            });
-        let output_dir = build_output_dir(
-            &args.output,
-            vid,
-            pid,
-            selected_bcd.as_deref(),
-            timestamp(),
-        )?;
+        let selected_bcd = usb.inventory_matching(vid, pid).ok().and_then(|entries| {
+            resolve_selection(&entries, args.bus_address.as_deref())
+                .ok()
+                .map(|(_, entry)| entry.identity.fingerprint.bcd_device.clone())
+        });
+        let output_dir =
+            build_output_dir(&args.output, vid, pid, selected_bcd.as_deref(), timestamp())?;
         active::run_active_validation(
             vid,
             pid,
@@ -911,6 +903,35 @@ mod tests {
         }
     }
 
+    fn exact_hid_in_fingerprint() -> UsbFingerprint {
+        UsbFingerprint {
+            vid: 0x0416,
+            pid: 0x5302,
+            bcd_device: "4.07".to_string(),
+            interfaces: vec![
+                UsbInterfaceShape {
+                    number: 0,
+                    alternate_setting: 0,
+                    class: 3,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        endpoint(0x83, UsbDirection::In, UsbTransferKind::Interrupt, 8),
+                        endpoint(0x02, UsbDirection::Out, UsbTransferKind::Interrupt, 512),
+                    ],
+                },
+                UsbInterfaceShape {
+                    number: 1,
+                    alternate_setting: 0,
+                    class: 255,
+                    subclass: 255,
+                    protocol: 255,
+                    endpoints: vec![],
+                },
+            ],
+        }
+    }
+
     fn bulk_fingerprint() -> UsbFingerprint {
         UsbFingerprint {
             vid: 0x87ad,
@@ -1068,7 +1089,7 @@ mod tests {
     fn passive_success_report_is_shareable_without_private_paths() {
         let temp = tempfile::tempdir().unwrap();
         let usb = MapInventory {
-            entries: vec![inventory_entry(1, 14, hid_in_fingerprint(), true)],
+            entries: vec![inventory_entry(1, 14, exact_hid_in_fingerprint(), true)],
         };
         let hidraw = MapHidrawInventory {
             candidates: vec![

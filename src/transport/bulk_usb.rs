@@ -11,6 +11,7 @@ use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
+use super::policy::{self, ExactDevicePolicy};
 use super::profile::{WireProtocol, build_device_info};
 use super::{DeviceInfo, EncodedFrame, FrameEncoding, Transport};
 
@@ -159,6 +160,30 @@ pub fn handshake_with_io(io: &mut dyn BulkIo, vid: u16, pid: u16) -> Result<Devi
     build_device_info(WireProtocol::Bulk, vid, pid, pm, sub, None)
 }
 
+/// Exact production square handshake; the broad helper remains pure fixture code.
+pub fn handshake_square_with_io(io: &mut dyn BulkIo) -> Result<DeviceInfo> {
+    let payload = handshake_payload();
+    let written = io
+        .write(&payload)
+        .context("square handshake write failed")?;
+    anyhow::ensure!(
+        written == payload.len(),
+        "square handshake write was partial: {written}/{}",
+        payload.len()
+    );
+    let response = io
+        .read(HANDSHAKE_READ_SIZE)
+        .context("square handshake read failed")?;
+    if response.len() != 64
+        || response.get(0..4) != Some(&[0x12, 0x34, 0x56, 0x78])
+        || response.get(24) != Some(&4)
+        || response.get(36) != Some(&5)
+    {
+        bail!("square handshake is not the exact 64-byte PM4/SUB5 response");
+    }
+    Ok(ExactDevicePolicy::Square87adPm4.device_info())
+}
+
 /// Pure frame send over injectable I/O.
 pub fn send_frame_with_io(
     io: &mut dyn BulkIo,
@@ -220,6 +245,14 @@ impl BulkUsb {
         let desc = device
             .device_descriptor()
             .context("Failed to read USB device descriptor")?;
+        let fingerprint = super::usb_fingerprint::fingerprint_from_device(&device)?;
+        anyhow::ensure!(
+            matches!(
+                super::policy::exact_descriptor_policy(&fingerprint),
+                Ok(super::policy::ExactDescriptorPolicy::Square87ad)
+            ),
+            "bulk device is not the exact 87ad:70db square descriptor"
+        );
         let vid = desc.vendor_id();
         let pid = desc.product_id();
 
@@ -280,7 +313,7 @@ impl Transport for BulkUsb {
                 ep_in: self.ep_in,
                 write_timeout: TIMEOUT,
             };
-            handshake_with_io(&mut io, self.vid, self.pid)
+            handshake_square_with_io(&mut io)
         };
 
         match result {
@@ -305,6 +338,8 @@ impl Transport for BulkUsb {
     }
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
+        let info = self.info.as_ref().context("Handshake not performed")?;
+        policy::ensure_authorized(info, ExactDevicePolicy::Square87adPm4)?;
         let send_result = {
             let info = self.info.as_ref().context("Handshake not performed")?;
             let handle = self.handle.as_ref().context("Device not open")?;

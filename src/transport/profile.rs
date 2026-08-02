@@ -95,6 +95,13 @@ impl DeviceProfile {
 }
 
 /// Negotiated identity + profile for an open LCD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputAuthorization {
+    Square87adPm4,
+    Type2Pm58,
+    Type2Pm128,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub vid: u16,
@@ -104,6 +111,9 @@ pub struct DeviceInfo {
     pub fbl: u8,
     pub protocol: WireProtocol,
     pub profile: DeviceProfile,
+    /// Set only by the exact production negotiation path; fixture/profile
+    /// constructors intentionally leave this unset.
+    pub(crate) authorization: Option<OutputAuthorization>,
 }
 
 impl DeviceInfo {
@@ -131,6 +141,64 @@ impl DeviceInfo {
         oriented_dimensions(self.width(), self.height(), baseline)
     }
 
+    pub(crate) fn authorized(
+        vid: u16,
+        pid: u16,
+        pm: u8,
+        sub: u8,
+        fbl: u8,
+        protocol: WireProtocol,
+        width: u32,
+        height: u32,
+        encoding: FrameEncoding,
+        policy: crate::transport::policy::ExactDevicePolicy,
+    ) -> Self {
+        let authorization = Some(match policy {
+            crate::transport::policy::ExactDevicePolicy::Square87adPm4 => {
+                OutputAuthorization::Square87adPm4
+            }
+            crate::transport::policy::ExactDevicePolicy::Type2Pm58 => {
+                OutputAuthorization::Type2Pm58
+            }
+            crate::transport::policy::ExactDevicePolicy::Type2Pm128 => {
+                OutputAuthorization::Type2Pm128
+            }
+        });
+        Self {
+            vid,
+            pid,
+            pm,
+            sub,
+            fbl,
+            protocol,
+            profile: DeviceProfile {
+                width,
+                height,
+                encoding,
+                rotate_panel: false,
+                widescreen: false,
+                encode_baseline: 0,
+                encode_base: 0,
+                encode_invert: false,
+            },
+            authorization,
+        }
+    }
+
+    pub(crate) fn authorized_policy(&self) -> Option<crate::transport::policy::ExactDevicePolicy> {
+        match self.authorization {
+            Some(OutputAuthorization::Square87adPm4) => {
+                Some(crate::transport::policy::ExactDevicePolicy::Square87adPm4)
+            }
+            Some(OutputAuthorization::Type2Pm58) => {
+                Some(crate::transport::policy::ExactDevicePolicy::Type2Pm58)
+            }
+            Some(OutputAuthorization::Type2Pm128) => {
+                Some(crate::transport::policy::ExactDevicePolicy::Type2Pm128)
+            }
+            None => None,
+        }
+    }
     /// Stable fixture id: `<wire>-<vid4>-<pid4>-pm<n>-sub<n>-fbl<n>`.
     pub fn fixture_id(&self) -> String {
         format!(
@@ -540,6 +608,7 @@ pub fn build_device_info(
         fbl,
         protocol,
         profile,
+        authorization: None,
     })
 }
 

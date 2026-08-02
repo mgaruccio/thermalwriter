@@ -15,6 +15,7 @@ use super::hid_report::{
     LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, REPORT_ID_UNNUMBERED,
     REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES,
 };
+use super::policy::{ExactDevicePolicy, PM58_RESPONSE, PM128_RESPONSE};
 use super::profile::{DeviceInfo, WireProtocol, build_device_info};
 use super::type2_policy::{
     BCD_DEVICE_407, HidOutputRoute, TYPE2_LEGACY_RESPONSE_MIN, Type2NegotiatedObservation,
@@ -262,6 +263,7 @@ pub enum DescriptorCaptureStatus {
 pub enum NegotiatedOutputRoute {
     LegacyBulk,
     HidReport,
+    HidInterrupt,
     ScsiCommand,
 }
 
@@ -749,15 +751,31 @@ impl HardwareValidationReport {
         observation: &Type2NegotiatedObservation,
     ) -> Result<()> {
         self.ensure_mutable().context("report already finalized")?;
-        let device_info = build_device_info(
-            WireProtocol::HidType2,
-            WINBOND_HID2_VID,
-            WINBOND_HID2_PID,
-            observation.pm(),
-            observation.sub(),
-            None,
-        )
-        .context("derive negotiated DeviceInfo from Type2 observation")?;
+        ensure!(
+            observation.policy().output() != Some(HidOutputRoute::LegacyBulk),
+            "legacy Type2 output policy is fixture-only and cannot be recorded for production",
+        );
+        let exact_descriptor = self.doc.fingerprint.as_ref().is_some_and(|fingerprint| {
+            matches!(
+                super::policy::exact_descriptor_policy(&fingerprint.to_usb_fingerprint()),
+                Ok(super::policy::ExactDescriptorPolicy::Type2)
+            )
+        });
+        let device_info = if exact_descriptor && observation.response() == PM58_RESPONSE {
+            ExactDevicePolicy::Type2Pm58.device_info()
+        } else if exact_descriptor && observation.response() == PM128_RESPONSE {
+            ExactDevicePolicy::Type2Pm128.device_info()
+        } else {
+            build_device_info(
+                WireProtocol::HidType2,
+                WINBOND_HID2_VID,
+                WINBOND_HID2_PID,
+                observation.pm(),
+                observation.sub(),
+                None,
+            )
+            .context("derive negotiated DeviceInfo from Type2 observation")?
+        };
         let candidate = NegotiatedProfile::from_type2(observation, &device_info)?;
         let mut provisional = self.doc.clone();
         provisional.negotiated = Some(candidate.clone());
@@ -1248,7 +1266,9 @@ fn validate_full_pass_evidence(doc: &ReportDocument) -> Result<(), SemanticError
 
     match route {
         NegotiatedOutputRoute::HidReport => validate_hid_report_route_evidence(doc)?,
-        NegotiatedOutputRoute::LegacyBulk | NegotiatedOutputRoute::ScsiCommand => {}
+        NegotiatedOutputRoute::HidInterrupt
+        | NegotiatedOutputRoute::LegacyBulk
+        | NegotiatedOutputRoute::ScsiCommand => {}
     }
 
     Ok(())
@@ -1274,7 +1294,9 @@ fn validate_protocol_route_consistency(
         ProtocolFamily::HidType2 => {
             if matches!(
                 route,
-                NegotiatedOutputRoute::HidReport | NegotiatedOutputRoute::LegacyBulk
+                NegotiatedOutputRoute::HidReport
+                    | NegotiatedOutputRoute::HidInterrupt
+                    | NegotiatedOutputRoute::LegacyBulk
             ) {
                 return Ok(());
             }
@@ -1310,8 +1332,8 @@ fn expected_wire_dimensions(
 ) -> Result<DisplayDimensions, SemanticError> {
     if portrait_native && device_info.protocol == WireProtocol::HidType2 {
         return Ok(DisplayDimensions {
-            width: device_info.height(),
-            height: device_info.width(),
+            width: device_info.width(),
+            height: device_info.height(),
         });
     }
     let (width, height) = device_info
@@ -1445,16 +1467,36 @@ fn validate_negotiated_profile_consistency(doc: &ReportDocument) -> Result<(), S
 
     validate_fingerprint_protocol_matrix(fingerprint, negotiated)?;
 
+    let exact_descriptor = matches!(
+        super::policy::exact_descriptor_policy(&fingerprint.to_usb_fingerprint()),
+        Ok(super::policy::ExactDescriptorPolicy::Type2)
+    );
     let wire_protocol = wire_protocol_from_family(negotiated.protocol_family);
-    let device_info = build_device_info(
-        wire_protocol,
-        fingerprint.vid,
-        fingerprint.pid,
-        negotiated.pm,
-        negotiated.sub,
-        fbl_input_for_validation(negotiated.protocol_family, negotiated.fbl),
-    )
-    .map_err(|_| SemanticError::NegotiatedProfileMismatch)?;
+    let device_info = if exact_descriptor
+        && negotiated.protocol_family == ProtocolFamily::HidType2
+        && negotiated.pm == 58
+        && negotiated.sub == 0
+        && negotiated.response_bytes == 8
+    {
+        ExactDevicePolicy::Type2Pm58.device_info()
+    } else if exact_descriptor
+        && negotiated.protocol_family == ProtocolFamily::HidType2
+        && negotiated.pm == 128
+        && negotiated.sub == 1
+        && negotiated.response_bytes == PM128_RESPONSE.len()
+    {
+        ExactDevicePolicy::Type2Pm128.device_info()
+    } else {
+        build_device_info(
+            wire_protocol,
+            fingerprint.vid,
+            fingerprint.pid,
+            negotiated.pm,
+            negotiated.sub,
+            fbl_input_for_validation(negotiated.protocol_family, negotiated.fbl),
+        )
+        .map_err(|_| SemanticError::NegotiatedProfileMismatch)?
+    };
 
     if device_info.fbl != negotiated.fbl {
         return Err(SemanticError::NegotiatedProfileMismatch);
@@ -1535,8 +1577,8 @@ fn validate_type2_negotiated_profile(
             }
             if negotiated.native_dimensions
                 != (DisplayDimensions {
-                    width: 320,
-                    height: 240,
+                    width: 240,
+                    height: 320,
                 })
                 || negotiated.wire_dimensions
                     != (DisplayDimensions {
@@ -1617,8 +1659,19 @@ fn validate_type2_negotiated_profile(
                 return Err(SemanticError::NegotiatedProfileMismatch);
             }
         }
-        ProfilePolicyLabel::ActivePmSub { .. } => {
-            return Err(SemanticError::NegotiatedProfileMismatch);
+        ProfilePolicyLabel::ActivePmSub { pm, sub } => {
+            if pm != 128
+                || sub != 1
+                || negotiated.response_bytes != PM128_RESPONSE.len()
+                || negotiated.negotiated_output_route != Some(NegotiatedOutputRoute::HidInterrupt)
+                || !negotiated.active_writes_allowed
+                || negotiated.keep_single_session
+                || negotiated.portrait_native != Some(false)
+                || negotiated.rotate_panel.is_some()
+                || doc.pre_handshake_policy != Some(ReportPreHandshakePolicy::Hid407ReadOnlyProbe)
+            {
+                return Err(SemanticError::NegotiatedProfileMismatch);
+            }
         }
     }
     Ok(())
@@ -2003,6 +2056,7 @@ impl From<HidOutputRoute> for NegotiatedOutputRoute {
         match route {
             HidOutputRoute::LegacyBulk => Self::LegacyBulk,
             HidOutputRoute::HidReport => Self::HidReport,
+            HidOutputRoute::Interrupt => Self::HidInterrupt,
         }
     }
 }
@@ -2077,8 +2131,8 @@ impl NegotiatedProfile {
         };
         let wire = if policy.portrait_native() {
             DisplayDimensions {
-                width: device_info.profile.height,
-                height: device_info.profile.width,
+                width: device_info.profile.width,
+                height: device_info.profile.height,
             }
         } else {
             native
@@ -2587,20 +2641,39 @@ mod tests {
             vid: 0x0416,
             pid: 0x5302,
             bcd_device: "4.07".to_string(),
-            interfaces: vec![UsbInterfaceShape {
-                number: 0,
-                alternate_setting: 0,
-                class: 3,
-                subclass: 0,
-                protocol: 0,
-                endpoints: vec![UsbEndpointCapability {
-                    address: 0x81,
-                    direction: UsbDirection::In,
-                    transfer: UsbTransferKind::Interrupt,
-                    max_packet_size: 8,
-                    interval: 1,
-                }],
-            }],
+            interfaces: vec![
+                UsbInterfaceShape {
+                    number: 0,
+                    alternate_setting: 0,
+                    class: 3,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        UsbEndpointCapability {
+                            address: 0x83,
+                            direction: UsbDirection::In,
+                            transfer: UsbTransferKind::Interrupt,
+                            max_packet_size: 8,
+                            interval: 1,
+                        },
+                        UsbEndpointCapability {
+                            address: 0x02,
+                            direction: UsbDirection::Out,
+                            transfer: UsbTransferKind::Interrupt,
+                            max_packet_size: 512,
+                            interval: 1,
+                        },
+                    ],
+                },
+                UsbInterfaceShape {
+                    number: 1,
+                    alternate_setting: 0,
+                    class: 255,
+                    subclass: 255,
+                    protocol: 255,
+                    endpoints: vec![],
+                },
+            ],
         }
     }
 
