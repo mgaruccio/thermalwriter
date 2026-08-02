@@ -17,17 +17,15 @@ use crate::service::guard::{
 use crate::transport::discovery::{
     DiscoveredDevice, KNOWN_LCD_IDS, discovered_exact_square_from_fingerprint, open_discovered,
 };
-use crate::transport::hid_lcd::HidLcd;
+use crate::transport::hid_lcd::{HidLcd, Type2PassiveObservation, classify_type2_passive_response};
 use crate::transport::hid_report::{
-    HidReadObservation, HidReportIo, HidReportProbeError, HidReportReadSession,
-    HidReportWriteSession, HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES,
-    UsbBusAddress,
+    HidReadObservation, HidReportIo, HidReportReadSession, HidReportWriteSession,
+    HidrawCorrelation, LINUX_HIDRAW_BACKEND_CONTRACT, PROTOCOL_CHUNK_BYTES, UsbBusAddress,
 };
-use crate::transport::policy::{ExactDevicePolicy, PM58_RESPONSE, PM128_RESPONSE};
-use crate::transport::profile::{DeviceInfo, WireProtocol, build_device_info};
+use crate::transport::policy::ExactDevicePolicy;
+use crate::transport::profile::DeviceInfo;
 use crate::transport::type2_policy::{
-    TYPE2_PROBE_READ_BOUND, Type2NegotiatedObservation, Type2PreHandshakePolicy,
-    select_type2_pre_handshake_policy,
+    TYPE2_PROBE_READ_BOUND, Type2PreHandshakePolicy, select_type2_pre_handshake_policy,
 };
 use crate::transport::validation_report::{
     CheckField, CheckStatus, DescriptorCaptureStatus, EvidenceOrigin, HardwareValidationReport,
@@ -714,9 +712,9 @@ where
     let _ = report.set_hid_backend_contract(LINUX_HIDRAW_BACKEND_CONTRACT);
     let _ = report.set_hid_descriptor_status(DescriptorCaptureStatus::Captured);
 
-    let observation = match session.probe_type2_passive(500) {
-        Ok(obs) => obs,
-        Err(HidReportProbeError::Read(read_error)) => {
+    let (read_observation, response) = match session.read_type2_passive(500) {
+        Ok(value) => value,
+        Err(read_error) => {
             log.info(format!("HID probe read error: {read_error}"));
             let _ = report.record_hid_read_failure(
                 TYPE2_PROBE_READ_BOUND,
@@ -732,77 +730,87 @@ where
             let _ = report.record_check(CheckField::Handshake, CheckStatus::Fail);
             return Err(ValidationStage::Handshake);
         }
-        Err(HidReportProbeError::Negotiate(message)) => {
-            log.info(format!("HID negotiate error: {message}"));
+    };
+    record_hid_probe_read(report, &read_observation);
+    let passive_kind = match classify_type2_passive_response(&response) {
+        Ok(kind) => kind,
+        Err(error) => {
+            log.info(format!("HID passive response rejected: {error:#}"));
             let _ = report.fail_at(
                 ValidationStage::Negotiation,
                 &[(
                     ValidationErrorKind::Policy,
-                    "Type2 negotiation failed on probe response",
+                    "Type2 passive response was malformed",
                 )],
             );
             let _ = report.record_check(CheckField::Handshake, CheckStatus::Fail);
             return Err(ValidationStage::Negotiation);
         }
     };
-
-    record_hid_probe_read(report, &observation);
-    if let Err(error) = report.record_negotiated_type2(&observation) {
-        log.info(format!("record negotiated error: {error:#}"));
-        let _ = report.fail_at(
-            ValidationStage::Negotiation,
-            &[(
-                ValidationErrorKind::Error,
-                "failed to record negotiated profile",
-            )],
-        );
-        return Err(ValidationStage::Negotiation);
-    }
-    let _ = report.record_check(CheckField::Handshake, CheckStatus::Pass);
-
-    if observation.response() == PM128_RESPONSE || !observation.policy().active_writes_allowed() {
-        if observation.response() == PM128_RESPONSE {
-            // The passive hidraw observation never authorizes PM128. Close it,
-            // then use the same fresh libusb transition as production output.
-            drop(session);
-            let mut transport =
-                HidLcd::open_type2_libusb(selector.bus, selector.address, 0, 0x83, 0x02).map_err(
-                    |error| {
-                        log.info(format!("PM128 libusb open error: {error:#}"));
-                        ValidationStage::Negotiation
-                    },
-                )?;
-            let device_info = transport.handshake().map_err(|error| {
-                log.info(format!("PM128 libusb negotiation error: {error:#}"));
+    let observation = match passive_kind {
+        Type2PassiveObservation::Empty => None,
+        Type2PassiveObservation::Pm58 => Some(
+            crate::transport::type2_policy::negotiate_type2_policy(
+                vid,
+                pid,
+                &response,
+                Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+            )
+            .map_err(|error| {
+                log.info(format!("HID PM58 negotiate error: {error}"));
                 ValidationStage::Negotiation
-            })?;
-            let transport: Box<dyn Transport> = Box::new(transport);
-            if device_info.authorized_policy() != Some(ExactDevicePolicy::Type2Pm128) {
-                return Err(ValidationStage::Negotiation);
-            }
-            let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
-            return Ok(NegotiationResult {
-                device_info,
-                active_writes_allowed: true,
-                output: ActiveOutput::Bulk(transport),
-            });
-        }
-        let device_info = build_device_info(
-            WireProtocol::HidType2,
+            })?,
+        ),
+        // A well-formed full observation is only a transition hint. The fresh PM128
+        // libusb response remains the sole authorization and may prove an unknown PM/SUB.
+        Type2PassiveObservation::Full => crate::transport::type2_policy::negotiate_type2_policy(
             vid,
             pid,
-            observation.pm(),
-            observation.sub(),
-            None,
+            &response,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
         )
-        .map_err(|_| ValidationStage::Negotiation)?;
+        .ok(),
+    };
+    if let Some(observation) = &observation {
+        if let Err(error) = report.record_negotiated_type2(observation) {
+            log.info(format!("record negotiated error: {error:#}"));
+            let _ = report.fail_at(
+                ValidationStage::Negotiation,
+                &[(
+                    ValidationErrorKind::Error,
+                    "failed to record negotiated profile",
+                )],
+            );
+            return Err(ValidationStage::Negotiation);
+        }
+    }
+    let _ = report.record_check(CheckField::Handshake, CheckStatus::Pass);
+    if matches!(
+        passive_kind,
+        Type2PassiveObservation::Empty | Type2PassiveObservation::Full
+    ) {
+        drop(session);
+        let mut transport =
+            HidLcd::open_type2_libusb(selector.bus, selector.address, 0, 0x83, 0x02).map_err(
+                |error| {
+                    log.info(format!("PM128 libusb open error: {error:#}"));
+                    ValidationStage::Negotiation
+                },
+            )?;
+        let device_info = transport.handshake_type2_pm128_session().map_err(|error| {
+            log.info(format!("PM128 libusb negotiation error: {error:#}"));
+            ValidationStage::Negotiation
+        })?;
+        if device_info.authorized_policy() != Some(ExactDevicePolicy::Type2Pm128) {
+            return Err(ValidationStage::Negotiation);
+        }
+        let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
         return Ok(NegotiationResult {
             device_info,
-            active_writes_allowed: false,
-            output: ActiveOutput::Bulk(Box::new(NullOutputTransport)),
+            active_writes_allowed: true,
+            output: ActiveOutput::Bulk(Box::new(transport)),
         });
     }
-
     let write_session = session.authorize_writes().map_err(|error| {
         log.info(format!("authorize writes error: {error}"));
         let _ = report.fail_at(
@@ -824,41 +832,11 @@ where
         Some(8),
     );
     let _ = report.record_check(CheckField::ActiveWrite, CheckStatus::Pass);
-
-    let device_info = if observation.response() == PM58_RESPONSE {
-        ExactDevicePolicy::Type2Pm58.device_info()
-    } else {
-        build_device_info(
-            WireProtocol::HidType2,
-            vid,
-            pid,
-            observation.pm(),
-            observation.sub(),
-            None,
-        )
-        .map_err(|_| ValidationStage::Negotiation)?
-    };
-
     Ok(NegotiationResult {
         active_writes_allowed: true,
-        device_info,
+        device_info: ExactDevicePolicy::Type2Pm58.device_info(),
         output: ActiveOutput::Hid(write_session),
     })
-}
-
-/// No-op transport placeholder when negotiation disallows output.
-struct NullOutputTransport;
-
-impl Transport for NullOutputTransport {
-    fn handshake(&mut self) -> Result<DeviceInfo> {
-        bail!("null output transport cannot handshake")
-    }
-
-    fn send_frame(&mut self, _frame: &EncodedFrame) -> Result<()> {
-        bail!("null output transport cannot send frames")
-    }
-
-    fn close(&mut self) {}
 }
 
 fn negotiate_bulk<Io: HidReportIo>(
@@ -1232,13 +1210,8 @@ fn restore_daemon<C: ServiceControl, O: DeviceOwnership>(
     let _ = report.record_check(CheckField::DaemonRestored, restored);
 }
 
-fn record_hid_probe_read(report: &mut HardwareValidationReport, obs: &Type2NegotiatedObservation) {
-    let _ = report.record_hid_read(&HidReadObservation {
-        read_capacity_bytes: TYPE2_PROBE_READ_BOUND,
-        read_timeout_ms: 500,
-        transport_return_bytes: obs.response().len() as isize,
-        protocol_response_bytes: obs.response().len(),
-    });
+fn record_hid_probe_read(report: &mut HardwareValidationReport, obs: &HidReadObservation) {
+    let _ = report.record_hid_read(obs);
 }
 
 fn fail_visual(
@@ -1409,6 +1382,7 @@ mod active_tests {
     use super::*;
     use crate::service::guard::{DeviceOwnership, OwnershipTarget, ServiceControl};
     use crate::transport::hid_report::{HidReportIo, HidReportReadSession, PROTOCOL_CHUNK_BYTES};
+    use crate::transport::profile::WireProtocol;
     use crate::transport::usb_fingerprint::{
         UsbDirection, UsbEndpointCapability, UsbFingerprint, UsbInterfaceShape, UsbRunIdentity,
         UsbTransferKind,

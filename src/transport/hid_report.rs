@@ -556,6 +556,29 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
         self.core.read_bounded(capacity, timeout_ms)
     }
 
+    /// Read exactly one passive Type2 observation without negotiating or writing.
+    pub fn read_type2_passive(
+        &mut self,
+        timeout_ms: u32,
+    ) -> Result<(HidReadObservation, Vec<u8>), HidReportReadError> {
+        self.session_auth = None;
+        self.probe_performed = true;
+        let (observation, response) = self.core.read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)?;
+        // Authorization is derived only from this same passive read and exact PM58 bytes.
+        if response == super::policy::PM58_RESPONSE {
+            if let Ok(negotiated) = negotiate_type2_policy(
+                WINBOND_HID2_VID,
+                WINBOND_HID2_PID,
+                &response,
+                Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+            ) {
+                self.session_auth =
+                    HidReportWriteAuthorization::from_session_probe(&negotiated).ok();
+            }
+        }
+        Ok((observation, response))
+    }
+
     /// Perform the 4.07 read-only Type2 probe on this session's I/O handle for the exact
     /// Winbond `0416:5302` firmware-4.07 policy.
     ///
@@ -617,11 +640,8 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
         &mut self,
         timeout_ms: u32,
     ) -> Result<Type2NegotiatedObservation, HidReportProbeError> {
-        self.session_auth = None;
-        self.probe_performed = true;
         let (_, response) = self
-            .core
-            .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
+            .read_type2_passive(timeout_ms)
             .map_err(HidReportProbeError::Read)?;
         let observation = negotiate_type2_policy(
             WINBOND_HID2_VID,
@@ -1569,6 +1589,19 @@ mod tests {
         read_session.probe_type2_read_only(0).unwrap();
         let write_session = read_session.authorize_writes().unwrap();
         assert_eq!(write_session.core.io.id(), io_id);
+    }
+
+    #[test]
+    fn passive_empty_read_is_write_free_and_unauthorized() {
+        let mut io = MemHidReportIo::new();
+        io.read_data.push_back(Vec::new());
+        io.read_returns.push_back(Ok(0));
+        let mut session = HidReportReadSession::new_for_test(io);
+        let (observation, response) = session.read_type2_passive(0).unwrap();
+        assert_eq!(observation.protocol_response_bytes, 0);
+        assert!(response.is_empty());
+        assert!(session.core.io.writes.is_empty());
+        assert!(session.authorize_writes().is_err());
     }
 
     #[test]

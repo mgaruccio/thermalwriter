@@ -124,12 +124,12 @@ fn pm58_short_response_authorizes_report_policy() {
 }
 
 #[test]
-fn pm68_is_recorded_then_stops_before_output() {
+fn pm68_short_response_fails_before_any_transition_or_output() {
     let temp = tempfile::tempdir().unwrap();
     let (usb, hidraw, sysfs) = active_fixture();
     let io = FakeHidIo::with_probe(&pm68_short_response());
     let writes = std::sync::Arc::clone(&io.writes);
-
+    let mut io = Some(io);
     let error = run_active_validation_with(
         0x0416,
         0x5302,
@@ -143,22 +143,13 @@ fn pm68_is_recorded_then_stops_before_output() {
         &mut ScriptedPrompt::default(),
         ActiveOptions::default(),
         |_| {},
-        |_, _| {
-            Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(
-                &pm68_short_response(),
-            )))
-        },
+        |_, _| Ok(HidReportReadSession::from_io(io.take().unwrap())),
     )
     .unwrap_err();
-
-    assert!(
-        error.to_string().contains("stopped before output"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("Negotiation"), "{error}");
     assert_eq!(writes.lock().unwrap().len(), 0);
-
     let report_toml = std::fs::read_to_string(temp.path().join("report.toml")).unwrap();
-    assert!(report_toml.contains("pm = 68") || report_toml.contains("profile_policy"));
+    assert!(report_toml.contains("malformed") || report_toml.contains("passive response"));
 }
 
 #[test]
