@@ -112,7 +112,7 @@ pub struct VariableDecl {
     pub step: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SensorDescriptor {
     pub key: String,
     pub name: String,
@@ -943,6 +943,8 @@ pub async fn list_sensors() -> Result<Vec<SensorDescriptor>, AppError> {
     if out.is_empty() {
         out = fallback_sensors();
     }
+
+    publish_layout_binding_aliases(&mut out);
 
     // Sort by cost descending so expensive sensors surface first in the picker.
     out.sort_by(|a, b| b.cost_us.cmp(&a.cost_us).then_with(|| a.key.cmp(&b.key)));
@@ -1986,6 +1988,26 @@ fn fallback_sensors() -> Vec<SensorDescriptor> {
     ]
 }
 
+fn publish_layout_binding_aliases(sensors: &mut Vec<SensorDescriptor>) {
+    let existing: std::collections::HashSet<&str> =
+        sensors.iter().map(|sensor| sensor.key.as_str()).collect();
+    let mut extras = Vec::new();
+    for sensor in sensors.iter() {
+        for (alias, label) in thermalwriter::layout_engine::published_layout_aliases(&sensor.key) {
+            if existing.contains(alias) {
+                continue;
+            }
+            extras.push(SensorDescriptor {
+                key: alias.to_string(),
+                name: label.to_string(),
+                unit: sensor.unit.clone(),
+                cost_us: sensor.cost_us,
+            });
+        }
+    }
+    sensors.extend(extras);
+}
+
 /// Convert a straight-RGB buffer (3 bytes/pixel) into straight RGBA (4 bytes/pixel,
 /// alpha=255). The input comes from `RawFrame::from_pixmap`, which already
 /// un-premultiplies the alpha — so the caller can hand the result straight to
@@ -2008,6 +2030,23 @@ mod tests {
     use thermalwriter::render::FrameSource;
     use thermalwriter::validation::{contains_template_syntax, is_valid_color};
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn list_sensors_publish_cpu_temperature_alias() {
+        let mut sensors = vec![SensorDescriptor {
+            key: "cpu_temp".into(),
+            name: "k10temp Tctl".into(),
+            unit: "°C".into(),
+            cost_us: 20,
+        }];
+        publish_layout_binding_aliases(&mut sensors);
+        assert!(
+            sensors
+                .iter()
+                .any(|sensor| sensor.key == "cpu.temperature" && sensor.name == "CPU Temperature"),
+            "typed cpu.temperature must be pickable when cpu_temp is live"
+        );
+    }
 
     const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480">
 <rect width="480" height="480" fill="#101820"/>

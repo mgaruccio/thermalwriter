@@ -1,5 +1,6 @@
 //! Shared layout document types for the daemon and configuration GUI.
 
+pub mod bindings;
 pub mod diagnostic;
 pub mod document;
 pub mod media_cache;
@@ -12,6 +13,10 @@ pub mod surface;
 pub mod svg_backend;
 pub mod validation;
 
+pub use bindings::{
+    layout_binding_alias, layout_binding_is_known, layout_binding_label, published_layout_aliases,
+    sensor_key_for_layout_binding,
+};
 pub use diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
 pub use document::{
     CURRENT_VERSION, LayoutDocument, LayoutDocumentError, MediaDocument, MetricDocument,

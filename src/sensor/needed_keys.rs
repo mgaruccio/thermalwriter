@@ -99,6 +99,21 @@ pub fn layout_needed_keys(
         }
     }
 
+    // 4. Typed layout documents use namespaced bindings (cpu.temperature).
+    //    Map those onto the daemon keys the providers actually poll.
+    if let Ok(document) = crate::layout_engine::LayoutDocument::from_toml(template) {
+        for module in &document.modules {
+            let binding = match module {
+                crate::layout_engine::ModuleDocument::Metric(module) => module.binding.as_str(),
+                crate::layout_engine::ModuleDocument::Sparkline(module) => module.binding.as_str(),
+                crate::layout_engine::ModuleDocument::Text(module) => module.binding.as_str(),
+                crate::layout_engine::ModuleDocument::Media(_) => continue,
+            };
+            if let Some(legacy) = crate::layout_engine::sensor_key_for_layout_binding(binding) {
+                needed.insert(legacy.to_string());
+            }
+        }
+    }
     // Empty result: bootstrap from known keys if catalog is non-empty.
     if needed.is_empty() {
         if !known_keys.is_empty() {
@@ -352,6 +367,33 @@ mod tests {
         assert!(
             needed.is_empty(),
             "declared keys must not bootstrap blank layout"
+        );
+    }
+
+    #[test]
+    fn typed_layout_document_needs_legacy_cpu_temp() {
+        let template = r#"
+version = 1
+name = "cpu"
+[[modules]]
+id = "cpu-temp"
+kind = "metric"
+binding = "cpu.temperature"
+variant = "hero"
+[[modules]]
+id = "history"
+kind = "sparkline"
+binding = "cpu.temperature.history"
+variant = "neon"
+[profiles.square]
+recipe = "column"
+"#;
+        let fm = LayoutFrontmatter::parse(template);
+        let known = known(&["cpu_temp", "gpu_temp", "ram_used"]);
+        let needed = layout_needed_keys(&fm, &HashMap::new(), template, &known, &declared(&[]));
+        assert!(
+            needed.contains("cpu_temp"),
+            "cpu.temperature must keep k10temp/coretemp polling"
         );
     }
 }

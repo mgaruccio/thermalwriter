@@ -372,13 +372,42 @@ export function moduleBindingOptions(kind: ModuleKind, sensors: SensorDescriptor
   return [...options.values()];
 }
 
+const LEGACY_SENSOR_KEYS: Record<string, string> = {
+  "cpu.temperature": "cpu_temp",
+  "cpu.utilization": "cpu_util",
+  "cpu.power": "cpu_power",
+  "cpu.fan": "cpu_fan",
+  "gpu.temperature": "gpu_temp",
+  "gpu.utilization": "gpu_util",
+  "gpu.power": "gpu_power",
+  "gpu.memory.used": "vram_used",
+  "gpu.memory.total": "vram_total",
+  "memory.used": "ram_used",
+  "memory.total": "ram_total",
+  "network.receive": "net_rx",
+  "network.transmit": "net_tx",
+  "game.fps": "fps",
+  "game.frametime": "frametime",
+};
+
 export function isKnownModuleBinding(
   kind: ModuleKind,
   binding: string,
   sensors: SensorDescriptor[],
- ): boolean {
+) : boolean {
   const value = binding.trim();
-  return value.length > 0 && moduleBindingOptions(kind, sensors).some((sensor) => sensor.key === value);
+  if (!value) return false;
+  if (moduleBindingOptions(kind, sensors).some((sensor) => sensor.key === value)) {
+    return true;
+  }
+  const base = value.replace(/\.history$/, "").replace(/_history$/, "");
+  const legacy = LEGACY_SENSOR_KEYS[base];
+  return Boolean(
+    legacy &&
+      sensors.some(
+        (sensor) => sensor.key === legacy || sensor.key === `${legacy}.history` || sensor.key === base,
+      ),
+  );
 }
 
 export function hasRelevantBridgeProfile(

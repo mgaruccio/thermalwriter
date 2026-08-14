@@ -302,29 +302,7 @@ fn validate_document_bindings(
 }
 
 fn sensor_binding_is_known(binding: &str, declared_keys: &HashSet<String>) -> bool {
-    if binding.is_empty() || declared_keys.contains(binding) {
-        return !binding.is_empty();
-    }
-
-    let legacy_key = match binding {
-        "cpu.temperature" => Some("cpu_temp"),
-        "cpu.utilization" => Some("cpu_util"),
-        "cpu.power" => Some("cpu_power"),
-        "cpu.fan" => Some("cpu_fan"),
-        "gpu.temperature" => Some("gpu_temp"),
-        "gpu.utilization" => Some("gpu_util"),
-        "gpu.power" => Some("gpu_power"),
-        "gpu.memory.used" => Some("vram_used"),
-        "gpu.memory.total" => Some("vram_total"),
-        "memory.used" => Some("ram_used"),
-        "memory.total" => Some("ram_total"),
-        "network.receive" => Some("net_rx"),
-        "network.transmit" => Some("net_tx"),
-        "game.fps" => Some("fps"),
-        "game.frametime" => Some("frametime"),
-        _ => None,
-    };
-    legacy_key.is_some_and(|key| declared_keys.contains(key))
+    crate::layout_engine::layout_binding_is_known(binding, declared_keys)
 }
 
 #[cfg(test)]

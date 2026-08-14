@@ -322,29 +322,8 @@ pub fn resolved_bindings(sensors: &SensorData) -> ResolvedBindings {
     bindings
 }
 
-/// Map the daemon's legacy flat sensor names to the typed layout bindings.
-///
-/// The raw sensor boundary remains unchanged for SVG/HTML layouts; new layout
-/// documents get the namespaced aliases in addition to those raw keys.
 fn layout_binding_alias(key: &str) -> Option<&'static str> {
-    match key {
-        "cpu_temp" => Some("cpu.temperature"),
-        "cpu_util" => Some("cpu.utilization"),
-        "cpu_power" => Some("cpu.power"),
-        "cpu_fan" => Some("cpu.fan"),
-        "gpu_temp" => Some("gpu.temperature"),
-        "gpu_util" => Some("gpu.utilization"),
-        "gpu_power" => Some("gpu.power"),
-        "vram_used" => Some("gpu.memory.used"),
-        "vram_total" => Some("gpu.memory.total"),
-        "ram_used" => Some("memory.used"),
-        "ram_total" => Some("memory.total"),
-        "net_rx" => Some("network.receive"),
-        "net_tx" => Some("network.transmit"),
-        "fps" => Some("game.fps"),
-        "frametime" => Some("game.frametime"),
-        _ => None,
-    }
+    super::bindings::layout_binding_alias(key)
 }
 
 fn is_history_key(key: &str) -> bool {
