@@ -87,12 +87,75 @@ export type LayoutDiagnostic = {
   fix: string;
 };
 
+export type PreviewTopology = "rectangular" | "curved-panorama";
+
+export type PreviewProfileId = "square" | "portrait" | "wide" | "curved";
+
+export type PreviewProfile = {
+  id: PreviewProfileId;
+  label: string;
+  description: string;
+  width: number;
+  height: number;
+  backendProfile: "rectangular" | "thermalright-curved-2400x1080";
+  topology: PreviewTopology;
+};
+
+export const PREVIEW_PROFILES: readonly PreviewProfile[] = [
+  {
+    id: "square",
+    label: "Square",
+    description: "Compact 480 × 480 rectangular surface.",
+    width: 480,
+    height: 480,
+    backendProfile: "rectangular",
+    topology: "rectangular",
+  },
+  {
+    id: "portrait",
+    label: "Portrait",
+    description: "Tall 480 × 1280 rectangular surface.",
+    width: 480,
+    height: 1280,
+    backendProfile: "rectangular",
+    topology: "rectangular",
+  },
+  {
+    id: "wide",
+    label: "Wide",
+    description: "Landscape 1280 × 480 rectangular surface.",
+    width: 1280,
+    height: 480,
+    backendProfile: "rectangular",
+    topology: "rectangular",
+  },
+  {
+    id: "curved",
+    label: "Curved",
+    description: "Thermalright 2400 × 1080 panorama with a protected bridge.",
+    width: 2400,
+    height: 1080,
+    backendProfile: "thermalright-curved-2400x1080",
+    topology: "curved-panorama",
+  },
+];
+
+export type PreviewSurfaceRegion = {
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type LayoutPreviewResponse = {
   width: number;
   height: number;
   rgba: number[];
   diagnostics: LayoutDiagnostic[];
-  topology: "rectangular" | "curved-panorama";
+  topology: PreviewTopology;
+  readable_zones?: PreviewSurfaceRegion[];
+  protected_regions?: PreviewSurfaceRegion[];
   document_fingerprint: string;
 };
 

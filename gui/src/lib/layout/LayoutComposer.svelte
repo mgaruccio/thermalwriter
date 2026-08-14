@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ProfileSelector from "./ProfileSelector.svelte";
   import ValidationPanel from "./ValidationPanel.svelte";
   import ModuleInspector from "./ModuleInspector.svelte";
   import ModuleList from "./ModuleList.svelte";
@@ -11,6 +12,8 @@
     LayoutPreset,
     ModuleKind,
     ModuleReorderDirection,
+    PreviewProfile,
+    PreviewProfileId,
     SensorDescriptor,
   } from "./types";
 
@@ -34,6 +37,8 @@
     applying?: boolean;
     status?: string;
     error?: string;
+    previewProfile?: PreviewProfileId;
+    onpreviewprofilechange?: (profile: PreviewProfile) => void;
     createFromPreset: (preset: LayoutPreset, name: string) => void;
     reopenDocument: (name: string) => void;
     renameDraft: (name: string) => void;
@@ -59,6 +64,8 @@
     applying = false,
     status = "",
     error = "",
+    previewProfile = $bindable<PreviewProfileId>("square"),
+    onpreviewprofilechange = () => {},
     createFromPreset,
     reopenDocument,
     renameDraft,
@@ -111,6 +118,12 @@
   </div>
 
   <PresetStarter {presets} oncreate={createFromPreset} busy={controlsDisabled} />
+
+  <ProfileSelector
+    bind:selected={previewProfile}
+    onchange={onpreviewprofilechange}
+    disabled={controlsDisabled}
+  />
 
   <section class="composer-section reopen-section" aria-labelledby="reopen-layout-title">
     <div class="composer-section-heading">

@@ -7,6 +7,7 @@
   import LayoutPreview from "./lib/layout/LayoutPreview.svelte";
   import {
     COMPOSER_PRESETS,
+    PREVIEW_PROFILES,
     createModule,
     normalizeLayoutName,
     type ComposerSaveState,
@@ -19,6 +20,8 @@
     type LayoutSaveResponse,
     type ModuleKind,
     type ModuleReorderDirection,
+    type PreviewProfile,
+    type PreviewProfileId,
     type SensorDescriptor,
   } from "./lib/layout/types";
   import { bumpRevision, isCurrentRevision } from "./lib/asyncSelection";
@@ -55,10 +58,6 @@
     resolution: string;
   };
 
-  type NativeDimensions = {
-    width: number;
-    height: number;
-  };
 
 
   type ThemeId =
@@ -101,6 +100,7 @@
   let appMounted = false;
   let activeTab = $state<"variables" | "stream" | "compose">("variables");
   let composerDraft = $state<LayoutDocument | null>(null);
+  let composerPreviewProfile = $state<PreviewProfileId>("square");
   let composerFingerprint = $state<string | null>(null);
   let composerSavedName = $state<string | null>(null);
   let composerSaveState = $state<ComposerSaveState>("unsaved");
@@ -125,7 +125,9 @@
   const previewOnlyLayouts = $derived(layouts.filter((l) => !l.configurable));
 
   const composerLayouts = $derived(layouts.filter((layout) => layout.kind === "layout"));
-  const nativeDimensions = $derived(parseNativeDimensions(daemonStatus?.resolution));
+  const composerProfile = $derived(
+    PREVIEW_PROFILES.find((profile) => profile.id === composerPreviewProfile) ?? PREVIEW_PROFILES[0],
+  );
   const composerPreviewValid = $derived(
     composerPreview
       ? composerPreview.diagnostics.every((diagnostic) => diagnostic.severity !== "error") &&
@@ -230,10 +232,19 @@
 
   $effect(() => {
     const draftSnapshot = composerDraft;
-    const dimensions = nativeDimensions;
+    const profile = composerProfile;
     JSON.stringify(draftSnapshot);
-    scheduleComposerPreview(draftSnapshot, dimensions);
+    scheduleComposerPreview(draftSnapshot, profile);
   });
+
+  function selectComposerProfile(profile: PreviewProfile) {
+    composerPreviewProfile = profile.id;
+    // Invalidate an in-flight response immediately, before the debounced
+    // request for the new native surface begins.
+    composerPreviewRevision = bumpRevision(composerPreviewRevision);
+    composerPreview = null;
+    composerError = "";
+  }
 
   async function selectLayout(name: string) {
     const rev = (layoutSelectionRev = bumpRevision(layoutSelectionRev));
@@ -261,16 +272,6 @@
     }
   }
 
-  function parseNativeDimensions(value: string | undefined): NativeDimensions | null {
-    const match = /^(\d+)\s*[x×]\s*(\d+)$/.exec(value?.trim() ?? "");
-    if (!match) return null;
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
-      return null;
-    }
-    return { width, height };
-  }
 
   function commitComposerDraft(nextDraft: LayoutDocument) {
     composerDraft = nextDraft;
@@ -390,18 +391,18 @@
 
   function scheduleComposerPreview(
     draftSnapshot: LayoutDocument | null,
-    dimensions: NativeDimensions | null,
+    profile: PreviewProfile,
   ) {
     if (composerPreviewTimer !== undefined) window.clearTimeout(composerPreviewTimer);
     composerPreviewTimer = undefined;
-    if (activeTab !== "compose" || !draftSnapshot || !dimensions) return;
+    if (activeTab !== "compose" || !draftSnapshot) return;
     composerPreviewTimer = window.setTimeout(() => {
       composerPreviewTimer = undefined;
-      void renderComposerPreview(draftSnapshot, dimensions);
+      void renderComposerPreview(draftSnapshot, profile);
     }, 120);
   }
 
-  async function renderComposerPreview(draftSnapshot: LayoutDocument, dimensions: NativeDimensions) {
+  async function renderComposerPreview(draftSnapshot: LayoutDocument, profile: PreviewProfile) {
     const revision = (composerPreviewRevision = bumpRevision(composerPreviewRevision));
     const draftRevision = composerDraftRevision;
     composerPreviewing = true;
@@ -409,9 +410,9 @@
     try {
       const response = await invoke<LayoutPreviewResponse>("preview_layout_document", {
         draft: draftSnapshot,
-        profile: "rectangular",
-        width: dimensions.width,
-        height: dimensions.height,
+        profile: profile.backendProfile,
+        width: profile.width,
+        height: profile.height,
       });
       if (
         !isCurrentRevision(revision, composerPreviewRevision) ||
@@ -777,7 +778,7 @@
             previewing={composerPreviewing}
             draftName={composerDraft?.name ?? ""}
             saveState={composerSaveState}
-            nativeDimensionsAvailable={nativeDimensions !== null}
+            nativeDimensionsAvailable={true}
             error={composerError}
           />
         {:else}
@@ -860,6 +861,8 @@
             presets={COMPOSER_PRESETS}
             savedLayouts={composerLayouts}
             draft={composerDraft}
+            bind:previewProfile={composerPreviewProfile}
+            onpreviewprofilechange={selectComposerProfile}
             sensors={sensors}
             diagnostics={composerPreview?.diagnostics ?? []}
             saveState={composerSaveState}
