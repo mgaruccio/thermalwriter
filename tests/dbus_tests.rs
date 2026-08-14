@@ -1,22 +1,29 @@
 // Tests for daemon D-Bus helper logic: path validation, layout listing,
 // layout-vars read/write, background path validation and apply, sensor descriptors.
 //
-// These tests invoke the helper free-functions and associated-fn impls directly
-// — they do NOT bind com.thermalwriter.Service on the session bus (the real
-// daemon owns that name on the developer's machine).
+// Most tests invoke helper free-functions and associated-fn impls directly.
+// The typed-layout cases also bind a private session bus, so the public D-Bus
+// boundary is exercised without competing with a developer daemon.
 
 #![cfg(feature = "daemon")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use thermalwriter::config::Config;
+use thermalwriter::dbus_types::DisplayProxy;
 use thermalwriter::service::dbus::{
-    ModeChange, get_layout_vars_impl, list_backgrounds_impl, list_layouts_impl,
-    save_default_layout_impl, validate_background_path, validate_layout_path,
+    DisplayInterface, ModeChange, ServiceState, get_layout_vars_impl, list_backgrounds_impl,
+    list_layouts_impl, save_default_layout_impl, validate_background_path, validate_layout_path,
 };
+use thermalwriter::service::mode_handler::RuntimeDisplayDimensions;
+use thermalwriter::theme::ThemePalette;
+use tokio::sync::{Mutex, mpsc, watch};
 
 // ---------------------------------------------------------------------------
 // validate_layout_path: canonicalizes + enforces starts_with(layout_dir)
@@ -756,4 +763,374 @@ fn save_default_layout_impl_rejects_traversal() {
         after, original,
         "config must be untouched on traversal reject"
     );
+}
+
+// Typed layout documents: D-Bus apply, profile revalidation, and offline save.
+struct PrivateSessionBus {
+    address: String,
+    pid: libc::pid_t,
+}
+
+impl PrivateSessionBus {
+    fn start() -> Self {
+        let output = Command::new("dbus-daemon")
+            .args(["--session", "--fork", "--print-address=1", "--print-pid=1"])
+            .output()
+            .expect("launch private session bus");
+        assert!(
+            output.status.success(),
+            "dbus-daemon failed: {:?}",
+            output.stderr
+        );
+        let output_text = String::from_utf8(output.stdout).expect("D-Bus output must be UTF-8");
+        let mut lines = output_text.lines().map(str::to_owned);
+        let address = lines.next().expect("private bus address");
+        let pid = lines
+            .next()
+            .expect("private bus pid")
+            .parse()
+            .expect("private bus pid must be numeric");
+        Self { address, pid }
+    }
+}
+
+impl Drop for PrivateSessionBus {
+    fn drop(&mut self) {
+        // SAFETY: pid came directly from dbus-daemon --print-pid.
+        unsafe { libc::kill(self.pid, libc::SIGTERM) };
+    }
+}
+
+struct DaemonGuard {
+    child: Option<Child>,
+    stderr_path: PathBuf,
+}
+
+impl DaemonGuard {
+    fn spawn(bus: &PrivateSessionBus, xdg: &std::path::Path, runtime: &std::path::Path) -> Self {
+        let stderr_path = xdg.join("daemon.stderr");
+        let stderr = fs::File::create(&stderr_path).expect("daemon stderr file");
+        let child = Command::new(env!("CARGO_BIN_EXE_thermalwriter"))
+            .arg("daemon")
+            .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+            .env("XDG_CONFIG_HOME", xdg)
+            .env("XDG_RUNTIME_DIR", runtime)
+            .env("THERMALWRITER_TRANSPORT", "null")
+            .env("RUST_LOG", "warn")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn null-transport daemon");
+        Self {
+            child: Some(child),
+            stderr_path,
+        }
+    }
+
+    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.child
+            .as_mut()
+            .expect("daemon child")
+            .try_wait()
+            .expect("poll daemon")
+    }
+
+    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.try_wait() {
+                self.child.take();
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not stop: {}",
+                self.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn stderr(&self) -> String {
+        fs::read_to_string(&self.stderr_path).unwrap_or_default()
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[tokio::test]
+async fn e2e_applies_flagship_layout_over_session_dbus() {
+    let tmp = tempdir().expect("test directory");
+    let xdg = tmp.path().join("xdg");
+    let runtime = tmp.path().join("runtime");
+    let config_dir = xdg.join("thermalwriter");
+    fs::create_dir_all(&config_dir).expect("config directory");
+    fs::create_dir_all(&runtime).expect("runtime directory");
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[display]
+tick_rate = 2
+default_layout = "minimal.html"
+jpeg_quality = 90
+rotation = 0
+mode = "html"
+device = "auto"
+"#,
+    )
+    .expect("test config");
+
+    let bus = PrivateSessionBus::start();
+    let mut daemon = DaemonGuard::spawn(&bus, &xdg, &runtime);
+    let connection = zbus::connection::Builder::address(bus.address.as_str())
+        .expect("build D-Bus client")
+        .build()
+        .await
+        .expect("connect D-Bus client");
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .expect("create display proxy");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.try_wait() {
+            panic!(
+                "daemon exited before ready: {exit}; stderr:\n{}",
+                daemon.stderr()
+            );
+        }
+        if let Ok(status) = proxy.get_status().await
+            && status.get("connected").map(String::as_str) == Some("true")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon never became connected: {}",
+            daemon.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let flagship = "neon-composer.layout.toml";
+    let layouts = proxy.list_layouts().await.expect("list layouts over D-Bus");
+    assert!(
+        layouts.iter().any(|name| name == flagship),
+        "typed flagship missing: {layouts:?}"
+    );
+
+    let result = proxy
+        .set_layout(flagship)
+        .await
+        .expect("flagship layout must activate through D-Bus");
+    assert!(
+        result.contains(flagship),
+        "unexpected set_layout result: {result}"
+    );
+
+    let status = proxy.get_status().await.expect("status after layout apply");
+    assert_eq!(
+        status.get("active_layout").map(String::as_str),
+        Some(flagship)
+    );
+    assert_eq!(
+        status.get("active_composition").map(String::as_str),
+        Some("neon-composer")
+    );
+    assert_eq!(
+        status.get("composition_profile").map(String::as_str),
+        Some("square")
+    );
+    assert_eq!(
+        status.get("surface_profile").map(String::as_str),
+        Some("rectangular")
+    );
+    assert_eq!(
+        status.get("native_dimensions").map(String::as_str),
+        Some("480x480")
+    );
+
+    proxy
+        .set_default_layout(flagship)
+        .await
+        .expect("default typed layout must persist through D-Bus");
+    let config = fs::read_to_string(config_dir.join("config.toml")).expect("saved config");
+    assert!(
+        config.contains("default_layout = \"neon-composer.layout.toml\""),
+        "{config}"
+    );
+    assert!(
+        config.contains("mode = \"svg\""),
+        "typed layout uses svg mode: {config}"
+    );
+
+    proxy.stop().await.expect("stop daemon over D-Bus");
+    let exit = daemon.wait_for_exit();
+    assert!(
+        exit.success(),
+        "daemon exit status: {exit}; stderr:\n{}",
+        daemon.stderr()
+    );
+}
+
+#[tokio::test]
+async fn dbus_apply_rejects_unsafe_bridge_for_curved_surface() {
+    let tmp = tempdir().expect("test directory");
+    let layout_dir = tmp.path().join("layouts");
+    fs::create_dir_all(&layout_dir).expect("layout directory");
+    let name = "unsafe.layout.toml";
+    fs::write(
+        layout_dir.join(name),
+        r#"
+version = 1
+name = "unsafe-bridge"
+[[modules]]
+id = "metric"
+kind = "metric"
+binding = "cpu.temperature"
+variant = "hero"
+[profiles.square]
+recipe = "column"
+[profiles.thermalright-curved-2400x1080]
+recipe = "zoned-panorama"
+bridge = "unsafe"
+"#,
+    )
+    .expect("unsafe document");
+
+    let (shutdown_tx, _) = watch::channel(false);
+    let (tick_rate_tx, _) = watch::channel(2_u32);
+    let (mode_tx, mut mode_rx) = mpsc::channel(1);
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").expect("config");
+    let state = Arc::new(Mutex::new(ServiceState {
+        active_layout: "safe.svg".to_string(),
+        mode: "svg".to_string(),
+        connected: true,
+        resolution: (2400, 1080),
+        display_count: 1,
+        tick_rate: 2,
+        jpeg_quality: 90,
+        shutdown_tx,
+        tick_rate_tx,
+        layout_dir: layout_dir.clone(),
+        config_path,
+        sensor_descriptors: Arc::new(std::sync::Mutex::new(Vec::new())),
+        config: Config::default(),
+        mode_change_tx: mode_tx,
+        background_dir: layout_dir.clone(),
+        wrapper_dir: layout_dir.clone(),
+        current_background: None,
+        config_write_lock: Arc::new(Mutex::new(())),
+        bg_change_lock: Arc::new(Mutex::new(())),
+        mode_change_lock: Arc::new(Mutex::new(())),
+        pre_stream_tick_rate: None,
+    }));
+    let listener_layout_dir = layout_dir.clone();
+    tokio::spawn(async move {
+        while let Some(change) = mode_rx.recv().await {
+            let ModeChange::Layout { name, vars, ack } = change else {
+                continue;
+            };
+            let result = RuntimeDisplayDimensions::new(2400, 1080)
+                .build_layout_source_with_bindings(
+                    &listener_layout_dir.join(name),
+                    vars,
+                    None,
+                    None,
+                    ThemePalette::default(),
+                    &HashSet::new(),
+                )
+                .map(|_| ());
+            let _ = ack.send(result);
+        }
+    });
+
+    let bus = PrivateSessionBus::start();
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
+        .expect("build D-Bus server")
+        .name("com.thermalwriter.Service")
+        .expect("claim test service name")
+        .serve_at(
+            "/com/thermalwriter/display",
+            DisplayInterface::new(state.clone()),
+        )
+        .expect("export display interface")
+        .build()
+        .await
+        .expect("start D-Bus server");
+    let connection = zbus::connection::Builder::address(bus.address.as_str())
+        .expect("build D-Bus client")
+        .build()
+        .await
+        .expect("connect D-Bus client");
+    let proxy = DisplayProxy::new(&connection)
+        .await
+        .expect("create display proxy");
+
+    let error = proxy
+        .set_layout(name)
+        .await
+        .expect_err("unsafe bridge composition must not activate");
+    assert!(error.to_string().contains("TWLAYOUT-E026"), "{error}");
+    assert_eq!(state.lock().await.active_layout, "safe.svg");
+}
+
+#[test]
+fn typed_layout_document_persists_offline_without_session_bus() {
+    let tmp = tempdir().expect("test directory");
+    let layout_dir = tmp.path().join("layouts");
+    fs::create_dir_all(&layout_dir).expect("layout directory");
+    let document = thermalwriter::layout_engine::LayoutDocument::from_toml(include_str!(
+        "../layouts/neon-composer.layout.toml"
+    ))
+    .expect("flagship document");
+    let saved = thermalwriter::layout_engine::save_layout_document(
+        &layout_dir,
+        "offline-composer",
+        None,
+        &document,
+    )
+    .expect("offline atomic save");
+    assert_eq!(saved.name, "offline-composer");
+    assert_eq!(saved.path, layout_dir.join("offline-composer.layout.toml"));
+    assert_eq!(
+        fs::read_to_string(saved.path).expect("saved document"),
+        document.to_toml().expect("canonical TOML"),
+    );
+}
+
+#[test]
+fn list_layouts_includes_typed_documents_but_not_config_toml() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("neon-composer.layout.toml"), "version = 1").unwrap();
+    fs::write(tmp.path().join("config.toml"), "[display]").unwrap();
+    let layouts = list_layouts_impl(tmp.path());
+    assert_eq!(layouts, vec!["neon-composer.layout.toml".to_string()]);
+}
+
+#[test]
+fn save_default_layout_impl_writes_typed_layout_to_disk() {
+    let tmp = tempdir().unwrap();
+    let layout_dir = tmp.path().join("layouts");
+    fs::create_dir_all(&layout_dir).unwrap();
+    fs::write(layout_dir.join("neon-composer.layout.toml"), "version = 1").unwrap();
+    let config_path = tmp.path().join("config.toml");
+    fs::write(&config_path, "[display]\ntick_rate = 2\n").unwrap();
+
+    save_default_layout_impl(&layout_dir, &config_path, "neon-composer.layout.toml")
+        .expect("typed layout default must persist");
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    assert_eq!(
+        parsed["display"]["default_layout"].as_str(),
+        Some("neon-composer.layout.toml")
+    );
+    assert_eq!(parsed["display"]["mode"].as_str(), Some("svg"));
 }

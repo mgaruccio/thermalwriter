@@ -22,6 +22,8 @@ use std::collections::HashMap;
     default_path = "/com/thermalwriter/display"
 )]
 pub trait Display {
+    /// Return status fields including `active_layout`, `active_composition`,
+    /// `composition_profile`, `surface_profile`, and `native_dimensions`.
     async fn get_status(&self) -> zbus::Result<HashMap<String, String>>;
     async fn set_layout(&self, name: &str) -> zbus::Result<String>;
     async fn set_mode(&self, mode: &str, command: &str) -> zbus::Result<String>;

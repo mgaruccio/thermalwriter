@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, oneshot, watch};
 use zbus::{interface, object_server::SignalEmitter};
 
 use crate::config::Config;
+use crate::layout_engine::{LayoutDocument, SurfaceProfileId};
 use crate::render::background::BackgroundImage;
 use crate::render::frontmatter::LayoutFrontmatter;
 use crate::validation::{PathContainmentError, validate_layout_vars, validate_path_within_dir};
@@ -173,7 +174,7 @@ pub fn validate_layout_path(layout_dir: &Path, name: &str) -> Result<PathBuf, zb
     validate_path_within_dir_fdo(layout_dir, name, "Layout")
 }
 
-/// List layout files (`.html` and `.svg`) under `layout_dir`, recursing one
+/// List layout files (`.html`, `.svg`, and `.layout.toml`) under `layout_dir`, recursing one
 /// level into subdirectories so `svg/neon-dash.svg` is returned with the
 /// `svg/` prefix. Output is sorted for stable client rendering.
 pub fn list_layouts_impl(layout_dir: &Path) -> Vec<String> {
@@ -225,10 +226,11 @@ pub fn list_layouts_impl(layout_dir: &Path) -> Vec<String> {
 }
 
 fn has_layout_ext(p: &Path) -> bool {
-    matches!(
-        p.extension().and_then(|e| e.to_str()),
-        Some("html") | Some("svg")
-    )
+    p.extension().and_then(|e| e.to_str()) == Some("html")
+        || p.extension().and_then(|e| e.to_str()) == Some("svg")
+        || p.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".layout.toml"))
 }
 
 fn has_image_ext(p: &Path) -> bool {
@@ -414,6 +416,66 @@ fn restore_from_streaming(state: &mut ServiceState) {
             restore_rate
         );
     }
+}
+
+/// Return layout identity and surface metadata for the public status snapshot.
+///
+/// Typed layout documents carry a human-facing composition name and explicit
+/// profile recipes.  The daemon still reports the connected/native dimensions
+/// from `ServiceState`; the document is only consulted to label the selected
+/// profile and composition without guessing topology from dimensions alone.
+fn layout_status_metadata(
+    layout_dir: &Path,
+    active_layout: &str,
+    resolution: (u32, u32),
+) -> (String, String, String, String) {
+    let native_dimensions = format!("{}x{}", resolution.0, resolution.1);
+    let mut composition = active_layout.to_string();
+    let mut composition_profile = if resolution == (0, 0) {
+        "disconnected".to_string()
+    } else {
+        "rectangular".to_string()
+    };
+    let mut surface_profile = if resolution == (0, 0) {
+        "disconnected".to_string()
+    } else {
+        SurfaceProfileId::Rectangular.as_str().to_string()
+    };
+
+    if active_layout.ends_with(".layout.toml")
+        && let Ok(path) = validate_layout_path(layout_dir, active_layout)
+        && let Ok(content) = std::fs::read_to_string(path)
+        && let Ok(document) = LayoutDocument::from_toml(&content)
+    {
+        composition = document.name;
+        if resolution != (0, 0) {
+            let curved_id = SurfaceProfileId::ThermalrightCurved2400x1080;
+            let profile_key = if resolution == (2400, 1080)
+                && document.profiles.contains_key(curved_id.as_str())
+            {
+                curved_id.as_str()
+            } else if resolution.0 == resolution.1 {
+                "square"
+            } else if resolution.1 > resolution.0 {
+                "portrait"
+            } else {
+                "wide"
+            };
+            if document.profiles.contains_key(profile_key) {
+                composition_profile = profile_key.to_string();
+            }
+            if profile_key == curved_id.as_str() {
+                surface_profile = curved_id.as_str().to_string();
+            }
+        }
+    }
+
+    (
+        composition,
+        composition_profile,
+        surface_profile,
+        native_dimensions,
+    )
 }
 
 #[interface(name = "com.thermalwriter.Display")]
@@ -734,6 +796,12 @@ impl DisplayInterface {
     }
 
     /// Return a snapshot of service status as key→value pairs.
+    ///
+    /// `active_composition` is the document's human-facing name when the
+    /// active source is a typed `.layout.toml`; legacy layouts retain their
+    /// filename.  `composition_profile` describes the document recipe selected
+    /// for the current dimensions, while `surface_profile` identifies the
+    /// topology used for validation.
     async fn get_status(&self) -> HashMap<String, String> {
         let state = self.state.lock().await;
         let mut status = HashMap::new();
@@ -744,13 +812,19 @@ impl DisplayInterface {
             "resolution".to_string(),
             format!("{}x{}", state.resolution.0, state.resolution.1),
         );
+        let (composition, composition_profile, surface_profile, native_dimensions) =
+            layout_status_metadata(&state.layout_dir, &state.active_layout, state.resolution);
+        status.insert("active_composition".to_string(), composition);
+        status.insert("composition_profile".to_string(), composition_profile);
+        status.insert("surface_profile".to_string(), surface_profile);
+        status.insert("native_dimensions".to_string(), native_dimensions);
         status.insert("display_count".to_string(), state.display_count.to_string());
         status.insert("tick_rate".to_string(), state.tick_rate.to_string());
         status
     }
 
-    /// Return sorted list of available layout filenames (`.html` and `.svg`),
-    /// including `svg/*.svg` under the `svg/` subdirectory.
+    /// Return sorted list of available layout filenames (`.html`, `.svg`, and
+    /// `.layout.toml`), including `svg/*.svg` under the `svg/` subdirectory.
     async fn list_layouts(&self) -> Vec<String> {
         let state = self.state.lock().await;
         list_layouts_impl(&state.layout_dir)
