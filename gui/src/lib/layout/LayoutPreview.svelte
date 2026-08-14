@@ -9,6 +9,7 @@
     preview: LayoutPreviewResponse | null;
     previewing: boolean;
     draftName: string;
+    profileLabel?: string;
     saveState: ComposerSaveState;
     nativeDimensionsAvailable: boolean;
     error?: string;
@@ -18,11 +19,15 @@
     preview,
     previewing,
     draftName,
+    profileLabel = "Selected profile",
     saveState,
     nativeDimensionsAvailable,
     error = "",
   }: Props = $props();
   let canvas = $state<HTMLCanvasElement>();
+  let copyPending = $state(false);
+  let copyFeedback = $state("");
+  let copyFeedbackKind = $state<"success" | "fallback" | "failure" | "">("");
 
   function validRegion(region: PreviewSurfaceRegion, frame: LayoutPreviewResponse): boolean {
     return (
@@ -145,9 +150,129 @@
     context.restore();
   }
 
+  function clearCopyFeedback() {
+    copyFeedback = "";
+    copyFeedbackKind = "";
+  }
+
+  function previewIdentity(frame: LayoutPreviewResponse) {
+    const layout = draftName.trim() || "Untitled layout";
+    const profile = profileLabel.trim() || "Selected profile";
+    return `${layout} · ${profile} · ${frame.width} × ${frame.height} native pixels`;
+  }
+
+  function previewFileName(frame: LayoutPreviewResponse) {
+    const slug = (value: string) =>
+      value.trim().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
+    const layout = slug(draftName) || "layout";
+    const profile = slug(profileLabel) || "preview";
+    return `${layout}-${profile}-${frame.width}x${frame.height}.png`;
+  }
+
+  function visiblePreviewToPngBlob(): Promise<Blob> {
+    const target = canvas;
+    const frame = preview;
+    if (!target || !frame || frame.rgba.length === 0) {
+      return Promise.reject(new Error("No visible preview is ready."));
+    }
+    if (frame.rgba.length !== frame.width * frame.height * 4) {
+      return Promise.reject(new Error("The visible preview is still rendering."));
+    }
+    if (target.width !== frame.width || target.height !== frame.height) {
+      return Promise.reject(new Error("The visible preview is still rendering."));
+    }
+
+    return new Promise((resolve, reject) => {
+      target.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error("The visible preview could not be encoded as PNG."));
+        }
+      }, "image/png");
+    });
+  }
+
+  function savePng(blob: Blob, frame: LayoutPreviewResponse) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const filename = previewFileName(frame);
+    link.href = url;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    return filename;
+  }
+
+  function canWriteImageToClipboard() {
+    return typeof navigator !== "undefined" && typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+  }
+
+  async function copyVisiblePreview() {
+    if (copyPending || !preview || preview.rgba.length === 0) return;
+
+    copyPending = true;
+    clearCopyFeedback();
+    try {
+      const frame = preview;
+      const blob = await visiblePreviewToPngBlob();
+      if (preview !== frame) {
+        throw new Error("The selected profile changed during capture. Try again.");
+      }
+
+      if (canWriteImageToClipboard()) {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          copyFeedback = `Copied ${previewIdentity(frame)} as PNG.`;
+          copyFeedbackKind = "success";
+          return;
+        } catch {
+          // A denied or unavailable image clipboard uses the explicit PNG fallback below.
+        }
+      }
+
+      const filename = savePng(blob, frame);
+      copyFeedback = `Image clipboard unavailable; saved ${previewIdentity(frame)} as ${filename}.`;
+      copyFeedbackKind = "fallback";
+    } catch (captureError) {
+      const detail = captureError instanceof Error ? captureError.message : "Try again.";
+      copyFeedback = `Could not copy ${preview ? previewIdentity(preview) : "the visible preview"}. ${detail}`;
+      copyFeedbackKind = "failure";
+    } finally {
+      copyPending = false;
+    }
+  }
+
+  async function saveVisiblePreview() {
+    if (copyPending || !preview || preview.rgba.length === 0) return;
+
+    copyPending = true;
+    clearCopyFeedback();
+    try {
+      const frame = preview;
+      const blob = await visiblePreviewToPngBlob();
+      if (preview !== frame) {
+        throw new Error("The selected profile changed during capture. Try again.");
+      }
+      const filename = savePng(blob, frame);
+      copyFeedback = `Saved ${previewIdentity(frame)} as ${filename}.`;
+      copyFeedbackKind = "success";
+    } catch (captureError) {
+      const detail = captureError instanceof Error ? captureError.message : "Try again.";
+      copyFeedback = `Could not save ${preview ? previewIdentity(preview) : "the visible preview"}. ${detail}`;
+      copyFeedbackKind = "failure";
+    } finally {
+      copyPending = false;
+    }
+  }
+
   $effect(() => {
     const frame = preview;
     const target = canvas;
+    clearCopyFeedback();
     if (!frame || !target || frame.rgba.length === 0) return;
 
     const expectedBytes = frame.width * frame.height * 4;
@@ -166,7 +291,7 @@
   });
 
   const diagnosticSummary = $derived(preview?.diagnostics ?? []);
-  const hasFrame = $derived(Boolean(preview && preview.rgba.length > 0));
+  const hasFrame = $derived(Boolean(preview && preview.rgba.length === preview.width * preview.height * 4));
   const hasCurvedTopology = $derived(preview?.topology === "curved-panorama");
 </script>
 
@@ -226,6 +351,42 @@
       </span>
     </div>
   </div>
+
+  {#if hasFrame && preview}
+    <div class="typed-preview-actions" aria-label="Preview handoff actions">
+      <button
+        type="button"
+        class="btn-secondary"
+        onclick={copyVisiblePreview}
+        disabled={copyPending}
+        aria-describedby="preview-handoff-status"
+      >
+        {copyPending ? "Preparing PNG…" : "Copy preview image"}
+      </button>
+      <button
+        type="button"
+        class="btn-secondary"
+        onclick={saveVisiblePreview}
+        disabled={copyPending}
+        aria-describedby="preview-handoff-status"
+      >
+        Save PNG
+      </button>
+    </div>
+  {/if}
+
+  {#if copyFeedback}
+    <p
+      id="preview-handoff-status"
+      class:failure={copyFeedbackKind === "failure"}
+      class:fallback={copyFeedbackKind === "fallback"}
+      class="typed-preview-feedback"
+      role={copyFeedbackKind === "failure" ? "alert" : "status"}
+      aria-live="polite"
+    >
+      {copyFeedback}
+    </p>
+  {/if}
 
   {#if error}
     <p class="error" role="alert">{error}</p>
@@ -290,5 +451,35 @@
   .typed-preview-topology-legend small {
     flex-basis: 100%;
     color: var(--text-dim);
+  }
+
+  .typed-preview-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .typed-preview-feedback {
+    margin: 0;
+    padding: 8px 10px;
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 9%, var(--bg-elev));
+    border: 1px solid color-mix(in srgb, var(--green) 24%, var(--line-soft));
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    line-height: 1.4;
+  }
+
+  .typed-preview-feedback.fallback {
+    color: var(--amber);
+    background: color-mix(in srgb, var(--amber) 9%, var(--bg-elev));
+    border-color: color-mix(in srgb, var(--amber) 24%, var(--line-soft));
+  }
+
+  .typed-preview-feedback.failure {
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, var(--bg-elev));
+    border-color: color-mix(in srgb, var(--red) 24%, var(--line-soft));
   }
 </style>

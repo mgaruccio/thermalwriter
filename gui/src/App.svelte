@@ -777,6 +777,7 @@
             preview={composerPreview}
             previewing={composerPreviewing}
             draftName={composerDraft?.name ?? ""}
+            profileLabel={composerProfile.label}
             saveState={composerSaveState}
             nativeDimensionsAvailable={true}
             error={composerError}
