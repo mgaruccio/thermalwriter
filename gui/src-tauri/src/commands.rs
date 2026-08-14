@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +10,10 @@ use thermalwriter::config::Config;
 use thermalwriter::dbus_types::DisplayProxy;
 use thermalwriter::layout_engine::diagnostic::TOML_PARSE_CODE;
 use thermalwriter::layout_engine::{
-    DiagnosticSeverity, LayoutDiagnostic, LayoutDocument, LayoutDocumentError,
-    LayoutEngineRenderer, ModuleDocument, PERSISTENCE_PATH_CODE, PreviewTopology,
-    ResvgSceneBackend, SurfaceProfileId, resolve_surface_profile, validate,
+    DiagnosticSeverity, DisplaySurfaceProfile, ImageFit, LayoutDiagnostic, LayoutDocument,
+    LayoutDocumentError, LayoutEngineRenderer, ModuleDocument, PERSISTENCE_PATH_CODE,
+    PreviewTopology, ResvgSceneBackend, SolvedLayout, SurfaceProfileId, resolve_surface_profile,
+    solve, validate,
 };
 use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
@@ -297,6 +299,413 @@ pub fn validate_layout_document(
     response.valid &= media_diagnostics.is_empty();
     response.diagnostics.extend(media_diagnostics);
     Ok(response)
+}
+
+#[tauri::command]
+pub fn copy_layout_design_context(
+    draft: LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    state: tauri::State<'_, RendererState>,
+) -> Result<String, AppError> {
+    copy_layout_design_context_impl(&draft, profile, width, height, &state.layout_dir)
+}
+
+/// Build the paste-only design context from the same validation and solver path as
+/// the preview command.  The formatter intentionally receives no runtime sensor
+/// data or media bytes: a context describes authoring decisions, not a frame.
+fn copy_layout_design_context_impl(
+    draft: &LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    layout_dir: &Path,
+) -> Result<String, AppError> {
+    let surface = resolve_preview_surface(profile, width, height)?;
+    let validation = validate_layout_document_impl(draft.clone(), profile, width, height)?;
+    let mut diagnostics = validation.diagnostics;
+    let solved = if diagnostics.is_empty() {
+        match solve(draft, &surface) {
+            Ok(solved) => Some(solved),
+            Err(mut solve_diagnostics) => {
+                diagnostics.append(&mut solve_diagnostics);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    diagnostics.extend(layout_media_path_diagnostics(layout_dir, draft));
+
+    Ok(format_layout_design_context(
+        draft,
+        &surface,
+        solved.as_ref(),
+        &diagnostics,
+    ))
+}
+
+fn format_layout_design_context(
+    document: &LayoutDocument,
+    surface: &DisplaySurfaceProfile,
+    solved: Option<&SolvedLayout>,
+    diagnostics: &[LayoutDiagnostic],
+) -> String {
+    let configured_profile = document.profiles.get(surface.id.as_str());
+    let recipe = configured_profile
+        .map(|profile| profile.recipe.trim())
+        .filter(|recipe| !recipe.is_empty())
+        .map(context_value)
+        .or_else(|| solved.map(|layout| layout.recipe.as_str().to_owned()))
+        .unwrap_or_else(|| "<not configured>".to_owned());
+    let bridge_policy = configured_profile
+        .and_then(|profile| profile.bridge.as_deref())
+        .map(str::trim)
+        .filter(|bridge| !bridge.is_empty())
+        .map(context_value)
+        .unwrap_or_else(|| "local-only".to_owned());
+
+    let mut output = String::new();
+    let document_name = context_value(&document.name);
+    let profile_name = context_value(surface.id.as_str());
+    let topology = context_topology(surface, &bridge_policy);
+
+    let _ = writeln!(output, "# Thermalwriter layout design context");
+    let _ = writeln!(
+        output,
+        "- Document: {document_name} (schema {})",
+        document.version
+    );
+    if let Some(preset) = document.preset.as_deref() {
+        let _ = writeln!(output, "- Preset: {}", context_value(preset));
+    }
+    let _ = writeln!(
+        output,
+        "- Target: {profile_name} ({}x{})",
+        surface.width, surface.height
+    );
+    let _ = writeln!(output, "- Topology: {topology}");
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Profile");
+    let _ = writeln!(output, "- Recipe: {recipe}");
+    let _ = writeln!(output, "- Bridge policy: {bridge_policy}");
+    let _ = writeln!(output, "- Readable regions:");
+    for zone in surface.readable_zones {
+        let _ = writeln!(
+            output,
+            "  - {}: {}",
+            context_value(zone.name),
+            context_rect(
+                zone.bounds.x,
+                zone.bounds.y,
+                zone.bounds.width,
+                zone.bounds.height,
+            )
+        );
+    }
+    if surface.readable_zones.is_empty() {
+        let _ = writeln!(output, "  - none");
+    }
+    let _ = writeln!(output, "- Protected regions:");
+    for region in surface.protected_regions {
+        let _ = writeln!(
+            output,
+            "  - {}: {}",
+            context_value(region.name),
+            context_rect(
+                region.bounds.x,
+                region.bounds.y,
+                region.bounds.width,
+                region.bounds.height,
+            )
+        );
+    }
+    if surface.protected_regions.is_empty() {
+        let _ = writeln!(output, "  - none");
+    }
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Ordered modules");
+    if document.modules.is_empty() {
+        let _ = writeln!(output, "- None.");
+    } else {
+        for (index, module) in document.modules.iter().enumerate() {
+            let zone = solved
+                .and_then(|layout| layout.modules.get(index))
+                .map(|module| {
+                    module
+                        .zone
+                        .as_deref()
+                        .map(context_zone_name)
+                        .unwrap_or_else(|| {
+                            if surface.preview == PreviewTopology::CurvedPanorama {
+                                "spanning".to_owned()
+                            } else {
+                                "full-surface".to_owned()
+                            }
+                        })
+                })
+                .unwrap_or_else(|| "unresolved".to_owned());
+            let _ = writeln!(
+                output,
+                "{}. {} — {} — {} — {} — {}",
+                index + 1,
+                context_value(context_module_id(module)),
+                context_module_kind(module),
+                context_module_binding(module),
+                zone,
+                context_value(context_module_variant(module)),
+            );
+        }
+    }
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Bindings and styles");
+    if document.modules.is_empty() {
+        let _ = writeln!(output, "- None.");
+    } else {
+        for module in &document.modules {
+            let _ = writeln!(
+                output,
+                "- {}: binding={}; style={}",
+                context_value(context_module_id(module)),
+                context_module_binding(module),
+                context_module_style(module),
+            );
+        }
+    }
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Solved geometry");
+    if let Some(layout) = solved {
+        let _ = writeln!(output, "- Recipe: {}", layout.recipe);
+        let _ = writeln!(
+            output,
+            "- Canvas bounds: {}",
+            context_rect(
+                layout.bounds.x,
+                layout.bounds.y,
+                layout.bounds.width,
+                layout.bounds.height,
+            )
+        );
+        for (index, module) in layout.modules.iter().enumerate() {
+            let zone = module
+                .zone
+                .as_deref()
+                .map(context_zone_name)
+                .unwrap_or_else(|| {
+                    if surface.preview == PreviewTopology::CurvedPanorama {
+                        "spanning".to_owned()
+                    } else {
+                        "full-surface".to_owned()
+                    }
+                });
+            let fallback_id = document
+                .modules
+                .get(index)
+                .map(context_module_id)
+                .unwrap_or("<unknown>");
+            let id = if module.id.is_empty() {
+                context_value(fallback_id)
+            } else {
+                context_value(&module.id)
+            };
+            let _ = writeln!(
+                output,
+                "- {}: {}; zone={}",
+                id,
+                context_rect(
+                    module.bounds.x,
+                    module.bounds.y,
+                    module.bounds.width,
+                    module.bounds.height,
+                ),
+                zone
+            );
+        }
+    } else {
+        let _ = writeln!(output, "- Unavailable until layout validation passes.");
+    }
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Problems");
+    if diagnostics.is_empty() {
+        let _ = writeln!(output, "- None (validation passed for this profile).");
+    } else {
+        for diagnostic in diagnostics {
+            let _ = writeln!(
+                output,
+                "- {} [{}] {}",
+                context_value(&diagnostic.code),
+                diagnostic.severity,
+                context_value(&diagnostic.message),
+            );
+            if let Some(profile) = diagnostic.profile.as_deref() {
+                let _ = writeln!(output, "  - Profile: {}", context_value(profile));
+            }
+            if let Some(module_id) = diagnostic.module_id.as_deref() {
+                let _ = writeln!(output, "  - Module: {}", context_value(module_id));
+            }
+            if let Some(property_path) = diagnostic.property_path.as_deref() {
+                let _ = writeln!(output, "  - Property: {}", context_value(property_path));
+            }
+            if diagnostic.line.is_some() || diagnostic.column.is_some() {
+                let location = match (diagnostic.line, diagnostic.column) {
+                    (Some(line), Some(column)) => format!("line {line}, column {column}"),
+                    (Some(line), None) => format!("line {line}"),
+                    (None, Some(column)) => format!("column {column}"),
+                    (None, None) => unreachable!(),
+                };
+                let _ = writeln!(output, "  - Location: {location}");
+            }
+            let _ = writeln!(output, "  - Reason: {}", context_value(&diagnostic.reason));
+            let _ = writeln!(output, "  - Fix: {}", context_value(&diagnostic.fix));
+        }
+    }
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Workflow");
+    let _ = writeln!(output, "Generate → validate → preview → inspect → iterate.");
+    let _ = writeln!(
+        output,
+        "1. Generate or revise the typed document and its ordered modules."
+    );
+    let _ = writeln!(
+        output,
+        "2. Validate the document for the selected profile and resolve every problem above."
+    );
+    let _ = writeln!(
+        output,
+        "3. Preview the validated document at the target dimensions."
+    );
+    let _ = writeln!(
+        output,
+        "4. Inspect the rendered frame for readability, bridge protection, and module order."
+    );
+    let _ = writeln!(
+        output,
+        "5. Iterate on bindings, variants, or module order, then validate and preview again."
+    );
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Next check");
+    let _ = writeln!(
+        output,
+        "validate → preview_layout → inspect the rendered frame for profile `{profile_name}`"
+    );
+
+    output
+}
+
+fn context_value(value: &str) -> String {
+    let value = value.trim();
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() || character == '`' {
+            sanitized.push(' ');
+        } else {
+            sanitized.push(character);
+        }
+    }
+    if sanitized.trim().is_empty() {
+        "<none>".to_owned()
+    } else {
+        sanitized.trim().to_owned()
+    }
+}
+
+fn context_rect(x: u32, y: u32, width: u32, height: u32) -> String {
+    format!("x={x}, y={y}, width={width}, height={height}")
+}
+
+fn context_topology(surface: &DisplaySurfaceProfile, bridge_policy: &str) -> String {
+    if surface.preview == PreviewTopology::CurvedPanorama {
+        let zones = surface
+            .readable_zones
+            .iter()
+            .map(|zone| context_zone_name(zone.name))
+            .collect::<Vec<_>>()
+            .join("/");
+        format!("readable zones {zones}; protected bridge; {bridge_policy} spanning")
+    } else {
+        "single readable surface; no protected bridge".to_owned()
+    }
+}
+
+fn context_zone_name(name: &str) -> String {
+    context_value(name.strip_suffix("-readable").unwrap_or(name))
+}
+
+fn context_module_kind(module: &ModuleDocument) -> &'static str {
+    match module {
+        ModuleDocument::Metric(_) => "metric",
+        ModuleDocument::Sparkline(_) => "sparkline",
+        ModuleDocument::Text(_) => "text",
+        ModuleDocument::Media(_) => "media",
+    }
+}
+
+fn context_module_id(module: &ModuleDocument) -> &str {
+    match module {
+        ModuleDocument::Metric(module) => &module.id,
+        ModuleDocument::Sparkline(module) => &module.id,
+        ModuleDocument::Text(module) => &module.id,
+        ModuleDocument::Media(module) => &module.id,
+    }
+}
+
+fn context_module_variant(module: &ModuleDocument) -> &str {
+    match module {
+        ModuleDocument::Metric(module) => &module.variant,
+        ModuleDocument::Sparkline(module) => &module.variant,
+        ModuleDocument::Text(module) => &module.variant,
+        ModuleDocument::Media(module) => &module.variant,
+    }
+}
+
+fn context_module_binding(module: &ModuleDocument) -> String {
+    match module {
+        ModuleDocument::Metric(module) => context_value(&module.binding),
+        ModuleDocument::Sparkline(module) => context_value(&module.binding),
+        ModuleDocument::Text(module) => context_value(&module.binding),
+        ModuleDocument::Media(module) => {
+            if module.binding.trim().is_empty() {
+                "media source (bytes omitted)".to_owned()
+            } else {
+                format!("{} (media bytes omitted)", context_value(&module.binding))
+            }
+        }
+    }
+}
+
+fn context_module_style(module: &ModuleDocument) -> String {
+    match module {
+        ModuleDocument::Metric(module) => format!("variant={}", context_value(&module.variant)),
+        ModuleDocument::Sparkline(module) => {
+            format!("variant={}", context_value(&module.variant))
+        }
+        ModuleDocument::Text(module) => format!("variant={}", context_value(&module.variant)),
+        ModuleDocument::Media(module) => format!(
+            "variant={}; fit={}; opacity={:.2}; span_bridge={}",
+            context_value(&module.variant),
+            context_image_fit(module.fit),
+            module.opacity,
+            if module.span_bridge {
+                "requested"
+            } else {
+                "off"
+            },
+        ),
+    }
+}
+
+fn context_image_fit(fit: ImageFit) -> &'static str {
+    match fit {
+        ImageFit::Contain => "contain",
+        ImageFit::Cover => "cover",
+    }
 }
 
 fn validate_layout_document_impl(
@@ -2465,6 +2874,59 @@ mod tests {
             thermalwriter::layout_engine::PERSISTENCE_CONFLICT_CODE
         );
         assert_eq!(saved.name, "draft");
+    }
+
+    #[test]
+    fn design_context_locks_curved_profile_geometry_and_redacts_media() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp);
+        let document = flagship_document();
+        let context = copy_layout_design_context_impl(
+            &document,
+            SurfaceProfileId::ThermalrightCurved2400x1080,
+            2400,
+            1080,
+            &state.layout_dir,
+        )
+        .expect("curved design context");
+
+        assert_eq!(
+            context,
+            copy_layout_design_context_impl(
+                &document,
+                SurfaceProfileId::ThermalrightCurved2400x1080,
+                2400,
+                1080,
+                &state.layout_dir,
+            )
+            .expect("repeat curved design context")
+        );
+        assert!(context.contains("- Target: thermalright-curved-2400x1080 (2400x1080)"));
+        assert!(context.contains(
+            "- Topology: readable zones left/right; protected bridge; media-only spanning"
+        ));
+        assert!(context.contains("1. cpu-temp — metric — cpu.temperature — left — hero"));
+        assert!(context.contains("- cpu-temp: x=36, y=36, width=888, height=387; zone=left"));
+        assert!(context.contains("- history: x=1476, y=36, width=888, height=387; zone=right"));
+        assert!(context.contains("- None (validation passed for this profile)."));
+        assert!(context.contains("Generate → validate → preview → inspect → iterate."));
+
+        let mut media_document = document;
+        let mut media = thermalwriter::layout_engine::MediaDocument::default();
+        media.id = "wallpaper".into();
+        media.source = PathBuf::from("private-secret.png");
+        media.span_bridge = true;
+        media_document.modules.push(ModuleDocument::Media(media));
+        let media_context = copy_layout_design_context_impl(
+            &media_document,
+            SurfaceProfileId::ThermalrightCurved2400x1080,
+            2400,
+            1080,
+            &state.layout_dir,
+        )
+        .expect("media design context");
+        assert!(media_context.contains("media source (bytes omitted)"));
+        assert!(!media_context.contains("private-secret.png"));
     }
 
     #[test]

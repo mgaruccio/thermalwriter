@@ -54,6 +54,7 @@ pub fn run() {
             commands::load_layout_preset,
             commands::load_layout_document,
             commands::validate_layout_document,
+            commands::copy_layout_design_context,
             commands::preview_layout_document,
             commands::save_layout_document,
             commands::apply_layout_document,

@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import ProfileSelector from "./ProfileSelector.svelte";
   import ValidationPanel from "./ValidationPanel.svelte";
   import ModuleInspector from "./ModuleInspector.svelte";
   import ModuleList from "./ModuleList.svelte";
   import PresetStarter from "./PresetStarter.svelte";
+  import { PREVIEW_PROFILES } from "./types";
   import type {
     ComposerSaveState,
     LayoutDiagnostic,
@@ -100,6 +102,41 @@
   const selectedModule = $derived(
     draft?.modules.find((module) => module.id === selectedModuleId) ?? draft?.modules[0] ?? null,
   );
+
+  let copyingDesignContext = $state(false);
+  let designContextFeedback = $state("");
+  let designContextFeedbackKind = $state<"success" | "failure" | "">("");
+  const selectedPreviewProfile = $derived(
+    PREVIEW_PROFILES.find((profile) => profile.id === previewProfile) ?? PREVIEW_PROFILES[0],
+  );
+
+  async function copyDesignContext() {
+    const draftSnapshot = draft;
+    if (!draftSnapshot || copyingDesignContext) return;
+
+    copyingDesignContext = true;
+    designContextFeedback = "";
+    designContextFeedbackKind = "";
+    try {
+      const context = await invoke<string>("copy_layout_design_context", {
+        draft: draftSnapshot,
+        profile: selectedPreviewProfile.backendProfile,
+        width: selectedPreviewProfile.width,
+        height: selectedPreviewProfile.height,
+      });
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(context);
+      designContextFeedback = "Design context copied to the clipboard.";
+      designContextFeedbackKind = "success";
+    } catch {
+      designContextFeedback = "Could not copy the design context. Check clipboard permissions and try again.";
+      designContextFeedbackKind = "failure";
+    } finally {
+      copyingDesignContext = false;
+    }
+  }
 </script>
 
 <div class="composer-view">
@@ -194,7 +231,27 @@
         >
           {applying ? "Activating…" : "Save & activate"}
         </button>
+        <button
+          type="button"
+          class="btn-secondary"
+          onclick={copyDesignContext}
+          disabled={controlsDisabled || copyingDesignContext}
+          aria-describedby="design-context-copy-status"
+        >
+          {copyingDesignContext ? "Copying…" : "Copy Design Context"}
+        </button>
       </div>
+      {#if designContextFeedback}
+        <p
+          id="design-context-copy-status"
+          class:failure={designContextFeedbackKind === "failure"}
+          class="composer-help"
+          role={designContextFeedbackKind === "failure" ? "alert" : "status"}
+          aria-live="polite"
+        >
+          {designContextFeedback}
+        </p>
+      {/if}
     </section>
 
     <ModuleList
