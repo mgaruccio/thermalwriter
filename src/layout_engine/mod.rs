@@ -10,28 +10,29 @@ pub mod validation;
 
 pub use diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
 pub use document::{
-    LayoutDocument, LayoutDocumentError, MediaDocument, MetricDocument, ModuleDocument,
-    ProfileRecipeDocument, SparklineDocument, TextDocument, CURRENT_VERSION,
+    CURRENT_VERSION, LayoutDocument, LayoutDocumentError, MediaDocument, MetricDocument,
+    ModuleDocument, ProfileRecipeDocument, SparklineDocument, TextDocument,
 };
 pub use modules::{
-    BindingValue, MetricModule, MetricVariant, ModuleCapabilities, ModuleEmitter, ResolvedBindings,
-    TextModule, ThemeTokens,
+    BindingValue, HistoryBinding, MetricModule, MetricVariant, ModuleCapabilities, ModuleEmitter,
+    ResolvedBindings, SparklineModule, SparklineStyle, SparklineVariant, TextModule, ThemeTokens,
+    ValueRange,
 };
 pub use scene::{
     ClipNode, Color, ImageFit, ImageNode, MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE,
     PathNode, Point, RectNode, Scene, SceneNode, TextAlignment, TextNode, TextRole,
 };
 pub use solver::{
-    solve, BridgePolicy, RecipeKind, Rect, SolvedLayout, SolvedModule, CARD_BASE_EXTENT,
-    CARD_MIN_EXTENT, CONTENT_INSET_BASE, TOKEN_REFERENCE_AXIS,
+    BridgePolicy, CARD_BASE_EXTENT, CARD_MIN_EXTENT, CONTENT_INSET_BASE, RecipeKind, Rect,
+    SolvedLayout, SolvedModule, TOKEN_REFERENCE_AXIS, solve,
 };
 pub use surface::{
-    known_surface_profiles, rectangular_surface_profile, resolve_surface_profile,
-    DisplaySurfaceProfile, PreviewTopology, SurfaceBounds, SurfaceProfileId,
-    SurfaceProfileRegistry, SurfaceRegion, SurfaceZone, SURFACE_PROFILE_REGISTRY,
+    DisplaySurfaceProfile, PreviewTopology, SURFACE_PROFILE_REGISTRY, SurfaceBounds,
+    SurfaceProfileId, SurfaceProfileRegistry, SurfaceRegion, SurfaceZone, known_surface_profiles,
+    rectangular_surface_profile, resolve_surface_profile,
 };
 pub use validation::{
-    validate, validate_rectangular_recipe, BRIDGE_VIOLATION_CODE, MODULE_ID_CODE,
-    RECIPE_OVERFLOW_CODE, RECIPE_SHAPE_CODE, RECTANGULAR_SURFACE_CODE, UNKNOWN_RECIPE_CODE,
-    UNSUPPORTED_RECIPE_CODE, ZONE_OVERFLOW_CODE,
+    BRIDGE_VIOLATION_CODE, MODULE_ID_CODE, RECIPE_OVERFLOW_CODE, RECIPE_SHAPE_CODE,
+    RECTANGULAR_SURFACE_CODE, UNKNOWN_RECIPE_CODE, UNSUPPORTED_RECIPE_CODE, ZONE_OVERFLOW_CODE,
+    validate, validate_rectangular_recipe,
 };

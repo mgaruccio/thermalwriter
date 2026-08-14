@@ -3,6 +3,7 @@
 //! Module implementations intentionally resolve only typed bindings and theme
 //! tokens.  They do not know which renderer will consume the resulting scene.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,13 @@ use super::scene::{MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE};
 use super::solver::SolvedModule;
 
 pub mod metric;
+pub mod sparkline;
 pub mod text;
 
 pub use metric::{MetricModule, MetricVariant};
+pub use sparkline::{
+    HistoryBinding, SparklineModule, SparklineStyle, SparklineVariant, ValueRange,
+};
 pub use text::TextModule;
 
 /// Stable diagnostic code for module data/style failures.
@@ -114,6 +119,9 @@ impl From<&str> for BindingValue {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedBindings {
     pub values: BTreeMap<String, BindingValue>,
+    /// Runtime sensor histories keyed by their typed layout binding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub histories: BTreeMap<String, Vec<f64>>,
 }
 
 impl ResolvedBindings {
@@ -137,9 +145,37 @@ impl ResolvedBindings {
     pub fn get(&self, key: &str) -> Option<&BindingValue> {
         self.values.get(key)
     }
+    /// Insert a deterministic runtime history for a sparkline binding.
+    pub fn insert_history<I, V>(&mut self, key: impl Into<String>, values: I) -> Option<Vec<f64>>
+    where
+        I: IntoIterator<Item = V>,
+        V: Borrow<f64>,
+    {
+        self.histories.insert(
+            key.into(),
+            values.into_iter().map(|value| *value.borrow()).collect(),
+        )
+    }
+    /// Add a history while retaining the builder-style binding API.
+    pub fn with_history<I, V>(mut self, key: impl Into<String>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Borrow<f64>,
+    {
+        self.insert_history(key, values);
+        self
+    }
+    /// Resolve a history without exposing the sensor-history implementation.
+    pub fn history(&self, key: &str) -> Option<&[f64]> {
+        self.histories.get(key).map(Vec::as_slice)
+    }
+    /// Alias for callers that use getter naming for runtime bindings.
+    pub fn get_history(&self, key: &str) -> Option<&[f64]> {
+        self.history(key)
+    }
 
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.is_empty() && self.histories.is_empty()
     }
 }
 
