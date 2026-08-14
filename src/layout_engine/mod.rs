@@ -2,6 +2,8 @@
 
 pub mod diagnostic;
 pub mod document;
+pub mod modules;
+pub mod scene;
 pub mod solver;
 pub mod surface;
 pub mod validation;
@@ -10,6 +12,14 @@ pub use diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
 pub use document::{
     LayoutDocument, LayoutDocumentError, MediaDocument, MetricDocument, ModuleDocument,
     ProfileRecipeDocument, SparklineDocument, TextDocument, CURRENT_VERSION,
+};
+pub use modules::{
+    BindingValue, MetricModule, MetricVariant, ModuleCapabilities, ModuleEmitter, ResolvedBindings,
+    TextModule, ThemeTokens,
+};
+pub use scene::{
+    ClipNode, Color, ImageFit, ImageNode, MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE,
+    PathNode, Point, RectNode, Scene, SceneNode, TextAlignment, TextNode, TextRole,
 };
 pub use solver::{
     solve, BridgePolicy, RecipeKind, Rect, SolvedLayout, SolvedModule, CARD_BASE_EXTENT,
