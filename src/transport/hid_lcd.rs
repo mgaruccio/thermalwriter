@@ -169,7 +169,17 @@ impl HidIo for HidrawReportIo {
 }
 
 /// Type2 handshake control flow over injectable I/O (retries included).
+///
+/// Prefer an unsolicited probe reply so 4.07 streaming firmware is not
+/// rebooted by a Type2 init while the panel is already showing the logo.
 pub fn handshake_type2_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result<DeviceInfo> {
+    if let Ok(resp) = io.read(TYPE2_PROBE_READ_BOUND) {
+        if type2_policy::validate_probe_response_type2(&resp) {
+            let (pm, sub) = parse_type2_pm_sub(&resp)?;
+            info!("HID Type2 unsolicited handshake PM={pm} SUB={sub}; skipping init");
+            return build_device_info(WireProtocol::HidType2, vid, pid, pm, sub, None);
+        }
+    }
     handshake_type2_legacy_with_io(io, vid, pid).map(|(info, _)| info)
 }
 
@@ -900,5 +910,42 @@ mod tests {
             error.to_string().contains("Type3 requires RGB565"),
             "{error:#}"
         );
+    }
+
+    struct SeqHidIo {
+        reads: Vec<Vec<u8>>,
+        writes: usize,
+    }
+
+    impl HidIo for SeqHidIo {
+        fn write(&mut self, _data: &[u8]) -> Result<()> {
+            self.writes += 1;
+            Ok(())
+        }
+        fn read(&mut self, _max_len: usize) -> Result<Vec<u8>> {
+            if self.reads.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(self.reads.remove(0))
+            }
+        }
+        fn sleep(&mut self, _d: std::time::Duration) {}
+    }
+
+    #[test]
+    fn type2_handshake_skips_init_on_unsolicited_pm128() {
+        let mut resp = vec![0_u8; 36];
+        resp[0..4].copy_from_slice(&TYPE2_MAGIC);
+        resp[4] = 1;
+        resp[5] = 128;
+        resp[12] = 0x01;
+        let mut io = SeqHidIo {
+            reads: vec![resp],
+            writes: 0,
+        };
+        let info = handshake_type2_with_io(&mut io, 0x0416, 0x5302).unwrap();
+        assert_eq!(io.writes, 0, "must not send Type2 init");
+        assert_eq!((info.pm, info.sub), (128, 1));
+        assert_eq!((info.width(), info.height()), (1280, 480));
     }
 }

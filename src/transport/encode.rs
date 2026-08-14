@@ -176,22 +176,12 @@ pub fn encode_frame(
         );
     }
 
-    // Trofeo Vision / FBL128 (and TRCC solid-color path): rotate_panel JPEG
-    // panels need a 90° wire transform so the payload is portrait while the
-    // Type2 header keeps native landscape dims. Without this the firmware
-    // accepts USB writes but never leaves the boot logo.
-    let mut angle = wire_angle(&info.profile, rotation)?;
-    // HID Type2 Trofeo (FBL128) solid-color parity with TRCC: portrait JPEG
-    // payload + native landscape header. Bulk widescreen panels keep wire_angle only.
-    if matches!(
-        info.protocol,
-        crate::transport::profile::WireProtocol::HidType2
-    ) && info.profile.rotate_panel
-        && info.profile.widescreen
-        && info.encoding().is_jpeg()
-    {
-        angle = ((u32::from(angle) + 90) % 360) as u16;
-    }
+    // Widescreen JPEG wire angle already comes from the profile table
+    // (encode_base / encode_invert). Do not add an extra Type2 90° here:
+    // on 0416:5302 PM128 that produced a portrait JPEG the firmware accepted
+    // without leaving the boot logo. Operator-confirmed 2026-08-13: native
+    // 1280×480 JPEG at rotation 0 painted the glass.
+    let angle = wire_angle(&info.profile, rotation)?;
     let (rotated, out_w, out_h) = rotate_pixels(&frame.data, frame.width, frame.height, angle)?;
 
     let encoding = info.encoding();
@@ -295,6 +285,19 @@ mod tests {
         assert!(enc.encoding.is_jpeg());
         assert_eq!((enc.width, enc.height), (480, 480));
         assert_eq!(&enc.data[..2], &[0xFF, 0xD8]);
+    }
+
+    #[test]
+    fn hid2_pm128_rotation_0_stays_landscape_jpeg() {
+        let info = build_device_info(WireProtocol::HidType2, 0x0416, 0x5302, 128, 1, None).unwrap();
+        assert_eq!((info.width(), info.height()), (1280, 480));
+        let frame = solid_frame(1280, 480, [255, 0, 255]);
+        let enc = encode_frame(&frame, &info, 0, 85).unwrap();
+        assert!(enc.encoding.is_jpeg());
+        assert_eq!((enc.width, enc.height), (1280, 480));
+        assert_eq!(&enc.data[..2], &[0xFF, 0xD8]);
+        let image = image::load_from_memory(&enc.data).unwrap();
+        assert_eq!((image.width(), image.height()), (1280, 480));
     }
 
     #[test]
