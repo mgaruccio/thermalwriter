@@ -36,7 +36,8 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5406", TAG+="uaccess
 SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5406", TAG+="uaccess"
 
 # --- HID Type 2 (direct Linux hidraw syscalls; no HIDAPI package) ---
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5302", TAG+="uaccess", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="10000"
+# 0416:5302 — power/control on (keep USB awake; autosuspend blanks the panel)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5302", TAG+="uaccess", ATTR{power/control}="on"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5302", TAG+="uaccess"
 
 # --- HID Type 3 ---

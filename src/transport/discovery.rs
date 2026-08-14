@@ -1422,8 +1422,11 @@ mod tests {
         );
 
         let usb_rule = udev_rule(udev_rules, "usb", HID2_ID.0, HID2_ID.1);
-        assert!(usb_rule.contains(r#"ATTR{power/control}="auto""#));
-        assert!(usb_rule.contains(r#"ATTR{power/autosuspend_delay_ms}="10000""#));
+        assert!(usb_rule.contains(r#"ATTR{power/control}="on""#));
+        assert!(
+            !usb_rule.contains(r#"ATTR{power/control}="auto""#),
+            "0416:5302 must not autosuspend: {usb_rule}"
+        );
         assert!(usb_rule.contains("TAG+=\"uaccess\""));
 
         let unrelated_usb_ids = [
