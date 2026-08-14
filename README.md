@@ -325,6 +325,7 @@ For more information, consult the following documentation files:
 - [Architecture Guide](docs/architecture.md) - Internal design of the daemon and GUI components.
 - [Performance Tuning and Profiling](docs/profiling.md) - Whole-daemon profiling harness, Criterion benches, baseline workflow, and the autoresearch loop for performance work.
 - [Designing Layouts](skills/designing-layouts/SKILL.md) - Guidelines for creating custom LCD layouts.
+- [Layout Engine](docs/layout-engine.md) - Owner composer workflow, typed documents, display profiles, and renderer boundary.
 
 ## Multi-cooler operation
 

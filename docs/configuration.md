@@ -18,6 +18,7 @@ Settings related to the cooler LCD rendering and refresh options.
 - **`default_layout`** (String)
   - Description: Layout filename to load on startup, relative to the layouts directory.
   - Default: `"svg/neon-dash-v2.svg"`
+  - New composer documents use a `.layout.toml` filename such as `neon-composer.layout.toml`; see the [layout engine guide](layout-engine.md) and [`.layout.toml` authoring reference](../skills/designing-layouts/references/layout-toml.md).
 
 - **`jpeg_quality`** (Integer)
   - Description: Quality level for compression of the JPEG frames sent to the LCD.

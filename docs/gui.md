@@ -6,7 +6,7 @@ The `thermalwriter` project includes a Svelte/Tauri-based graphical configuratio
 
 Before using the GUI, you **must install the daemon first** (using the daemon source installer or package). 
 
-While the GUI can perform several actions offline (without the daemon running), features like **Live Apply** and **Streaming** require a running `thermalwriter` daemon.
+While the GUI can perform several actions offline (without the daemon running), the typed composer can preview, diagnose, and save drafts locally. Activating a typed layout and **Streaming** require a running `thermalwriter` daemon.
 
 ---
 
@@ -17,6 +17,54 @@ When the daemon is offline, the status bar will show `Daemon · Offline`. You ca
 - **Save Configuration offline**: Clicking **Apply** saves your layout variables and settings to `~/.config/thermalwriter/config.toml` so they load automatically on the next daemon start.
 
 ---
+
+## Compose a layout
+
+The **Compose** tab is the owner workflow for new typed layouts. It starts from the shipped **Neon Composer** preset; no renderer source editing is needed.
+
+1. **Choose a preset**
+   - Open **Compose**, enter a name in **Name your layout**, select **Neon Composer**, and click **Use preset**.
+   - To continue later, choose a file under **Reopen a saved layout** and click **Reopen**.
+2. **Edit modules**
+   - In **Ordered modules**, add **Metric**, **Sparkline**, **Text**, or **Media**.
+   - Select **Configure** for a module, choose its sensor/history/media binding and supported presentation options in the inspector, then use **Move up**, **Move down**, or **Remove module**. The list order is solve order.
+   - Media sources are relative files under the approved layout/media directory. Do not use arbitrary paths.
+3. **Preview the target surface**
+   - In **Preview profile**, choose **Square** (`480 × 480`), **Portrait** (`480 × 1280`), **Wide** (`1280 × 480`), or **Curved** (`2400 × 1080`).
+   - The preview uses native pixels; the window only scales its presentation. Curved preview draws illustrative **left/right readable zones** and a **protected bridge**. This is a conservative topology guide, not calibrated optical warp.
+   - On the curved profile, the topology is full-height `left-readable` `x=0..960`, protected `center-bridge` `x=960..1440`, and `right-readable` `x=1440..2400` (40% / 20% / 40%). Metric, Sparkline, and Text stay in readable zones. Media can cross the bridge only when the profile allows it and **Allow bridge span** is enabled for that Media module.
+4. **Fix validation**
+   - When the draft has problems, **Layout diagnostics** shows the stable code, severity, profile, module, property, reason, and fix. Correct the indicated field and wait for the preview to refresh; an invalid target returns diagnostics instead of a frame.
+5. **Save and Apply**
+   - **Save layout** writes the named `.layout.toml` document to the configured layout directory. It is safe to reopen later; a fingerprint conflict is reported instead of overwriting an external edit.
+   - **Save & activate** saves the document and asks a running daemon over D-Bus to select it and persist it as the default. The composer reports whether it is **Active** or saved but not activated.
+
+### Online and offline
+
+- Preview, diagnostics, and saving a typed draft are local GUI operations and work while the status bar says **Daemon · Offline**. No LCD hardware is required for the native profile preview.
+- Activation is the online step. If the daemon or session bus is unavailable, **Save & activate** still saves the document and reports that activation was not completed. Start/restart the user daemon, then reopen the saved document and click **Save & activate**:
+
+  ```sh
+  systemctl --user restart thermalwriter
+  thermalwriter ctl status
+  ```
+- A terminal-only one-session switch after the daemon is back is:
+
+  ```sh
+  thermalwriter ctl layout my-neon-layout.layout.toml
+  ```
+  Use **Save & activate** in the GUI when you also want the selected layout persisted as the default.
+
+> **Breaking transition:** Layout Studio supports typed `.layout.toml` documents only. Old SVG/Tera and HTML source layouts are unsupported by the composer and are left untouched; keep using their existing Variables/preview/Apply path instead. There is no silent import or conversion.
+
+## Ask an agent for help
+
+- **Recommended: Codex or Claude Code** — They can inspect the repository, run the real validation/preview commands, open every generated PNG, and iterate. Start with the [`.layout.toml` authoring reference](../skills/designing-layouts/references/layout-toml.md).
+- **Copy Error** — In **Layout diagnostics**, select one issue and click **Copy Error**. This copies that issue's code, location, profile/module/property, reason, and suggested fix.
+- **Copy Preview Image** — In the composition preview, click **Copy preview image** (the button uses a lowercase `preview`). It copies the exact visible native PNG, including the curved topology overlay; if image clipboard access is unavailable, the GUI downloads the PNG instead.
+- **Copy Design Context** — With a draft open, click **Copy Design Context**. It copies Markdown describing the selected profile, ordered modules, bindings/options, solved geometry, and diagnostics without embedding runtime media bytes.
+
+These are separate handoff artifacts: **Copy Error** diagnoses one issue, **Copy Preview Image** supplies the visual result, and **Copy Design Context** explains the document and solve. Paste any or all three into a disconnected chatbot; it does not need repository or tool access. The [layout-design skill](../skills/designing-layouts/SKILL.md) and [copyable bootstrap prompt](../skills/designing-layouts/references/bootstrap-prompt.md) describe the same generate → validate → preview → inspect → iterate loop.
 
 ## Layout Variables
 

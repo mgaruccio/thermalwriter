@@ -1,8 +1,15 @@
 # Layout engine
 
 > **Current destination (2026-08-14):** New layouts use the typed, bounded `.layout.toml` document and the shared module composer. The Config GUI and daemon consume the same Rust document, validator, solver, module emitters, and native preview renderer.
+> **Breaking transition:** Layout Studio accepts typed `.layout.toml` documents only. Existing SVG/Tera and HTML source layouts are unsupported by the composer and left untouched; they are not imported or converted.
 
 Read the complete [`.layout.toml` authoring reference](../skills/designing-layouts/references/layout-toml.md) for the schema, module catalog, profile recipes, curved-surface policy, diagnostics, CLI loop, visual checklist, and typed-module extension path. The repository skill banner points to the same reference for agents and layout authors.
+
+## Owner path
+
+Open Thermalwriter Config → **Compose**, choose **Neon Composer**, edit the ordered typed modules, and select **Square**, **Portrait**, **Wide**, or **Curved** in **Preview profile**. The [GUI guide](gui.md) covers the online/offline save and activation path plus the distinct **Copy Error**, **Copy preview image**, and **Copy Design Context** handoffs.
+
+The `2400x1080` Curved profile is a conservative readable-zone/protected-bridge topology guide, not calibrated optical warp. Metric, sparkline, and text modules stay local; bridge spanning is an explicit media capability and document choice. For agent-assisted or paste-only authoring, use the [layout-design skill](../skills/designing-layouts/SKILL.md) and [copyable bootstrap prompt](../skills/designing-layouts/references/bootstrap-prompt.md).
 
 Related: [#99](https://github.com/mgaruccio/thermalwriter/issues/99), [#100](https://github.com/mgaruccio/thermalwriter/issues/100), [#101](https://github.com/mgaruccio/thermalwriter/issues/101), [#102](https://github.com/mgaruccio/thermalwriter/issues/102), [#103](https://github.com/mgaruccio/thermalwriter/issues/103), `docs/profiling.md`.
 

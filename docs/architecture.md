@@ -18,7 +18,20 @@ Core modules live under `src/`:
 - `service/` runs the tick loop, D-Bus service, and Xvfb capture support.
 - `config.rs` handles config loading, validation, seeding built-in assets, and atomic updates.
 
-The primary shipped authoring path is still SVG templates rendered with Tera and `resvg`. Legacy HTML layouts still work through the custom template renderer. The optional `blitz` feature is experimental. A typed layout-document composer is in progress under `src/layout_engine/`. The historical `stack()` pickup note remains in [layout-engine.md](layout-engine.md) and is not the destination API.
+The shipped runtime now has two deliberate authoring paths. New owner compositions use the typed `.layout.toml` document and module composer under `src/layout_engine/`. Existing SVG templates rendered with Tera and `resvg`, and legacy HTML layouts rendered through the custom template renderer, remain separate runtime paths; the optional `blitz` feature is experimental.
+
+## Typed layout path
+
+`LayoutDocument` is parsed, validated, and solved in Rust, then emitted as a backend-neutral `Scene`. The first scene backend compiles that scene to internal SVG and renders it with `resvg` before the result crosses the shared `RawFrame` boundary:
+
+```text
+typed .layout.toml → Rust validation → deterministic solver → Scene
+  → internal SVG → resvg → RawFrame → GUI RGBA preview or daemon frame
+```
+
+The Config GUI, preview example, and daemon use this same document, surface profile, solver, module emitters, and renderer path. Tauri carries typed JSON commands; Rust owns parsing, validation, native-profile geometry, and atomic persistence. Direct `tiny-skia` is a measured backend exit option, not an authoring contract.
+
+> **Breaking transition:** Layout Studio supports typed `.layout.toml` documents only. It does not import, convert, or rewrite existing SVG/Tera or HTML source layouts. Those files are left untouched and continue through their legacy paths; new owner work starts from the `neon-composer` preset.
 
 ## Runtime Data
 
