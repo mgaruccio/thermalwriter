@@ -5,7 +5,7 @@
 Pickup note for standardizing SVG layout flow, then measuring performance.
 Visual polish of individual cards is out of scope here.
 
-Related: [#99](https://github.com/mgaruccio/thermalwriter/issues/99),
+Related: [#99](https://github.com/mgaruccio/thermalwriter/issues/99), [#100](https://github.com/mgaruccio/thermalwriter/issues/100), [#101](https://github.com/mgaruccio/thermalwriter/issues/101), [#102](https://github.com/mgaruccio/thermalwriter/issues/102), [#103](https://github.com/mgaruccio/thermalwriter/issues/103),
 `skills/designing-layouts/`, `docs/profiling.md`.
 
 ## Current answer
