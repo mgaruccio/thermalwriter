@@ -18,7 +18,7 @@ Core modules live under `src/`:
 - `service/` runs the tick loop, D-Bus service, and Xvfb capture support.
 - `config.rs` handles config loading, validation, seeding built-in assets, and atomic updates.
 
-The primary rendering path is SVG templates rendered with Tera variables and `resvg`. Legacy HTML layouts still work through the custom template renderer. The optional `blitz` feature is experimental and exists for evaluating a fuller HTML/CSS renderer.
+The primary rendering path is SVG templates rendered with Tera variables and `resvg`. Legacy HTML layouts still work through the custom template renderer. The optional `blitz` feature is experimental and exists for evaluating a fuller HTML/CSS renderer. Layout flow status (what uses `stack()` today, Grafana-track next steps, then Criterion) is in [layout-engine.md](layout-engine.md).
 
 ## Runtime Data
 
