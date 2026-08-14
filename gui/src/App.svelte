@@ -13,11 +13,13 @@
     type LayoutApplyResponse,
     type LayoutDocument,
     type LayoutDocumentResponse,
+    type LayoutModule,
     type LayoutPreviewResponse,
     type LayoutPreset,
     type LayoutSaveResponse,
     type ModuleKind,
     type ModuleReorderDirection,
+    type SensorDescriptor,
   } from "./lib/layout/types";
   import { bumpRevision, isCurrentRevision } from "./lib/asyncSelection";
 
@@ -44,13 +46,6 @@
     step: number | null;
   };
 
-  type SensorDescriptor = {
-    key: string;
-    name: string;
-    unit: string;
-    /** Last measured poll cost in microseconds. */
-    cost_us: number;
-  };
 
   type DaemonStatus = {
     mode: string;
@@ -305,6 +300,14 @@
       ...composerDraft,
       modules: composerDraft.modules.filter((module) => module.id !== id),
     });
+  }
+
+  function updateComposerModule(id: string, nextModule: LayoutModule) {
+    const currentDraft = composerDraft;
+    if (!currentDraft || nextModule.id !== id) return;
+    const modules = currentDraft.modules.map((module) => (module.id === id ? nextModule : module));
+    if (modules.every((module, index) => module === currentDraft.modules[index])) return;
+    commitComposerDraft({ ...currentDraft, modules });
   }
 
   function reorderModule(id: string, direction: ModuleReorderDirection) {
@@ -857,6 +860,8 @@
             presets={COMPOSER_PRESETS}
             savedLayouts={composerLayouts}
             draft={composerDraft}
+            sensors={sensors}
+            diagnostics={composerPreview?.diagnostics ?? []}
             saveState={composerSaveState}
             previewing={composerPreviewing}
             previewValid={composerPreviewValid}
@@ -871,6 +876,7 @@
             addModule={addModule}
             removeModule={removeModule}
             reorderModule={reorderModule}
+            updateModule={updateComposerModule}
             saveDraft={saveDraft}
             applyDraft={applyDraft}
           />

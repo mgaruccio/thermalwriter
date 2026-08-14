@@ -1,12 +1,16 @@
 <script lang="ts">
+  import ModuleInspector from "./ModuleInspector.svelte";
   import ModuleList from "./ModuleList.svelte";
   import PresetStarter from "./PresetStarter.svelte";
   import type {
     ComposerSaveState,
+    LayoutDiagnostic,
     LayoutDocument,
+    LayoutModule,
     LayoutPreset,
     ModuleKind,
     ModuleReorderDirection,
+    SensorDescriptor,
   } from "./types";
 
   type LayoutSummary = {
@@ -19,6 +23,8 @@
     presets: LayoutPreset[];
     savedLayouts: LayoutSummary[];
     draft: LayoutDocument | null;
+    sensors: SensorDescriptor[];
+    diagnostics?: LayoutDiagnostic[];
     saveState: ComposerSaveState;
     previewing: boolean;
     previewValid: boolean | null;
@@ -33,6 +39,7 @@
     addModule: (kind: ModuleKind) => void;
     removeModule: (id: string) => void;
     reorderModule: (id: string, direction: ModuleReorderDirection) => void;
+    updateModule: (id: string, module: LayoutModule) => void;
     saveDraft: () => void;
     applyDraft: () => void;
   };
@@ -41,6 +48,8 @@
     presets,
     savedLayouts,
     draft,
+    sensors,
+    diagnostics = [],
     saveState,
     previewing,
     previewValid,
@@ -55,6 +64,7 @@
     addModule,
     removeModule,
     reorderModule,
+    updateModule,
     saveDraft,
     applyDraft,
   }: Props = $props();
@@ -77,6 +87,11 @@
   function reopenSelected() {
     if (selectedSavedLayout) reopenDocument(selectedSavedLayout);
   }
+
+  let selectedModuleId = $state<string | null>(null);
+  const selectedModule = $derived(
+    draft?.modules.find((module) => module.id === selectedModuleId) ?? draft?.modules[0] ?? null,
+  );
 </script>
 
 <div class="composer-view">
@@ -173,6 +188,15 @@
       onadd={addModule}
       onremove={removeModule}
       onreorder={reorderModule}
+      bind:selectedId={selectedModuleId}
+      disabled={controlsDisabled}
+    />
+    <ModuleInspector
+      module={selectedModule}
+      sensors={sensors}
+      profiles={draft.profiles}
+      diagnostics={diagnostics}
+      onchange={(module) => updateModule(module.id, module)}
       disabled={controlsDisabled}
     />
   {:else}

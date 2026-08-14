@@ -13,10 +13,18 @@
     onadd: (kind: ModuleKind) => void;
     onremove: (id: string) => void;
     onreorder: (id: string, direction: ModuleReorderDirection) => void;
+    selectedId?: string | null;
     disabled?: boolean;
   };
 
-  let { modules, onadd, onremove, onreorder, disabled = false }: Props = $props();
+  let {
+    modules,
+    onadd,
+    onremove,
+    onreorder,
+    selectedId = $bindable(null),
+    disabled = false,
+  }: Props = $props();
   const moduleKinds: ModuleKind[] = ["metric", "sparkline", "text", "media"];
 
   function moveLabel(index: number, direction: ModuleReorderDirection): string {
@@ -24,6 +32,10 @@
       ? `Move module ${index + 1} up`
       : `Move module ${index + 1} down`;
   }
+
+  $effect(() => {
+    if (!selectedId && modules.length > 0) selectedId = modules[0].id;
+  });
 </script>
 
 <section class="composer-section module-list-section" aria-labelledby="module-list-title">
@@ -58,7 +70,7 @@
   {:else}
     <ol class="module-list" aria-label="Layout modules">
       {#each modules as module, index (module.id)}
-        <li class="module-card module-kind-{module.kind}">
+        <li class="module-card module-kind-{module.kind}" class:selected={module.id === selectedId}>
           <div class="module-index" aria-hidden="true">{String(index + 1).padStart(2, "0")}</div>
           <div class="module-card-copy">
             <div class="module-card-title">
@@ -69,6 +81,18 @@
             <span class="module-id">Stable ID · {module.id}</span>
           </div>
           <div class="module-actions">
+            <button
+              type="button"
+              class="btn-secondary module-inspect"
+              class:active={module.id === selectedId}
+              onclick={() => { selectedId = module.id; }}
+              aria-pressed={module.id === selectedId}
+              aria-label={`Configure ${moduleKindLabel(module.kind)} ${module.id}`}
+              title="Configure module"
+              disabled={disabled}
+            >
+              {module.id === selectedId ? "Editing" : "Configure"}
+            </button>
             <button
               type="button"
               class="icon-button"
@@ -105,3 +129,25 @@
     </ol>
   {/if}
 </section>
+
+<style>
+  .module-card.selected {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line-soft));
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  .module-inspect {
+    min-height: 25px;
+    padding: 3px 7px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .module-inspect.active {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line-soft));
+  }
+</style>

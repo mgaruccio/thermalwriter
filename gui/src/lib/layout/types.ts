@@ -177,3 +177,149 @@ export function createModule(kind: ModuleKind, existing: LayoutModule[]): Layout
 export function normalizeLayoutName(value: string): string {
   return value.trim().replace(/\.layout\.toml$/i, "");
 }
+
+export type SensorDescriptor = {
+  key: string;
+  name: string;
+  unit: string;
+  cost_us: number;
+};
+
+export type BindingKind = "sensor" | "history" | "media";
+
+export type ModuleOption = {
+  value: string;
+  label: string;
+  help: string;
+};
+
+export type MediaFitOption = ModuleOption & {
+  value: "contain" | "cover";
+};
+
+export type ModuleCapability = {
+  bindingKind: BindingKind;
+  bindingLabel: string;
+  bindingHelp: string;
+  variants: readonly ModuleOption[];
+  fitOptions?: readonly MediaFitOption[];
+  opacity?: {
+    min: number;
+    max: number;
+    step: number;
+    unit: string;
+    help: string;
+  };
+  bridgeProfiles?: readonly string[];
+  bridgeHelp?: string;
+};
+
+/**
+ * The inspector vocabulary mirrors fields the typed document and renderer
+ * already understand. It intentionally has no escape hatch for raw styles.
+ */
+export const moduleCapabilities: Readonly<Record<ModuleKind, ModuleCapability>> = {
+  metric: {
+    bindingKind: "sensor",
+    bindingLabel: "Sensor binding",
+    bindingHelp: "Choose a live sensor from the daemon catalog. The preview uses the selected key.",
+    variants: [
+      { value: "default", label: "Default", help: "Balanced value card for everyday readings." },
+      { value: "hero", label: "Hero", help: "A larger value treatment for the primary reading." },
+      { value: "compact", label: "Compact", help: "A tighter value treatment for dense compositions." },
+      { value: "status", label: "Status", help: "A status-sized value treatment for state-oriented cards." },
+    ],
+  },
+  sparkline: {
+    bindingKind: "history",
+    bindingLabel: "History binding",
+    bindingHelp: "Choose a sensor history. History keys are derived from the live sensor catalog.",
+    variants: [
+      { value: "default", label: "Default", help: "The standard accent line." },
+      { value: "line", label: "Line", help: "A line-only history treatment." },
+      { value: "area", label: "Area", help: "A bounded filled history treatment." },
+      { value: "neon", label: "Neon", help: "A brighter, heavier filled history treatment." },
+      { value: "muted", label: "Muted", help: "A lower-emphasis history line." },
+    ],
+  },
+  text: {
+    bindingKind: "sensor",
+    bindingLabel: "Text binding",
+    bindingHelp: "Choose a sensor value to render as bounded text.",
+    variants: [
+      { value: "body", label: "Body", help: "Readable body text." },
+      { value: "title", label: "Title", help: "Large title text." },
+      { value: "label", label: "Label", help: "A compact label role." },
+      { value: "caption", label: "Caption", help: "Lower-emphasis caption text." },
+      { value: "value", label: "Value", help: "A value-oriented text role." },
+      { value: "unit", label: "Unit", help: "A unit-oriented text role." },
+      { value: "status", label: "Status", help: "An accent status role." },
+    ],
+  },
+  media: {
+    bindingKind: "media",
+    bindingLabel: "Media source",
+    bindingHelp: "Use a relative filename below the approved media directory.",
+    variants: [],
+    fitOptions: [
+      { value: "contain", label: "Contain", help: "Keep the full image visible inside the module bounds." },
+      { value: "cover", label: "Cover", help: "Fill the module bounds and crop overflow." },
+    ],
+    opacity: {
+      min: 0.7,
+      max: 1,
+      step: 0.01,
+      unit: "0–1",
+      help: "Keep media opacity at or above the LCD readability floor.",
+    },
+    bridgeProfiles: ["thermalright-curved-2400x1080"],
+    bridgeHelp: "Available only when a selected curved profile permits media-only bridge spanning.",
+  },
+};
+
+export function moduleCapabilitiesFor(kind: ModuleKind): ModuleCapability {
+  return moduleCapabilities[kind];
+}
+
+export function moduleBindingKind(kind: ModuleKind): BindingKind {
+  return moduleCapabilitiesFor(kind).bindingKind;
+}
+
+/** Return picker entries for the selected module's supported binding kind. */
+export function moduleBindingOptions(kind: ModuleKind, sensors: SensorDescriptor[]): SensorDescriptor[] {
+  if (moduleBindingKind(kind) !== "history") {
+    return [...new Map(sensors.map((sensor) => [sensor.key, sensor])).values()];
+  }
+
+  const options = new Map<string, SensorDescriptor>();
+  for (const sensor of sensors) {
+    if (sensor.key.endsWith(".history")) {
+      options.set(sensor.key, sensor);
+    }
+  }
+  for (const sensor of sensors) {
+    if (!sensor.key.endsWith(".history")) {
+      options.set(`${sensor.key}.history`, {
+        ...sensor,
+        key: `${sensor.key}.history`,
+        name: `${sensor.name} history`,
+      });
+    }
+  }
+  return [...options.values()];
+}
+
+export function isKnownModuleBinding(
+  kind: ModuleKind,
+  binding: string,
+  sensors: SensorDescriptor[],
+ ): boolean {
+  const value = binding.trim();
+  return value.length > 0 && moduleBindingOptions(kind, sensors).some((sensor) => sensor.key === value);
+}
+
+export function hasRelevantBridgeProfile(
+  profiles: Record<string, ProfileRecipeDocument> | undefined,
+ ): boolean {
+  return Boolean(profiles && Object.values(profiles).some((profile) => profile.bridge === "media-only"));
+}
