@@ -1,3 +1,5 @@
+> **Status (2026-08-14):** This note is the historical SVG/`stack()` pickup path, **not** the current engine destination. New work lives under `src/layout_engine/`: typed `.layout.toml`, solver recipes (column / two-column / zoned-panorama), and a Config GUI module composer. Legacy SVG/Tera files stay untouched and are not a compatibility requirement. `stack()` remains only for existing templates.
+
 # Layout engine status
 
 Pickup note for standardizing SVG layout flow, then measuring performance.

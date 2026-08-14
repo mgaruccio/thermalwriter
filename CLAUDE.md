@@ -78,7 +78,7 @@ cargo run --example render_layout fps-hero 15 --mock
 
 ## Layout Authoring
 
-See `skills/designing-layouts/SKILL.md` for the full design system.
+See `skills/designing-layouts/SKILL.md` for visual craft. New layout-engine work lives in `src/layout_engine/` (typed `.layout.toml` composer), not the historical `stack()` pickup in `docs/layout-engine.md`.
 
 SVG is the primary layout format. HTML layouts still work via the legacy TemplateRenderer.
 

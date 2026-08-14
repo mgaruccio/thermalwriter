@@ -1,3 +1,5 @@
+> **Authoring destination (2026-08-14):** New work should target the typed `.layout.toml` composer in `src/layout_engine/`, not hand-placed SVG / `{% if is_* %}` branches or `stack()` as the long-term API. Visual craft below still applies (480-class washed-out LCD, CAM/iCUE contrast). Legacy SVG/HTML files are left untouched.
+
 ---
 name: designing-layouts
 description: Use when creating, modifying, or reviewing thermalwriter LCD layouts. Also use when extending the rendering engine with new CSS properties, image support, or sensor providers.
