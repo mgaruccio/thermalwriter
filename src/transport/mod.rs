@@ -8,6 +8,7 @@
 //! Transport layer: discovery, profile resolution, and frame transfer.
 
 pub mod bulk_usb;
+pub mod policy;
 #[cfg(feature = "daemon")]
 pub use discovery::{LcdTransportRoute, resolve_known_lcd_route};
 pub mod discovery;
@@ -36,6 +37,10 @@ pub use hid_report::{
     REPORT_ID_UNNUMBERED, REVIEWED_HIDAPI_EVIDENCE_COMMIT, USERSPACE_SUBMIT_BYTES, UsbBusAddress,
     authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
+pub use policy::{
+    ExactDescriptorPolicy, ExactDevicePolicy, ProbePolicy, exact_descriptor_policy,
+    negotiate_response, select_probe_policy,
+};
 pub use profile::{
     DeviceInfo, DeviceProfile, DisplayShape, FixtureProfile, FrameEncoding, KNOWN_FBL_CODES,
     WireProtocol, build_device_info, device_info_from_fixture, display_shape, fixture_by_id,
@@ -54,9 +59,9 @@ pub use usb_fingerprint::{
     UsbInterfaceShape, UsbRunIdentity, UsbTransferKind, derive_bulk_pair, derive_vendor_bulk_pair,
     format_bcd_device, hid_interrupt_in_endpoints, unsupported_known_shape_message,
 };
-pub use validate_device::{ValidateDeviceArgs, run_validate_device};
 #[doc(hidden)]
 pub use validate_device::test_support;
+pub use validate_device::{ValidateDeviceArgs, run_validate_device};
 pub use validation_report::{
     BuildProvenance, CheckField, CheckStatus, DescriptorCaptureStatus, DisplayDimensions,
     EvidenceOrigin, FinalizeError, HardwareValidationReport, HidBackendProvenance,

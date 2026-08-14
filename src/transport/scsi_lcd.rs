@@ -6,7 +6,7 @@
 // path: src/trcc/adapters/device/scsi_lcd.py
 
 use anyhow::{Context, Result, bail};
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::fs::OpenOptions;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
@@ -440,27 +440,8 @@ impl Transport for ScsiLcd {
         Ok(info)
     }
 
-    fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
-        let info = self
-            .info
-            .as_ref()
-            .context("Handshake not performed")?
-            .clone();
-        if let Err(error) = send_frame_scsi_with_io(self, &info, frame) {
-            warn!("SCSI frame chunk failed: {error:#}");
-            // Fatal for ENODEV/EIO/timeout already in error chain.
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<std::io::Error>()
-                    .and_then(|io| io.raw_os_error())
-                    .is_some_and(|code| matches!(code, libc::ENODEV | libc::EIO | libc::ETIMEDOUT))
-                    || cause.to_string().contains("fatal")
-            }) {
-                self.mark_disconnected();
-            }
-            return Err(error);
-        }
-        Ok(())
+    fn send_frame(&mut self, _frame: &EncodedFrame) -> Result<()> {
+        anyhow::bail!("SCSI has no evidence-backed exact production output policy");
     }
 
     fn close(&mut self) {

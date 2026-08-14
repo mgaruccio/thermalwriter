@@ -15,6 +15,10 @@ All notable changes to this project will be documented in this file.
 - `thermalwriter validate-device`: guided hardware validation CLI (passive inventory preflight, active visual cards with hold-while-prompt, soak, reconnect, daemon restore, sanitized `report.toml` bundles). Documented in `docs/hardware-validation.md`.
 - Promoted `87ad:70db` (bulk, PM4/SUB5, bcdDevice 4.07) to **Tested** after a maintainer-reviewed full guided pass.
 
+### Changed
+- Type2 devices now negotiate an exact policy (PM58 hidraw vs PM128 interrupt libusb). A session that fails mid-transfer clears authorization so reconnect repeats the full gate. `validate-device` shares that PM128 claim/init path.
+- Layout engine: versioned `.layout.toml` document schema, stable diagnostics, and explicit rectangular/curved surface profiles live under `src/layout_engine/`.
+
 ### Fixed
 - Dual-display discovery: bulk `validate-device` opens the explicitly selected unit when a peer HID cooler remains attached.
 - Validator operator UX: stage banners, hold-while-prompt visual cards, durable stdin reader (fixes post-reconnect hang before report write), soak progress logging.

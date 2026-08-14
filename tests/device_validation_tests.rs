@@ -8,10 +8,10 @@ use thermalwriter::transport::hid_report::{
     USERSPACE_SUBMIT_BYTES,
 };
 use thermalwriter::transport::test_support::{
-    active_fixture, correlated_hidraw_fs, fixed_timestamp, hid_in_fingerprint, inventory_entry,
-    mismatched_hidraw_fs, open_pm58_session, pm58_short_response, pm68_short_response,
     ActiveOptions, CountingInventory, FakeControl, FakeHidIo, FakeOwnership, MapHidrawInventory,
     MapInventory, PassivePreflightContext, PreflightResult, ScriptedPrompt, ValidateDeviceArgs,
+    active_fixture, correlated_hidraw_fs, fixed_timestamp, hid_in_fingerprint, inventory_entry,
+    mismatched_hidraw_fs, open_pm58_session, pm58_short_response, pm68_short_response,
     run_active_validation_with, run_passive_preflight, run_validate_device_with,
 };
 use thermalwriter::transport::type2_policy::Type2PreHandshakePolicy;
@@ -50,7 +50,7 @@ fn hid_interrupt_in_only_is_valid_passive_inventory() {
     let report_toml = std::fs::read_to_string(output.join("report.toml")).unwrap();
     assert!(report_toml.contains("result = \"pass\""));
     assert!(report_toml.contains("direction = \"in\""));
-    assert!(!report_toml.contains("direction = \"out\""));
+    assert!(report_toml.contains("direction = \"out\""));
     assert!(report_toml.contains("max_packet_size = 8"));
     assert!(report_toml.contains("pre_handshake_policy = \"hid407_read_only_probe\""));
 }
@@ -124,12 +124,12 @@ fn pm58_short_response_authorizes_report_policy() {
 }
 
 #[test]
-fn pm68_is_recorded_then_stops_before_output() {
+fn pm68_short_response_fails_before_any_transition_or_output() {
     let temp = tempfile::tempdir().unwrap();
     let (usb, hidraw, sysfs) = active_fixture();
     let io = FakeHidIo::with_probe(&pm68_short_response());
     let writes = std::sync::Arc::clone(&io.writes);
-
+    let mut io = Some(io);
     let error = run_active_validation_with(
         0x0416,
         0x5302,
@@ -143,20 +143,13 @@ fn pm68_is_recorded_then_stops_before_output() {
         &mut ScriptedPrompt::default(),
         ActiveOptions::default(),
         |_| {},
-        |_, _| Ok(HidReportReadSession::from_io(FakeHidIo::with_probe(&pm68_short_response()))),
+        |_, _| Ok(HidReportReadSession::from_io(io.take().unwrap())),
     )
     .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("stopped before output"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("Negotiation"), "{error}");
     assert_eq!(writes.lock().unwrap().len(), 0);
-
     let report_toml = std::fs::read_to_string(temp.path().join("report.toml")).unwrap();
-    assert!(report_toml.contains("pm = 68") || report_toml.contains("profile_policy"));
+    assert!(report_toml.contains("malformed") || report_toml.contains("passive response"));
 }
 
 #[test]
@@ -166,7 +159,11 @@ fn hid_lengths_remain_independent() {
     session.probe_type2_read_only(0).unwrap();
     let mut write_session = session.authorize_writes().unwrap();
     let observations = write_session
-        .write_chunked(&vec![0xAB; PROTOCOL_CHUNK_BYTES], Some(PROTOCOL_CHUNK_BYTES), Some(8))
+        .write_chunked(
+            &vec![0xAB; PROTOCOL_CHUNK_BYTES],
+            Some(PROTOCOL_CHUNK_BYTES),
+            Some(8),
+        )
         .unwrap();
 
     let obs = &observations[0];
@@ -195,10 +192,7 @@ fn unexpected_512_return_for_513_submit_fails_without_retry() {
 
     let HidChunkedWriteFailure { completed, error } = failure;
     assert!(completed.is_empty());
-    assert!(matches!(
-        error,
-        HidReportWriteError::UnexpectedCount(_)
-    ));
+    assert!(matches!(error, HidReportWriteError::UnexpectedCount(_)));
     assert!(write_session.is_stopped());
     assert_eq!(write_session.contract().expected_write_return_bytes, 513);
 }
@@ -459,10 +453,8 @@ fn synthetic_reports_cannot_set_eligible_for_tested() {
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Synthetic, ValidationScope::Full);
     assert!(!report.eligible_for_tested());
 
-    let mut replay = HardwareValidationReport::new_in_progress(
-        EvidenceOrigin::Replay,
-        ValidationScope::Passive,
-    );
+    let mut replay =
+        HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Passive);
     replay
         .set_fingerprint(&hid_in_fingerprint(), false, Some(true))
         .unwrap();

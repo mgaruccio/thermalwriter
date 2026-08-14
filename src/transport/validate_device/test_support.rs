@@ -19,12 +19,12 @@ use crate::transport::usb_fingerprint::{
 };
 
 pub use super::active::{
-    run_active_validation_with, resolve_reconnect, snapshot_peers, ActiveOptions, PeerIdentity,
-    ScriptedPrompt,
+    ActiveOptions, PeerIdentity, ScriptedPrompt, resolve_reconnect, run_active_validation_with,
+    snapshot_peers,
 };
 pub use super::{
-    run_passive_preflight, run_validate_device_with, PassiveOutcome, PassivePreflightContext,
-    PreflightResult, ValidateDeviceArgs, HidrawInventory, InventoryEntry, UsbInventory,
+    HidrawInventory, InventoryEntry, PassiveOutcome, PassivePreflightContext, PreflightResult,
+    UsbInventory, ValidateDeviceArgs, run_passive_preflight, run_validate_device_with,
 };
 
 /// USB inventory backed by an in-memory device list.
@@ -282,22 +282,33 @@ pub fn inventory_entry(
     }
 }
 
-/// Winbond HID Type2 descriptor with interrupt-IN only (no interrupt OUT).
+/// Exact shared Winbond Type2 descriptor used by production PM58/PM128 policy tests.
 pub fn hid_in_fingerprint() -> UsbFingerprint {
     UsbFingerprint {
         vid: 0x0416,
         pid: 0x5302,
         bcd_device: "4.07".to_string(),
-        interfaces: vec![iface(
-            0,
-            3,
-            vec![endpoint(
-                0x81,
-                UsbDirection::In,
-                UsbTransferKind::Interrupt,
-                8,
-            )],
-        )],
+        interfaces: vec![
+            UsbInterfaceShape {
+                number: 0,
+                alternate_setting: 0,
+                class: 3,
+                subclass: 0,
+                protocol: 0,
+                endpoints: vec![
+                    endpoint(0x83, UsbDirection::In, UsbTransferKind::Interrupt, 8),
+                    endpoint(0x02, UsbDirection::Out, UsbTransferKind::Interrupt, 512),
+                ],
+            },
+            UsbInterfaceShape {
+                number: 1,
+                alternate_setting: 0,
+                class: 255,
+                subclass: 255,
+                protocol: 255,
+                endpoints: vec![],
+            },
+        ],
     }
 }
 

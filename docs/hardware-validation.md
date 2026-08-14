@@ -168,7 +168,8 @@ For `0416:5302` with `bcdDevice 4.07` and correlated hidraw, the validator selec
 
 - Bounded HID read (capacity 512 bytes; unrelated to the 8-byte endpoint max packet size)
 - Negotiated PM/SUB and output route are taken from the probe response — **do not document or assume PM58, PM68, or any other profile for your local unit before negotiation**
-- If negotiation yields a profile that does **not** authorize active writes (anything other than the evidenced PM58/SUB0 HID-report route on that probe), the run **conservative-stops** before sending frames: `negotiated profile blocks active output (conservative stop)` / `negotiated profile does not authorize active writes`
+- After a well-formed probe, the exact negotiated policy is sticky: **PM58** stays on the hidraw report-ID route; **PM128** closes hidraw and re-opens a fresh libusb interrupt session (IF0, IN `0x83`, OUT `0x02`) for one init + one whole-frame write. A mid-transfer failure clears authorization so reconnect repeats that entire gate.
+- If negotiation yields a profile that does **not** authorize active writes (anything other than those exact PM58/PM128 routes), the run **conservative-stops** before sending frames: `negotiated profile blocks active output (conservative stop)` / `negotiated profile does not authorize active writes
 - Upstream PM58/SUB0 evidence on one 4.07 unit ([TRCC #228](https://github.com/Lexonight1/thermalright-trcc-linux/issues/228) / [PR #230](https://github.com/Lexonight1/thermalright-trcc-linux/pull/230)) must not be generalized to other profiles sharing the same VID:PID or firmware BCD
 
 Bulk `87ad:70db` uses the legacy bulk init handshake path when the descriptor matches.

@@ -25,20 +25,39 @@ fn hid_in_fingerprint() -> UsbFingerprint {
         vid: WINBOND_HID2_VID,
         pid: WINBOND_HID2_PID,
         bcd_device: "4.07".to_string(),
-        interfaces: vec![UsbInterfaceShape {
-            number: 0,
-            alternate_setting: 0,
-            class: 3,
-            subclass: 0,
-            protocol: 0,
-            endpoints: vec![UsbEndpointCapability {
-                address: 0x81,
-                direction: UsbDirection::In,
-                transfer: UsbTransferKind::Interrupt,
-                max_packet_size: 8,
-                interval: 1,
-            }],
-        }],
+        interfaces: vec![
+            UsbInterfaceShape {
+                number: 0,
+                alternate_setting: 0,
+                class: 3,
+                subclass: 0,
+                protocol: 0,
+                endpoints: vec![
+                    UsbEndpointCapability {
+                        address: 0x83,
+                        direction: UsbDirection::In,
+                        transfer: UsbTransferKind::Interrupt,
+                        max_packet_size: 8,
+                        interval: 1,
+                    },
+                    UsbEndpointCapability {
+                        address: 0x02,
+                        direction: UsbDirection::Out,
+                        transfer: UsbTransferKind::Interrupt,
+                        max_packet_size: 512,
+                        interval: 1,
+                    },
+                ],
+            },
+            UsbInterfaceShape {
+                number: 1,
+                alternate_setting: 0,
+                class: 255,
+                subclass: 255,
+                protocol: 255,
+                endpoints: vec![],
+            },
+        ],
     }
 }
 
@@ -166,7 +185,7 @@ fn golden_passive_in_only_hid_interrupt_without_out() {
     assert!(toml.contains("direction = \"in\""));
     assert!(toml.contains("transfer = \"interrupt\""));
     assert!(toml.contains("max_packet_size = 8"));
-    assert!(!toml.contains("direction = \"out\""));
+    assert!(toml.contains("direction = \"out\""));
     assert!(toml.contains("scope = \"passive\""));
     assert!(toml.contains("origin = \"replay\""));
     assert!(toml.contains("pre_handshake_policy = \"hid407_read_only_probe\""));
@@ -1241,16 +1260,12 @@ fn from_toml_rejects_non_407_legacy_without_bulk_pair() {
     report
         .set_pre_handshake_policy(Type2PreHandshakePolicy::LegacyBulkInit)
         .expect("policy");
-    report.record_negotiated_type2(&obs).expect("negotiated");
-
-    let mut toml = report.to_private_toml().expect("serialize");
-    toml = toml.replace("transfer = \"bulk\"", "transfer = \"interrupt\"");
-    let error = HardwareValidationReport::from_toml(&toml).unwrap_err();
-    assert!(error.to_string().contains("negotiated profile"));
+    let error = report.record_negotiated_type2(&obs).unwrap_err();
+    assert!(error.to_string().contains("fixture-only"));
 }
 
 #[test]
-fn legacy_type2_bulk_profile_round_trips() {
+fn legacy_type2_bulk_profile_is_rejected_as_fixture_only() {
     let obs = negotiate_type2_policy(
         WINBOND_HID2_VID,
         WINBOND_HID2_PID,
@@ -1258,7 +1273,6 @@ fn legacy_type2_bulk_profile_round_trips() {
         Type2PreHandshakePolicy::LegacyBulkInit,
     )
     .expect("legacy obs");
-
     let mut report =
         HardwareValidationReport::new_in_progress(EvidenceOrigin::Replay, ValidationScope::Full);
     report
@@ -1267,16 +1281,8 @@ fn legacy_type2_bulk_profile_round_trips() {
     report
         .set_pre_handshake_policy(Type2PreHandshakePolicy::LegacyBulkInit)
         .expect("policy");
-    report.record_negotiated_type2(&obs).expect("negotiated");
-
-    let toml = report.to_private_toml().expect("serialize");
-    assert!(toml.contains("pre_handshake_policy = \"legacy_bulk_init\""));
-    assert!(toml.contains("profile_policy = \"legacy_bulk\""));
-    let parsed = HardwareValidationReport::from_toml(&toml).expect("parse");
-    assert_eq!(
-        parsed.negotiated().unwrap().profile_policy(),
-        ProfilePolicyLabel::LegacyBulk
-    );
+    let error = report.record_negotiated_type2(&obs).unwrap_err();
+    assert!(error.to_string().contains("fixture-only"));
 }
 
 #[test]

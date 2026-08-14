@@ -25,11 +25,25 @@ subclass = 0
 protocol = 0
 
 [[fingerprint.interfaces.endpoints]]
-address = "0x81"
+address = "0x02"
+direction = "out"
+transfer = "interrupt"
+max_packet_size = 512
+interval = 1
+
+[[fingerprint.interfaces.endpoints]]
+address = "0x83"
 direction = "in"
 transfer = "interrupt"
 max_packet_size = 8
 interval = 1
+
+[[fingerprint.interfaces]]
+number = 1
+alternate_setting = 0
+class = 255
+subclass = 255
+protocol = 255
 
 [hid_report]
 descriptor_status = "captured"
@@ -61,8 +75,8 @@ keep_single_session = true
 portrait_native = true
 
 [negotiated.native_dimensions]
-width = 320
-height = 240
+width = 240
+height = 320
 
 [negotiated.wire_dimensions]
 width = 240

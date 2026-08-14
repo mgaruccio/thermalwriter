@@ -6,7 +6,7 @@
 // path: src/trcc/adapters/device/hid_lcd.py
 
 use super::usb_device::find_device;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use log::{debug, info, warn};
 use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
@@ -22,9 +22,11 @@ pub use super::hid_report::{
     USERSPACE_SUBMIT_BYTES, UsbBusAddress, authenticate_opened_hidraw, correlate_hidraw_to_usb,
 };
 
+use super::policy::{self, ExactDevicePolicy};
 use super::profile::{WireProtocol, build_device_info};
 use super::type2_policy::{
     self, TYPE2_MAGIC, TYPE2_RESPONSE_SIZE, Type2NegotiatedObservation, negotiate_type2_policy,
+    validate_legacy_response_type2,
 };
 
 use super::{DeviceInfo, EncodedFrame, FrameEncoding, Transport};
@@ -73,6 +75,7 @@ struct UsbHidIo<'a> {
     ep_in: u8,
     write_timeout: Option<Duration>,
     read_timeout: Duration,
+    interrupt_only: bool,
 }
 
 impl HidIo for UsbHidIo<'_> {
@@ -80,30 +83,42 @@ impl HidIo for UsbHidIo<'_> {
         let timeout = self
             .write_timeout
             .unwrap_or_else(|| frame_timeout(data.len()));
-        // Prefer interrupt OUT (true HID Type2); fall back to bulk for dual-shape units.
-        super::bulk_usb::write_all(data, |remaining| {
-            match self.handle.write_interrupt(self.ep_out, remaining, timeout) {
-                Ok(n) => Ok(n),
-                Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => {
-                    self.handle.write_bulk(self.ep_out, remaining, timeout)
+        let written = if self.interrupt_only {
+            self.handle.write_interrupt(self.ep_out, data, timeout)?
+        } else {
+            super::bulk_usb::write_all(data, |remaining| {
+                match self.handle.write_interrupt(self.ep_out, remaining, timeout) {
+                    Ok(n) => Ok(n),
+                    Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => {
+                        self.handle.write_bulk(self.ep_out, remaining, timeout)
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            }
-        })
+            })?;
+            data.len()
+        };
+        if self.interrupt_only && written != data.len() {
+            bail!("interrupt write was partial: {written}/{}", data.len());
+        }
+        Ok(())
     }
 
     fn read(&mut self, max_len: usize) -> Result<Vec<u8>> {
         let mut data = vec![0; max_len];
-        let len = match self
-            .handle
-            .read_interrupt(self.ep_in, &mut data, self.read_timeout)
-        {
-            Ok(n) => n,
-            Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => {
-                self.handle
-                    .read_bulk(self.ep_in, &mut data, self.read_timeout)?
+        let len = if self.interrupt_only {
+            self.handle
+                .read_interrupt(self.ep_in, &mut data, self.read_timeout)?
+        } else {
+            match self
+                .handle
+                .read_interrupt(self.ep_in, &mut data, self.read_timeout)
+            {
+                Ok(n) => n,
+                Err(rusb::Error::InvalidParam) | Err(rusb::Error::NotFound) => self
+                    .handle
+                    .read_bulk(self.ep_in, &mut data, self.read_timeout)?,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         };
         data.truncate(len);
         Ok(data)
@@ -233,19 +248,24 @@ pub fn handshake_type2_read_only_probe_with_io(
     let Type2PreHandshakePolicy::Hid407ReadOnlyProbe = pre else {
         bail!("read-only probe requires Hid407ReadOnlyProbe pre-handshake policy");
     };
-    let mut response = io
+    let response = io
         .read(TYPE2_PROBE_READ_BOUND)
-        .context("HID Type2 4.07 probe read failed")?;
-    if response.is_empty() {
-        let init = build_init_packet_type2();
-        io.write(&init)
-            .context("HID Type2 4.07 probe init elicit write failed")?;
-        io.sleep(DELAY_POST_INIT);
-        response = io
-            .read(TYPE2_PROBE_READ_BOUND)
-            .context("HID Type2 4.07 probe read after init elicit failed")?;
-    }
+        .context("HID Type2 4.07 passive probe read failed")?;
     negotiate_type2_policy(vid, pid, &response, pre)
+}
+
+/// PM128 libusb elicitation: one init interrupt write followed by one bounded read.
+pub fn handshake_type2_pm128_with_io(io: &mut dyn HidIo) -> Result<DeviceInfo> {
+    io.write(&build_init_packet_type2())
+        .context("PM128 init interrupt write failed")?;
+    let response = io
+        .read(TYPE2_RESPONSE_SIZE)
+        .context("PM128 response read failed")?;
+    anyhow::ensure!(
+        response.as_slice() == policy::PM128_RESPONSE,
+        "PM128 response did not match the exact 36-byte response"
+    );
+    Ok(ExactDevicePolicy::Type2Pm128.device_info())
 }
 
 /// Handshake using the selected pre-handshake policy and return negotiated observation.
@@ -314,13 +334,14 @@ pub fn handshake_type3_with_io(io: &mut dyn HidIo, vid: u16, pid: u16) -> Result
 }
 
 enum HidBackend {
-    /// libusb claim + interrupt/bulk endpoints (Type3 and Type2 fallback).
+    /// libusb claim + explicitly selected endpoint transfer.
     Libusb {
         handle: Option<DeviceHandle<GlobalContext>>,
         ep_out: u8,
         ep_in: u8,
+        interrupt_only: bool,
     },
-    /// Kernel hidraw with report-ID framing (preferred Type2 path).
+    /// Kernel hidraw with report-ID framing (PM58 only).
     #[cfg(feature = "daemon")]
     Hidraw(Option<super::hid_report::linux::LinuxHidrawIo>),
 }
@@ -329,23 +350,58 @@ pub struct HidLcd {
     backend: HidBackend,
     vid: u16,
     pid: u16,
+    bus: u8,
+    address: u8,
     interface: u8,
+    ep_in: u8,
+    ep_out: u8,
     kind: HidType,
     info: Option<DeviceInfo>,
 }
 
 impl HidLcd {
     pub fn open_type2(bus: u8, address: u8, interface: u8, ep_in: u8, ep_out: u8) -> Result<Self> {
+        ensure!(
+            interface == 0 && ep_in == 0x83 && ep_out == 0x02,
+            "Type2 requires interface 0, interrupt IN 0x83, and interrupt OUT 0x02"
+        );
         #[cfg(feature = "daemon")]
         {
-            match Self::open_type2_hidraw(bus, address, interface) {
-                Ok(device) => return Ok(device),
-                Err(error) => {
-                    warn!("HID Type2 hidraw open failed ({error:#}); falling back to libusb claim");
-                }
-            }
+            let mut device = Self::open_type2_hidraw(bus, address, interface)?;
+            device.bus = bus;
+            device.address = address;
+            device.ep_in = 0x83;
+            device.ep_out = 0x02;
+            return Ok(device);
         }
-        Self::open_libusb(HidType::Type2, 0, bus, address, interface, ep_in, ep_out)
+        #[cfg(not(feature = "daemon"))]
+        {
+            let _ = (bus, address, interface, ep_in, ep_out);
+            bail!("exact Type2 production route requires the Linux hidraw backend");
+        }
+    }
+
+    /// Open the exact PM128 libusb route after the passive hidraw session closes.
+    pub(crate) fn open_type2_libusb(
+        bus: u8,
+        address: u8,
+        interface: u8,
+        ep_in: u8,
+        ep_out: u8,
+    ) -> Result<Self> {
+        ensure!(
+            interface == 0 && ep_in == 0x83 && ep_out == 0x02,
+            "PM128 requires interface 0, interrupt IN 0x83, and interrupt OUT 0x02"
+        );
+        Self::open_libusb(
+            HidType::Type2,
+            policy::WINBOND_PID,
+            bus,
+            address,
+            0,
+            0x83,
+            0x02,
+        )
     }
 
     pub fn open_type3(
@@ -368,6 +424,14 @@ impl HidLcd {
         use std::path::PathBuf;
 
         let device = find_device(bus, address)?;
+        let fingerprint = super::usb_fingerprint::fingerprint_from_device(&device)?;
+        anyhow::ensure!(
+            matches!(
+                super::policy::exact_descriptor_policy(&fingerprint),
+                Ok(super::policy::ExactDescriptorPolicy::Type2)
+            ),
+            "Type2 descriptor is not the exact shared 0416:5302 bcd4.07 shape"
+        );
         let desc = device.device_descriptor().context("device descriptor")?;
         let vid = desc.vendor_id();
         let pid = desc.product_id();
@@ -402,7 +466,11 @@ impl HidLcd {
             backend: HidBackend::Hidraw(Some(io)),
             vid,
             pid,
+            bus,
+            address,
             interface,
+            ep_in: 0x83,
+            ep_out: 0x02,
             kind: HidType::Type2,
             info: None,
         })
@@ -418,9 +486,26 @@ impl HidLcd {
         ep_out: u8,
     ) -> Result<Self> {
         let device = find_device(bus, address)?;
+        let fingerprint =
+            super::usb_fingerprint::fingerprint_from_device(&device).with_context(|| {
+                format!("failed to fingerprint HID device at bus={bus} addr={address}")
+            })?;
         let desc = device.device_descriptor().context("device descriptor")?;
         let vid = desc.vendor_id();
         let pid = desc.product_id();
+        if kind == HidType::Type2 {
+            ensure!(
+                matches!(
+                    policy::exact_descriptor_policy(&fingerprint),
+                    Ok(policy::ExactDescriptorPolicy::Type2)
+                ),
+                "PM128 requires the exact 0416:5302 bcd4.07 Type2 descriptor"
+            );
+            ensure!(
+                interface == 0 && ep_in == 0x83 && ep_out == 0x02,
+                "PM128 requires interface 0, interrupt IN 0x83, and interrupt OUT 0x02"
+            );
+        }
         if expected_pid != 0 && pid != expected_pid {
             bail!("HID PID mismatch: expected {expected_pid:04x}, got {pid:04x}");
         }
@@ -455,10 +540,15 @@ impl HidLcd {
                 handle: Some(handle),
                 ep_out,
                 ep_in,
+                interrupt_only: kind == HidType::Type2,
             },
             vid,
             pid,
+            bus,
+            address,
             interface,
+            ep_in,
+            ep_out,
             kind,
             info: None,
         })
@@ -565,19 +655,15 @@ fn validate_hid_frame(kind: HidType, info: &DeviceInfo, frame: &EncodedFrame) ->
     if kind == HidType::Type3 && !frame.encoding.is_rgb565() {
         bail!("HID Type3 requires RGB565, got {}", frame.encoding);
     }
-    // Type2 JPEG: payload may be portrait-rotated while the header carries
-    // native landscape dims (TRCC Trofeo / FBL128 solid-color parity).
-    if !(kind == HidType::Type2 && frame.encoding.is_jpeg()) {
-        let (wire_width, wire_height) = info.wire_dimensions()?;
-        if frame.width != wire_width || frame.height != wire_height {
-            bail!(
-                "frame {}x{} does not match wire dimensions {}x{}",
-                frame.width,
-                frame.height,
-                wire_width,
-                wire_height
-            );
-        }
+    let (wire_width, wire_height) = info.wire_dimensions()?;
+    if frame.width != wire_width || frame.height != wire_height {
+        bail!(
+            "frame {}x{} does not match wire dimensions {}x{}",
+            frame.width,
+            frame.height,
+            wire_width,
+            wire_height
+        );
     }
     if frame.encoding.is_rgb565() {
         let expected_len = usize::try_from(frame.width)
@@ -619,17 +705,21 @@ fn send_frame_with_io(
     };
     match kind {
         HidType::Type2 => {
-            // Firmware latches Type2 frames only as sequential 512-byte reports
-            // (TRCC #150 / #228). Never submit the whole multi-KB blob at once.
-            const CHUNK: usize = 512;
             anyhow::ensure!(
-                packet.len().is_multiple_of(CHUNK),
-                "Type2 frame length {} is not a multiple of {CHUNK}",
+                packet.len().is_multiple_of(USB_BULK_ALIGNMENT),
+                "Type2 frame length {} is not aligned to {USB_BULK_ALIGNMENT}",
                 packet.len()
             );
-            for chunk in packet.chunks(CHUNK) {
-                io.write(chunk)
-                    .with_context(|| "HID Type2 512-byte chunk write failed")?;
+            if info.authorized_policy() == Some(ExactDevicePolicy::Type2Pm128) {
+                // PM128 requires one whole aligned interrupt transfer; no continuation.
+                io.write(&packet)
+                    .context("PM128 whole interrupt frame write failed")?;
+            } else {
+                const CHUNK: usize = 512;
+                for chunk in packet.chunks(CHUNK) {
+                    io.write(chunk)
+                        .context("HID Type2 512-byte chunk write failed")?;
+                }
             }
             io.sleep(DELAY_FRAME_TYPE2);
         }
@@ -655,9 +745,90 @@ pub fn send_frame_type3_with_io(
     send_frame_with_io(io, HidType::Type3, info, frame).map(|_| ())
 }
 
+/// Type2 frame send control flow for deterministic validation/replay spies.
+pub fn send_frame_type2_with_io(
+    io: &mut dyn HidIo,
+    info: &DeviceInfo,
+    frame: &EncodedFrame,
+) -> Result<()> {
+    send_frame_with_io(io, HidType::Type2, info, frame).map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Type2PassiveObservation {
+    Pm58,
+    Empty,
+    Full,
+}
+
+pub(crate) fn classify_type2_passive_response(response: &[u8]) -> Result<Type2PassiveObservation> {
+    if response == policy::PM58_RESPONSE {
+        return Ok(Type2PassiveObservation::Pm58);
+    }
+    if response.is_empty() {
+        return Ok(Type2PassiveObservation::Empty);
+    }
+    ensure!(
+        validate_legacy_response_type2(response),
+        "passive Type2 response was malformed, partial, or a non-PM58 short response"
+    );
+    Ok(Type2PassiveObservation::Full)
+}
+
 fn frame_timeout(packet_size: usize) -> Duration {
     let ms = (packet_size / 4 + 100).max(100) as u64;
     Duration::from_millis(ms)
+}
+
+impl HidLcd {
+    #[cfg(feature = "daemon")]
+    fn handshake_type2_production(&mut self) -> Result<DeviceInfo> {
+        let passive = self.with_io(None, HANDSHAKE_TIMEOUT, |io| {
+            io.read(TYPE2_PROBE_READ_BOUND)
+        })?;
+        match classify_type2_passive_response(&passive)? {
+            Type2PassiveObservation::Pm58 => {
+                return Ok(ExactDevicePolicy::Type2Pm58.device_info());
+            }
+            Type2PassiveObservation::Empty | Type2PassiveObservation::Full => {}
+        }
+        self.close();
+        let replacement = Self::open_type2_libusb(self.bus, self.address, 0, 0x83, 0x02)?;
+        *self = replacement;
+        self.handshake_type2_pm128_session()
+    }
+}
+
+impl HidLcd {
+    /// Complete PM128 negotiation on an already-open exact libusb session.
+    pub(crate) fn handshake_type2_pm128_session(&mut self) -> Result<DeviceInfo> {
+        ensure!(
+            self.kind == HidType::Type2
+                && matches!(
+                    &self.backend,
+                    HidBackend::Libusb {
+                        handle: Some(_),
+                        ep_in: 0x83,
+                        ep_out: 0x02,
+                        interrupt_only: true,
+                    }
+                ),
+            "PM128 negotiation requires an exact open libusb interrupt session"
+        );
+        let result = self.with_io(Some(HANDSHAKE_TIMEOUT), HANDSHAKE_TIMEOUT, |io| {
+            handshake_type2_pm128_with_io(io)
+        });
+        match result {
+            Ok(info) => {
+                self.info = Some(info.clone());
+                Ok(info)
+            }
+            Err(error) => {
+                self.mark_disconnected();
+                Err(error)
+            }
+        }
+    }
 }
 
 impl Transport for HidLcd {
@@ -665,6 +836,15 @@ impl Transport for HidLcd {
         let vid = self.vid;
         let pid = self.pid;
         let kind = self.kind;
+        #[cfg(feature = "daemon")]
+        let result = if kind == HidType::Type2 {
+            self.handshake_type2_production()
+        } else {
+            self.with_io(Some(HANDSHAKE_TIMEOUT), HANDSHAKE_TIMEOUT, |io| {
+                handshake_type3_with_io(io, vid, pid)
+            })
+        };
+        #[cfg(not(feature = "daemon"))]
         let result = self.with_io(
             Some(HANDSHAKE_TIMEOUT),
             HANDSHAKE_TIMEOUT,
@@ -697,18 +877,48 @@ impl Transport for HidLcd {
 
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
         let info = self.info.clone().context("Handshake not performed")?;
+        if self.kind == HidType::Type2 {
+            let expected = info
+                .authorized_policy()
+                .context("hardware HID output requires an exact negotiated Type2 policy")?;
+            policy::ensure_authorized(&info, expected)?;
+            match expected {
+                ExactDevicePolicy::Type2Pm58 => ensure!(
+                    matches!(&self.backend, HidBackend::Hidraw(Some(_))),
+                    "PM58 authorization requires the active hidraw session"
+                ),
+                ExactDevicePolicy::Type2Pm128 => ensure!(
+                    matches!(
+                        &self.backend,
+                        HidBackend::Libusb {
+                            handle: Some(_),
+                            ep_in: 0x83,
+                            ep_out: 0x02,
+                            interrupt_only: true,
+                        }
+                    ),
+                    "PM128 authorization requires the exact active libusb interrupt session"
+                ),
+                ExactDevicePolicy::Square87adPm4 => bail!("invalid square policy on HID transport"),
+            }
+        } else {
+            bail!("HID Type3 has no evidence-backed production output policy");
+        }
         let kind = self.kind;
         let send_result = self.with_io(None, DEFAULT_FRAME_TIMEOUT, |io| {
             send_frame_with_io(io, kind, &info, frame)
         });
-
         match send_result {
             Ok(packet_len) => {
                 debug!("HID {:?} frame sent ({} bytes)", kind, packet_len);
                 Ok(())
             }
             Err(error) => {
-                self.mark_disconnected_if_fatal(&error);
+                if kind == HidType::Type2 {
+                    self.mark_disconnected();
+                } else {
+                    self.mark_disconnected_if_fatal(&error);
+                }
                 Err(error)
             }
         }
@@ -753,6 +963,7 @@ impl HidLcd {
                 handle,
                 ep_out,
                 ep_in,
+                interrupt_only,
             } => {
                 let handle = handle.as_ref().context("HID device not open")?;
                 let mut io = UsbHidIo {
@@ -761,6 +972,7 @@ impl HidLcd {
                     ep_in: *ep_in,
                     write_timeout,
                     read_timeout,
+                    interrupt_only: *interrupt_only,
                 };
                 f(&mut io)
             }
@@ -769,9 +981,10 @@ impl HidLcd {
                 let io = slot.take().context("HID hidraw device not open")?;
                 let mut report_io = HidrawReportIo { io, read_timeout };
                 let result = f(&mut report_io);
-                // Restore unless mark_disconnected cleared the backend mid-call.
-                if let HidBackend::Hidraw(slot) = &mut self.backend {
-                    *slot = Some(report_io.io);
+                if result.is_ok() {
+                    if let HidBackend::Hidraw(slot) = &mut self.backend {
+                        *slot = Some(report_io.io);
+                    }
                 }
                 result
             }
@@ -788,6 +1001,31 @@ impl Drop for HidLcd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_response_gate_classifies_only_empty_or_full_for_pm128() {
+        assert_eq!(
+            classify_type2_passive_response(&policy::PM58_RESPONSE).unwrap(),
+            Type2PassiveObservation::Pm58
+        );
+        assert_eq!(
+            classify_type2_passive_response(&[]).unwrap(),
+            Type2PassiveObservation::Empty
+        );
+        assert_eq!(
+            classify_type2_passive_response(&policy::PM128_RESPONSE).unwrap(),
+            Type2PassiveObservation::Full
+        );
+        for response in [
+            &[0u8][..],
+            &[0, 1, 2][..],
+            &[0xda, 0xdb, 0xdc, 0xdd, 1, 2, 0, 0][..],
+        ] {
+            if !response.is_empty() {
+                assert!(classify_type2_passive_response(response).is_err());
+            }
+        }
+    }
 
     #[test]
     fn type2_init_has_magic_and_cmd() {

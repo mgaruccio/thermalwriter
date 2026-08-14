@@ -7,7 +7,7 @@
 
 use super::usb_device::find_device;
 use anyhow::{Context, Result, bail};
-use log::{debug, info, warn};
+use log::{info, warn};
 use rusb::{DeviceHandle, GlobalContext};
 use std::time::Duration;
 
@@ -19,8 +19,6 @@ const PID_LY1: u16 = 0x5409;
 
 const HANDSHAKE_READ_SIZE: usize = 512;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 const CHUNK_SIZE: usize = 512;
 const CHUNK_HEADER_SIZE: usize = 16;
@@ -329,39 +327,8 @@ impl Transport for LyLcd {
         Ok(info)
     }
 
-    fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
-        let info = self.info.as_ref().context("Handshake not performed")?;
-        validate_ly_frame(info, frame)?;
-        let send_buf = pack_ly_payload(&frame.data, self.pid)?;
-        let plan = ly_write_plan(send_buf.len(), self.pid);
-
-        let send_result: Result<()> = {
-            let handle = self.handle.as_ref().context("LY device not open")?;
-            let mut pos = 0usize;
-            for write_size in plan {
-                let end = pos + write_size;
-                if end > send_buf.len() {
-                    bail!("LY write plan overruns buffer");
-                }
-                super::bulk_usb::write_all(&send_buf[pos..end], |remaining| {
-                    handle.write_bulk(self.ep_out, remaining, WRITE_TIMEOUT)
-                })
-                .context("LY frame write failed")?;
-                pos = end;
-            }
-            let mut ack = [0u8; HANDSHAKE_READ_SIZE];
-            handle
-                .read_bulk(self.ep_in, &mut ack, READ_TIMEOUT)
-                .context("LY ACK read failed")?;
-            Ok(())
-        };
-
-        if let Err(e) = &send_result {
-            self.mark_disconnected_if_fatal(e);
-        } else {
-            debug!("LY frame sent ({} payload bytes)", frame.data.len());
-        }
-        send_result
+    fn send_frame(&mut self, _frame: &EncodedFrame) -> Result<()> {
+        anyhow::bail!("LY has no evidence-backed exact production output policy");
     }
 
     fn close(&mut self) {

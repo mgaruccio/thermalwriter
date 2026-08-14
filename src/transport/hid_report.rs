@@ -556,15 +556,35 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
         self.core.read_bounded(capacity, timeout_ms)
     }
 
+    /// Read exactly one passive Type2 observation without negotiating or writing.
+    pub fn read_type2_passive(
+        &mut self,
+        timeout_ms: u32,
+    ) -> Result<(HidReadObservation, Vec<u8>), HidReportReadError> {
+        self.session_auth = None;
+        self.probe_performed = true;
+        let (observation, response) = self.core.read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)?;
+        // Authorization is derived only from this same passive read and exact PM58 bytes.
+        if response == super::policy::PM58_RESPONSE {
+            if let Ok(negotiated) = negotiate_type2_policy(
+                WINBOND_HID2_VID,
+                WINBOND_HID2_PID,
+                &response,
+                Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+            ) {
+                self.session_auth =
+                    HidReportWriteAuthorization::from_session_probe(&negotiated).ok();
+            }
+        }
+        Ok((observation, response))
+    }
+
     /// Perform the 4.07 read-only Type2 probe on this session's I/O handle for the exact
     /// Winbond `0416:5302` firmware-4.07 policy.
     ///
-    /// Clears any prior probe authorization, then:
-    /// 1. Reads up to [`TYPE2_PROBE_READ_BOUND`] bytes (no write) — PM58 units may
-    ///    already present a short response.
-    /// 2. If that read is empty, writes one Type2 init packet as a HID report and
-    ///    reads again. Some 4.07 units only reply after init (legacy-shaped body);
-    ///    note init can reboot PM58 panels, so the silent path is tried first.
+    /// Clears any prior probe authorization, then reads passively. For the
+    /// legacy validation helper, an empty read may elicit the legacy response;
+    /// production Type2 output uses the HidLcd state machine instead.
     ///
     /// Negotiates with [`WINBOND_HID2_VID`]/[`WINBOND_HID2_PID`]. Stores write
     /// authorization only when the same session yields the exact PM58/SUB0 short
@@ -579,9 +599,7 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
             .core
             .read_bounded(TYPE2_PROBE_READ_BOUND, timeout_ms)
             .map_err(HidReportProbeError::Read)?;
-
         if response.is_empty() {
-            // Elicit a handshake reply. Init is a protocol query, not a framebuffer.
             let init = build_type2_init_packet();
             let mut api_buffer = [0_u8; USERSPACE_SUBMIT_BYTES];
             api_buffer[0] = REPORT_ID_UNNUMBERED;
@@ -589,7 +607,7 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
             if let Err(error) = self.core.io.write(&api_buffer) {
                 self.core.stop_on_error();
                 return Err(HidReportProbeError::Read(HidReportReadError::Transport {
-                    message: format!("4.07 probe init elicit write failed: {error}"),
+                    message: format!("legacy probe init elicit write failed: {error}"),
                     observation: HidReadObservation {
                         read_capacity_bytes: TYPE2_PROBE_READ_BOUND,
                         read_timeout_ms: timeout_ms,
@@ -604,7 +622,27 @@ impl<Io: HidReportIo> HidReportReadSession<Io> {
                 .map_err(HidReportProbeError::Read)?;
             response = elicited;
         }
+        let observation = negotiate_type2_policy(
+            WINBOND_HID2_VID,
+            WINBOND_HID2_PID,
+            &response,
+            Type2PreHandshakePolicy::Hid407ReadOnlyProbe,
+        )
+        .map_err(|error| HidReportProbeError::Negotiate(error.to_string()))?;
+        self.session_auth = HidReportWriteAuthorization::from_session_probe(&observation).ok();
+        Ok(observation)
+    }
 
+    /// Production passive probe: exactly one read and no hidraw write, including
+    /// when the device has no queued response. PM128 re-elicit is performed only
+    /// after this session is closed and libusb has claimed the exact descriptor.
+    pub fn probe_type2_passive(
+        &mut self,
+        timeout_ms: u32,
+    ) -> Result<Type2NegotiatedObservation, HidReportProbeError> {
+        let (_, response) = self
+            .read_type2_passive(timeout_ms)
+            .map_err(HidReportProbeError::Read)?;
         let observation = negotiate_type2_policy(
             WINBOND_HID2_VID,
             WINBOND_HID2_PID,
@@ -1551,6 +1589,19 @@ mod tests {
         read_session.probe_type2_read_only(0).unwrap();
         let write_session = read_session.authorize_writes().unwrap();
         assert_eq!(write_session.core.io.id(), io_id);
+    }
+
+    #[test]
+    fn passive_empty_read_is_write_free_and_unauthorized() {
+        let mut io = MemHidReportIo::new();
+        io.read_data.push_back(Vec::new());
+        io.read_returns.push_back(Ok(0));
+        let mut session = HidReportReadSession::new_for_test(io);
+        let (observation, response) = session.read_type2_passive(0).unwrap();
+        assert_eq!(observation.protocol_response_bytes, 0);
+        assert!(response.is_empty());
+        assert!(session.core.io.writes.is_empty());
+        assert!(session.authorize_writes().is_err());
     }
 
     #[test]

@@ -6,8 +6,11 @@
 // thermalright-trcc-linux issue #228 / PR #230 for one reported unit; it must not
 // be generalized to other profiles sharing the same VID:PID or firmware BCD.
 
+use super::policy::{
+    ExactDescriptorPolicy, PM58_RESPONSE, PM128_RESPONSE, exact_descriptor_policy,
+};
 use super::profile::{WireProtocol, build_device_info};
-use super::usb_fingerprint::{UsbFingerprint, derive_bulk_pair, hid_interrupt_in_endpoints};
+use super::usb_fingerprint::{UsbFingerprint, hid_interrupt_in_endpoints};
 use anyhow::{Result, bail, ensure};
 
 pub const WINBOND_HID2_VID: u16 = 0x0416;
@@ -44,6 +47,8 @@ pub enum Type2PreHandshakePolicy {
 pub enum HidOutputRoute {
     LegacyBulk,
     HidReport,
+    /// PM128 libusb interrupt endpoint, one whole aligned write per frame.
+    Interrupt,
 }
 
 /// Negotiated lifecycle and output policy derived from observed PM/SUB and response shape.
@@ -59,7 +64,7 @@ pub struct Type2NegotiatedPolicy {
 
 impl Type2NegotiatedPolicy {
     /// Active output route with upstream- or legacy-evidenced transport semantics.
-    pub fn authorized(
+    pub(crate) fn authorized(
         output: HidOutputRoute,
         keep_single_session: bool,
         portrait_native: bool,
@@ -73,7 +78,7 @@ impl Type2NegotiatedPolicy {
     }
 
     /// Profile observed but no output route is authorized.
-    pub fn observed_inactive() -> Self {
+    pub(crate) fn observed_inactive() -> Self {
         Self {
             output: None,
             keep_single_session: false,
@@ -127,9 +132,10 @@ impl Type2NegotiatedObservation {
 }
 
 fn is_exact_407_fingerprint(fingerprint: &UsbFingerprint) -> bool {
-    fingerprint.vid == WINBOND_HID2_VID
-        && fingerprint.pid == WINBOND_HID2_PID
-        && fingerprint.bcd_device == BCD_DEVICE_407
+    matches!(
+        exact_descriptor_policy(fingerprint),
+        Ok(ExactDescriptorPolicy::Type2)
+    )
 }
 
 fn has_hid_interrupt_in(fingerprint: &UsbFingerprint) -> bool {
@@ -147,9 +153,6 @@ pub fn select_type2_pre_handshake_policy(
         }
         return Type2PreHandshakePolicy::StopUnsupportedShape;
     }
-    if derive_bulk_pair(fingerprint).is_some() {
-        return Type2PreHandshakePolicy::LegacyBulkInit;
-    }
     Type2PreHandshakePolicy::StopUnsupportedShape
 }
 
@@ -161,9 +164,7 @@ pub fn validate_short_response_type2(resp: &[u8]) -> bool {
 /// Legacy-shaped Type2 response (init echo) accepted on the 4.07 probe path
 /// when a unit only replies after an eliciting init write.
 pub fn validate_legacy_response_type2(resp: &[u8]) -> bool {
-    resp.len() >= TYPE2_LEGACY_RESPONSE_MIN
-        && resp[0..4] == TYPE2_MAGIC
-        && resp[12] == 0x01
+    resp.len() >= TYPE2_LEGACY_RESPONSE_MIN && resp[0..4] == TYPE2_MAGIC && resp[12] == 0x01
 }
 
 /// True when `resp` is either a short or legacy-shaped Type2 handshake reply.
@@ -209,6 +210,10 @@ pub fn authorize_hid_report_writes(obs: &Type2NegotiatedObservation) -> Result<(
         obs.pm(),
         obs.sub()
     );
+    ensure!(
+        obs.response() == PM58_RESPONSE.as_slice(),
+        "HID report write authorization requires the exact PM58 response"
+    );
     let policy = obs.policy();
     ensure!(
         policy.active_writes_allowed(),
@@ -247,7 +252,7 @@ pub fn negotiate_type2_policy(
                 "4.07 probe requires {TYPE2_SHORT_RESPONSE_LEN}-byte short or legacy-shaped response, got {}",
                 response.len()
             );
-            if validate_short_response_type2(response) && pm == 58 && sub == 0 {
+            if response == PM58_RESPONSE.as_slice() {
                 // #228 / #230: HID report output, skip-init, portrait-native 240×320, one session.
                 return Ok(Type2NegotiatedObservation {
                     pm,
@@ -257,6 +262,18 @@ pub fn negotiate_type2_policy(
                         HidOutputRoute::HidReport,
                         true,
                         true,
+                    ),
+                });
+            }
+            if response == PM128_RESPONSE.as_slice() {
+                return Ok(Type2NegotiatedObservation {
+                    pm,
+                    sub,
+                    response: response.to_vec(),
+                    policy: Type2NegotiatedPolicy::authorized(
+                        HidOutputRoute::Interrupt,
+                        false,
+                        false,
                     ),
                 });
             }
@@ -330,16 +347,27 @@ mod tests {
             vid: WINBOND_HID2_VID,
             pid: WINBOND_HID2_PID,
             bcd_device: BCD_DEVICE_407.to_string(),
-            interfaces: vec![iface(
-                0,
-                3,
-                vec![endpoint(
-                    0x81,
-                    UsbDirection::In,
-                    UsbTransferKind::Interrupt,
-                    8,
-                )],
-            )],
+            interfaces: vec![
+                UsbInterfaceShape {
+                    number: 0,
+                    alternate_setting: 0,
+                    class: 3,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        endpoint(0x83, UsbDirection::In, UsbTransferKind::Interrupt, 8),
+                        endpoint(0x02, UsbDirection::Out, UsbTransferKind::Interrupt, 512),
+                    ],
+                },
+                UsbInterfaceShape {
+                    number: 1,
+                    alternate_setting: 0,
+                    class: 255,
+                    subclass: 255,
+                    protocol: 255,
+                    endpoints: vec![],
+                },
+            ],
         }
     }
 
@@ -405,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_handshake_non_407_bulk_selects_legacy() {
+    fn pre_handshake_non_407_bulk_stops() {
         let fp = UsbFingerprint {
             vid: WINBOND_HID2_VID,
             pid: WINBOND_HID2_PID,
@@ -413,7 +441,7 @@ mod tests {
             interfaces: fingerprint_407_bulk().interfaces,
         };
         let policy = select_type2_pre_handshake_policy(&fp, false);
-        assert_eq!(policy, Type2PreHandshakePolicy::LegacyBulkInit);
+        assert_eq!(policy, Type2PreHandshakePolicy::StopUnsupportedShape);
     }
 
     #[test]
