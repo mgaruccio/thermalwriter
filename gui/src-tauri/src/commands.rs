@@ -3,9 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::ipc::Response;
 use thermalwriter::config::Config;
 use thermalwriter::dbus_types::DisplayProxy;
+use thermalwriter::layout_engine::diagnostic::TOML_PARSE_CODE;
+use thermalwriter::layout_engine::{
+    DiagnosticSeverity, LayoutDiagnostic, LayoutDocument, LayoutDocumentError,
+    LayoutEngineRenderer, ModuleDocument, PERSISTENCE_PATH_CODE, PreviewTopology,
+    ResvgSceneBackend, SurfaceProfileId, resolve_surface_profile, validate,
+};
 use thermalwriter::render::background::BackgroundImage;
 use thermalwriter::render::frontmatter::{LayoutFrontmatter, VariableDecl as FrontmatterVar};
 use thermalwriter::render::palette::{self, SchemeSuggestion};
@@ -29,6 +36,7 @@ pub struct RendererState {
     pub background_dir: PathBuf,
     pub config_path: PathBuf,
     cache: Mutex<RendererCache>,
+    typed_cache: Mutex<TypedRendererCache>,
 }
 
 /// Cached preview renderer state. The renderer is keyed by layout; the decoded
@@ -47,6 +55,20 @@ struct RendererCache {
     background_pixmap: Option<Arc<BackgroundImage>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedPreviewCacheKey {
+    document_fingerprint: String,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    media_fingerprint: String,
+}
+
+struct TypedRendererCache {
+    key: Option<TypedPreviewCacheKey>,
+    renderer: Option<LayoutEngineRenderer<ResvgSceneBackend>>,
+}
+
 impl RendererState {
     pub fn new(layout_dir: PathBuf, background_dir: PathBuf, config_path: PathBuf) -> Self {
         Self {
@@ -58,6 +80,10 @@ impl RendererState {
                 renderer: None,
                 current_background: None,
                 background_pixmap: None,
+            }),
+            typed_cache: Mutex::new(TypedRendererCache {
+                key: None,
+                renderer: None,
             }),
         }
     }
@@ -93,6 +119,54 @@ pub struct SensorDescriptor {
     pub cost_us: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LayoutDocumentResponse {
+    pub document: LayoutDocument,
+    pub document_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LayoutValidationResponse {
+    pub width: u32,
+    pub height: u32,
+    pub valid: bool,
+    pub diagnostics: Vec<LayoutDiagnostic>,
+    pub topology: PreviewTopology,
+    pub document_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LayoutPreviewResponse {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub diagnostics: Vec<LayoutDiagnostic>,
+    pub topology: PreviewTopology,
+    pub document_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LayoutSaveResponse {
+    pub name: String,
+    pub path: PathBuf,
+    pub document_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum LayoutActivationState {
+    Active,
+    DaemonUnavailable { reason: String },
+    ActivationFailed { reason: String },
+    ActiveButDefaultNotPersisted { reason: String },
+}
+
+#[derive(Debug, Serialize)]
+pub struct LayoutApplyResponse {
+    pub saved: LayoutSaveResponse,
+    pub activation: LayoutActivationState,
+}
+
 #[tauri::command]
 pub fn list_layouts(
     state: tauri::State<'_, RendererState>,
@@ -108,6 +182,8 @@ pub fn list_layouts(
             .unwrap_or(false);
         let kind = if name.ends_with(".svg") {
             "svg"
+        } else if name.ends_with(".layout.toml") {
+            "layout"
         } else {
             "html"
         }
@@ -162,6 +238,256 @@ pub fn get_saved_vars(
     let config = Config::load(&state.config_path).map_err(|e| AppError::Config(e.to_string()))?;
     Ok(config.layout_vars.get(&layout).cloned().unwrap_or_default())
 }
+#[tauri::command]
+pub fn load_layout_preset(preset: String) -> Result<LayoutDocumentResponse, AppError> {
+    let requested = preset.trim();
+    let normalized = requested.strip_suffix(".layout.toml").unwrap_or(requested);
+    if normalized != "neon-composer" {
+        return Err(AppError::LayoutNotFound(format!("preset {requested}")));
+    }
+
+    let document =
+        parse_layout_document(None, thermalwriter::config::builtin_layouts::NEON_COMPOSER)?;
+    layout_document_response(document)
+}
+
+#[tauri::command]
+pub fn load_layout_document(
+    name: String,
+    state: tauri::State<'_, RendererState>,
+) -> Result<LayoutDocumentResponse, AppError> {
+    load_layout_document_impl(&state.layout_dir, &name)
+}
+
+fn load_layout_document_impl(
+    layout_dir: &Path,
+    name: &str,
+) -> Result<LayoutDocumentResponse, AppError> {
+    let path = validate_layout_path(layout_dir, name)?;
+    if !path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.to_ascii_lowercase().ends_with(".layout.toml"))
+    {
+        return Err(AppError::InvalidLayout(
+            "typed layout documents must use the .layout.toml suffix".into(),
+        ));
+    }
+
+    let content =
+        std::fs::read_to_string(&path).map_err(|error| AppError::LayoutIo(error.to_string()))?;
+    let document = parse_layout_document(Some(&path), &content)?;
+    reject_layout_media_paths(layout_dir, &document)?;
+    Ok(LayoutDocumentResponse {
+        document,
+        document_fingerprint: fingerprint_bytes(content.as_bytes()),
+    })
+}
+
+#[tauri::command]
+pub fn validate_layout_document(
+    draft: LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    state: tauri::State<'_, RendererState>,
+) -> Result<LayoutValidationResponse, AppError> {
+    let mut response = validate_layout_document_impl(draft.clone(), profile, width, height)?;
+    let media_diagnostics = layout_media_path_diagnostics(&state.layout_dir, &draft);
+    response.valid &= media_diagnostics.is_empty();
+    response.diagnostics.extend(media_diagnostics);
+    Ok(response)
+}
+
+fn validate_layout_document_impl(
+    draft: LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+) -> Result<LayoutValidationResponse, AppError> {
+    let surface = resolve_preview_surface(profile, width, height)?;
+    let document_fingerprint = document_fingerprint(&draft)?;
+    let diagnostics = match validate(&draft, &surface) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics,
+    };
+
+    Ok(LayoutValidationResponse {
+        width,
+        height,
+        valid: diagnostics.is_empty(),
+        diagnostics,
+        topology: surface.preview,
+        document_fingerprint,
+    })
+}
+
+#[tauri::command]
+pub fn preview_layout_document(
+    draft: LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    state: tauri::State<'_, RendererState>,
+) -> Result<LayoutPreviewResponse, AppError> {
+    preview_layout_document_impl(draft, profile, width, height, &state)
+}
+
+fn preview_layout_document_impl(
+    draft: LayoutDocument,
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+    state: &RendererState,
+) -> Result<LayoutPreviewResponse, AppError> {
+    let surface = resolve_preview_surface(profile, width, height)?;
+    let document_fingerprint = document_fingerprint(&draft)?;
+    let mut diagnostics = layout_media_path_diagnostics(&state.layout_dir, &draft);
+    diagnostics.extend(match validate(&draft, &surface) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics,
+    });
+    if !diagnostics.is_empty() {
+        return Ok(LayoutPreviewResponse {
+            width,
+            height,
+            rgba: Vec::new(),
+            diagnostics,
+            topology: surface.preview,
+            document_fingerprint,
+        });
+    }
+
+    let key = TypedPreviewCacheKey {
+        document_fingerprint: document_fingerprint.clone(),
+        profile,
+        width,
+        height,
+        media_fingerprint: media_fingerprint(&draft, &state.layout_dir),
+    };
+    let mut cache = state
+        .typed_cache
+        .lock()
+        .map_err(|_| AppError::StatePoisoned)?;
+    if cache.key.as_ref() != Some(&key) || cache.renderer.is_none() {
+        cache.renderer = Some(LayoutEngineRenderer::with_media_root(
+            draft,
+            surface,
+            ResvgSceneBackend,
+            state.layout_dir.clone(),
+        ));
+        cache.key = Some(key);
+    }
+
+    let renderer = cache
+        .renderer
+        .as_mut()
+        .ok_or_else(|| AppError::Render("typed renderer not initialized".into()))?;
+    let frame = renderer
+        .render(&mock_layout_sensors())
+        .map_err(|error| AppError::Render(error.to_string()))?;
+
+    Ok(LayoutPreviewResponse {
+        width: frame.width,
+        height: frame.height,
+        rgba: rgb_to_rgba(&frame.data),
+        diagnostics: Vec::new(),
+        topology: surface.preview,
+        document_fingerprint,
+    })
+}
+
+#[tauri::command]
+pub fn save_layout_document(
+    name: String,
+    expected_fingerprint: Option<String>,
+    draft: LayoutDocument,
+    state: tauri::State<'_, RendererState>,
+) -> Result<LayoutSaveResponse, AppError> {
+    save_layout_document_impl(
+        &state.layout_dir,
+        &name,
+        expected_fingerprint.as_deref(),
+        &draft,
+    )
+}
+
+fn save_layout_document_impl(
+    layout_dir: &Path,
+    name: &str,
+    expected_fingerprint: Option<&str>,
+    draft: &LayoutDocument,
+) -> Result<LayoutSaveResponse, AppError> {
+    reject_layout_media_paths(layout_dir, draft)?;
+    let saved = thermalwriter::layout_engine::save_layout_document(
+        layout_dir,
+        name,
+        expected_fingerprint,
+        draft,
+    )
+    .map_err(|diagnostic| AppError::LayoutDiagnostics(vec![diagnostic]))?;
+    Ok(LayoutSaveResponse {
+        name: saved.name,
+        path: saved.path,
+        document_fingerprint: saved.fingerprint,
+    })
+}
+
+#[tauri::command]
+pub async fn apply_layout_document(
+    name: String,
+    expected_fingerprint: Option<String>,
+    draft: LayoutDocument,
+    state: tauri::State<'_, RendererState>,
+) -> Result<LayoutApplyResponse, AppError> {
+    let saved = save_layout_document_impl(
+        &state.layout_dir,
+        &name,
+        expected_fingerprint.as_deref(),
+        &draft,
+    )?;
+    let activation = activate_layout_document(&state.layout_dir, &saved.name).await;
+    Ok(LayoutApplyResponse { saved, activation })
+}
+
+async fn activate_layout_document(layout_dir: &Path, name: &str) -> LayoutActivationState {
+    let layout_name = format!("{name}.layout.toml");
+    if let Err(error) = validate_layout_path(layout_dir, &layout_name) {
+        return LayoutActivationState::ActivationFailed {
+            reason: error.to_string(),
+        };
+    }
+
+    let connection = match zbus::Connection::session().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return LayoutActivationState::DaemonUnavailable {
+                reason: format!("session bus unavailable: {error}"),
+            };
+        }
+    };
+    let proxy = match DisplayProxy::new(&connection).await {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            return LayoutActivationState::DaemonUnavailable {
+                reason: format!("daemon proxy not reachable: {error}"),
+            };
+        }
+    };
+    if let Err(error) = proxy.set_layout(&layout_name).await {
+        return LayoutActivationState::ActivationFailed {
+            reason: format!("set_layout failed: {error}"),
+        };
+    }
+    if let Err(error) = proxy.set_default_layout(&layout_name).await {
+        return LayoutActivationState::ActiveButDefaultNotPersisted {
+            reason: format!("set_default_layout failed after activation: {error}"),
+        };
+    }
+
+    LayoutActivationState::Active
+}
+
 #[tauri::command]
 pub async fn list_sensors() -> Result<Vec<SensorDescriptor>, AppError> {
     // Always measure live on the GUI side so setup sees real poll cost even
@@ -726,6 +1052,164 @@ fn validate_tick_rate(rate: u32) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Resolve a registered native surface profile without inferring topology from dimensions.
+fn resolve_preview_surface(
+    profile: SurfaceProfileId,
+    width: u32,
+    height: u32,
+) -> Result<thermalwriter::layout_engine::DisplaySurfaceProfile, AppError> {
+    resolve_surface_profile(width, height, profile)
+        .copied()
+        .ok_or_else(|| {
+            AppError::InvalidLayoutProfile(format!(
+                "profile {profile} is not registered for {width}x{height}"
+            ))
+        })
+}
+
+fn parse_layout_document(path: Option<&Path>, input: &str) -> Result<LayoutDocument, AppError> {
+    LayoutDocument::from_toml(input).map_err(|error| layout_document_error(path, input, error))
+}
+
+fn layout_document_response(document: LayoutDocument) -> Result<LayoutDocumentResponse, AppError> {
+    let document_fingerprint = document_fingerprint(&document)?;
+    Ok(LayoutDocumentResponse {
+        document,
+        document_fingerprint,
+    })
+}
+
+fn layout_document_error(path: Option<&Path>, input: &str, error: LayoutDocumentError) -> AppError {
+    let file = path.map(Path::to_path_buf);
+    let diagnostic = match error {
+        LayoutDocumentError::Parse(error) => LayoutDiagnostic::from_toml_error(&error, input, file),
+        LayoutDocumentError::Serialize(error) => {
+            let mut diagnostic = LayoutDiagnostic::new(
+                TOML_PARSE_CODE,
+                DiagnosticSeverity::Error,
+                "Invalid layout document TOML",
+                error.to_string(),
+                "Correct the layout document, then validate it again before saving.",
+            );
+            diagnostic.file = file;
+            diagnostic
+        }
+        LayoutDocumentError::UnsupportedVersion(version) => {
+            let mut diagnostic = LayoutDiagnostic::new(
+                TOML_PARSE_CODE,
+                DiagnosticSeverity::Error,
+                "Unsupported layout document version",
+                format!("version {version} is not supported"),
+                format!(
+                    "Use layout document version {} before saving.",
+                    thermalwriter::layout_engine::CURRENT_VERSION
+                ),
+            );
+            diagnostic.file = file;
+            diagnostic
+        }
+    };
+    AppError::LayoutDiagnostics(vec![diagnostic])
+}
+
+fn document_fingerprint(document: &LayoutDocument) -> Result<String, AppError> {
+    let content = document
+        .to_toml()
+        .map_err(|error| layout_document_error(None, "", error))?;
+    Ok(fingerprint_bytes(content.as_bytes()))
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn media_fingerprint(document: &LayoutDocument, media_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    for module in &document.modules {
+        let ModuleDocument::Media(media) = module else {
+            continue;
+        };
+        let source = if media.source.as_os_str().is_empty() {
+            PathBuf::from(media.binding.trim())
+        } else {
+            media.source.clone()
+        };
+        let source_display = source.to_string_lossy();
+        hasher.update(source_display.as_bytes());
+        hasher.update([0]);
+
+        let bytes = source
+            .to_str()
+            .and_then(|name| validate_path_within_dir(media_root, name, "Media").ok())
+            .and_then(|path| std::fs::read(path).ok());
+        if let Some(bytes) = bytes {
+            hasher.update(bytes);
+        } else {
+            hasher.update(b"<unreadable-media>");
+        }
+        hasher.update([0xff]);
+    }
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn reject_layout_media_paths(layout_dir: &Path, document: &LayoutDocument) -> Result<(), AppError> {
+    let diagnostics = layout_media_path_diagnostics(layout_dir, document);
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::LayoutDiagnostics(diagnostics))
+    }
+}
+
+fn layout_media_path_diagnostics(
+    layout_dir: &Path,
+    document: &LayoutDocument,
+) -> Vec<LayoutDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for module in &document.modules {
+        let ModuleDocument::Media(media) = module else {
+            continue;
+        };
+        let source = if media.source.as_os_str().is_empty() {
+            PathBuf::from(media.binding.trim())
+        } else {
+            media.source.clone()
+        };
+        let Some(source_name) = source.to_str() else {
+            let mut diagnostic = LayoutDiagnostic::new(
+                PERSISTENCE_PATH_CODE,
+                DiagnosticSeverity::Error,
+                "Media source is outside the layout root",
+                "the media source path is not valid UTF-8",
+                "Choose a relative media filename below the layout directory.",
+            );
+            diagnostic.module_id = Some(media.id.clone());
+            diagnostic.property_path = Some("source".into());
+            diagnostics.push(diagnostic);
+            continue;
+        };
+        let Err(error) = validate_path_within_dir(layout_dir, source_name, "Media") else {
+            continue;
+        };
+        if matches!(error, PathContainmentError::NotFound { .. }) {
+            continue;
+        }
+        let mut diagnostic = LayoutDiagnostic::new(
+            PERSISTENCE_PATH_CODE,
+            DiagnosticSeverity::Error,
+            "Media source is outside the layout root",
+            error.to_string(),
+            "Choose a relative media filename below the layout directory.",
+        );
+        diagnostic.module_id = Some(media.id.clone());
+        diagnostic.property_path = Some("source".into());
+        diagnostics.push(diagnostic);
+    }
+    diagnostics
+}
+
 /// Return the private directory where the daemon writes the last-frame JPEG.
 ///
 /// Mirrors `thermalwriter::service::frame_dump::frame_dir()` — the GUI builds
@@ -793,10 +1277,13 @@ fn list_layout_names(layout_dir: &Path) -> Vec<String> {
 }
 
 fn has_layout_ext(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("html") | Some("svg")
-    )
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".layout.toml"))
+        || matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("html") | Some("svg")
+        )
 }
 
 fn list_background_names(bg_dir: &Path) -> Vec<String> {
@@ -1001,6 +1488,15 @@ fn fill_synthetic_history(
             history.record(&data);
         }
     }
+}
+
+fn mock_layout_sensors() -> SensorData {
+    let mut sensors = mock_sensors();
+    sensors.insert(
+        "cpu_temp_history".to_string(),
+        "[52, 55, 58, 61, 64, 62]".to_string(),
+    );
+    sensors
 }
 
 fn mock_sensors() -> SensorData {
@@ -1918,5 +2414,108 @@ mod tests {
             .expect("should return a pixmap");
         assert_eq!(background_rgb(&pixmap_new), [0, 255, 0]);
         assert_eq!(cache.current_background.as_deref(), Some("bg2.png"));
+    }
+
+    fn flagship_document() -> LayoutDocument {
+        LayoutDocument::from_toml(thermalwriter::config::builtin_layouts::NEON_COMPOSER)
+            .expect("flagship layout document")
+    }
+
+    #[test]
+    fn typed_document_response_serializes_document_and_fingerprint() {
+        let response = load_layout_preset("neon-composer".into()).expect("preset response");
+        let json = serde_json::to_value(&response).expect("typed response JSON");
+
+        assert_eq!(json["document"]["version"], 1);
+        assert_eq!(json["document"]["modules"][0]["kind"], "metric");
+        assert_eq!(json["document_fingerprint"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn layout_document_load_rejects_paths_outside_layout_root() {
+        let tmp = TempDir::new().unwrap();
+        let layout_dir = tmp.path().join("layouts");
+        fs::create_dir_all(&layout_dir).unwrap();
+        fs::write(
+            tmp.path().join("outside.layout.toml"),
+            thermalwriter::config::builtin_layouts::NEON_COMPOSER,
+        )
+        .unwrap();
+
+        let error = load_layout_document_impl(&layout_dir, "../outside.layout.toml")
+            .expect_err("layout traversal must be rejected");
+        assert!(matches!(error, AppError::InvalidLayout(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn save_maps_fingerprint_conflict_to_structured_diagnostic() {
+        let tmp = TempDir::new().unwrap();
+        let document = flagship_document();
+        let saved = save_layout_document_impl(tmp.path(), "draft", None, &document)
+            .expect("initial typed save");
+        let error =
+            save_layout_document_impl(tmp.path(), "draft", Some("stale-fingerprint"), &document)
+                .expect_err("stale save must be rejected");
+
+        let AppError::LayoutDiagnostics(diagnostics) = error else {
+            panic!("expected structured diagnostics");
+        };
+        assert_eq!(
+            diagnostics[0].code,
+            thermalwriter::layout_engine::PERSISTENCE_CONFLICT_CODE
+        );
+        assert_eq!(saved.name, "draft");
+    }
+
+    #[test]
+    fn validation_and_preview_report_native_profile_dimensions() {
+        let document = flagship_document();
+        let validation = validate_layout_document_impl(
+            document.clone(),
+            SurfaceProfileId::Rectangular,
+            480,
+            1280,
+        )
+        .expect("portrait validation");
+        assert!(validation.valid);
+        assert_eq!((validation.width, validation.height), (480, 1280));
+        assert_eq!(validation.topology, PreviewTopology::Rectangular);
+
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp);
+        let preview =
+            preview_layout_document_impl(document, SurfaceProfileId::Rectangular, 480, 480, &state)
+                .expect("square preview");
+        assert_eq!((preview.width, preview.height), (480, 480));
+        assert_eq!(preview.rgba.len(), 480 * 480 * 4);
+        assert_eq!(preview.topology, PreviewTopology::Rectangular);
+
+        let cache = state.typed_cache.lock().unwrap();
+        let key = cache.key.as_ref().expect("typed preview cache key");
+        assert_eq!(key.profile, SurfaceProfileId::Rectangular);
+        assert_eq!((key.width, key.height), (480, 480));
+        assert_eq!(key.document_fingerprint, preview.document_fingerprint);
+    }
+
+    #[test]
+    fn save_rejects_media_paths_outside_layout_root() {
+        let tmp = TempDir::new().unwrap();
+        let mut document = flagship_document();
+        document.modules.push(ModuleDocument::Media(
+            thermalwriter::layout_engine::MediaDocument {
+                id: "unsafe-media".into(),
+                binding: "../outside.png".into(),
+                variant: "default".into(),
+                ..Default::default()
+            },
+        ));
+
+        let error = save_layout_document_impl(tmp.path(), "unsafe", None, &document)
+            .expect_err("media traversal must be rejected");
+        let AppError::LayoutDiagnostics(diagnostics) = error else {
+            panic!("expected structured media path diagnostics");
+        };
+        assert_eq!(diagnostics[0].code, PERSISTENCE_PATH_CODE);
+        assert_eq!(diagnostics[0].module_id.as_deref(), Some("unsafe-media"));
     }
 }

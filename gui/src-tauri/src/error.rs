@@ -1,3 +1,4 @@
+use thermalwriter::layout_engine::LayoutDiagnostic;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -45,6 +46,12 @@ pub enum AppError {
 
     #[error("no stream frame available: {0}")]
     NoFrame(String),
+
+    #[error("layout command returned structured diagnostics")]
+    LayoutDiagnostics(Vec<LayoutDiagnostic>),
+
+    #[error("invalid layout profile: {0}")]
+    InvalidLayoutProfile(String),
 }
 
 impl serde::Serialize for AppError {
@@ -52,7 +59,16 @@ impl serde::Serialize for AppError {
     where
         S: serde::ser::Serializer,
     {
-        serializer.serialize_str(self.to_string().as_ref())
+        if let AppError::LayoutDiagnostics(diagnostics) = self {
+            use serde::ser::SerializeStruct;
+
+            let mut state = serializer.serialize_struct("LayoutDiagnostics", 2)?;
+            state.serialize_field("kind", "layout-diagnostics")?;
+            state.serialize_field("diagnostics", diagnostics)?;
+            state.end()
+        } else {
+            serializer.serialize_str(self.to_string().as_ref())
+        }
     }
 }
 
@@ -93,6 +109,7 @@ mod tests {
             AppError::BackgroundNotFound("skyline.png".into()),
             AppError::BackgroundIo("read failed".into()),
             AppError::NoFrame("no last.jpg".into()),
+            AppError::InvalidLayoutProfile("1920x1080".into()),
         ];
         for err in cases {
             let s = err.to_string();
@@ -108,5 +125,24 @@ mod tests {
                 "Display for {err:?} is suspiciously short: {s:?}"
             );
         }
+    }
+
+    #[test]
+    fn structured_layout_diagnostics_preserve_stable_codes() {
+        let diagnostic = LayoutDiagnostic::new(
+            "TWLAYOUT-E041",
+            thermalwriter::layout_engine::DiagnosticSeverity::Error,
+            "Layout save conflict",
+            "the file changed on disk",
+            "reload before saving",
+        );
+        let err = AppError::LayoutDiagnostics(vec![diagnostic]);
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&err).expect("serialize structured diagnostics"),
+        )
+        .expect("structured diagnostic JSON");
+
+        assert_eq!(json["kind"], "layout-diagnostics");
+        assert_eq!(json["diagnostics"][0]["code"], "TWLAYOUT-E041");
     }
 }
