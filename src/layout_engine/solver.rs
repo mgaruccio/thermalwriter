@@ -408,11 +408,11 @@ pub(crate) fn space_between_positions(
 mod tests {
     use super::*;
     use crate::layout_engine::document::{
-        MediaDocument, MetricDocument, ProfileRecipeDocument, TextDocument, CURRENT_VERSION,
+        CURRENT_VERSION, MediaDocument, MetricDocument, ProfileRecipeDocument, TextDocument,
     };
     use crate::layout_engine::surface::{
-        rectangular_surface_profile, resolve_surface_profile, DisplaySurfaceProfile,
-        PreviewTopology, SurfaceBounds, SurfaceProfileId, SurfaceRegion, SurfaceZone,
+        DisplaySurfaceProfile, PreviewTopology, SurfaceBounds, SurfaceProfileId, SurfaceRegion,
+        SurfaceZone, rectangular_surface_profile, resolve_surface_profile,
     };
     use std::collections::BTreeMap;
 
@@ -481,6 +481,7 @@ mod tests {
             id: id.to_owned(),
             binding: format!("{id}.source"),
             variant: "default".to_owned(),
+            ..MediaDocument::default()
         })
     }
 
@@ -526,10 +527,12 @@ mod tests {
                 ("four", Some("right-readable")),
             ],
         );
-        assert!(layout
-            .modules
-            .iter()
-            .all(|module| { module.bounds.x < 960 || module.bounds.x >= 1440 }));
+        assert!(
+            layout
+                .modules
+                .iter()
+                .all(|module| { module.bounds.x < 960 || module.bounds.x >= 1440 })
+        );
     }
 
     #[test]

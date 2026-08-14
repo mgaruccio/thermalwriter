@@ -14,9 +14,9 @@ pub use document::{
     ModuleDocument, ProfileRecipeDocument, SparklineDocument, TextDocument,
 };
 pub use modules::{
-    BindingValue, HistoryBinding, MetricModule, MetricVariant, ModuleCapabilities, ModuleEmitter,
-    ResolvedBindings, SparklineModule, SparklineStyle, SparklineVariant, TextModule, ThemeTokens,
-    ValueRange,
+    BindingValue, HistoryBinding, MediaFit, MediaModule, MetricModule, MetricVariant,
+    ModuleCapabilities, ModuleEmitter, ResolvedBindings, SparklineModule, SparklineStyle,
+    SparklineVariant, TextModule, ThemeTokens, ValueRange,
 };
 pub use scene::{
     ClipNode, Color, ImageFit, ImageNode, MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE,

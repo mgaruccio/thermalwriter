@@ -13,10 +13,12 @@ pub use super::scene::{Color, TextAlignment, TextRole};
 use super::scene::{MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE};
 use super::solver::SolvedModule;
 
+pub mod media;
 pub mod metric;
 pub mod sparkline;
 pub mod text;
 
+pub use media::{MediaFit, MediaModule};
 pub use metric::{MetricModule, MetricVariant};
 pub use sparkline::{
     HistoryBinding, SparklineModule, SparklineStyle, SparklineVariant, ValueRange,

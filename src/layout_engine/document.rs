@@ -1,15 +1,17 @@
 //! Versioned, bounded layout documents shared by the daemon and GUI.
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use super::scene::ImageFit;
 
 /// The only layout document version understood by this crate.
 pub const CURRENT_VERSION: u32 = 1;
 
 /// A persisted, preset-oriented layout composition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutDocument {
     pub version: u32,
@@ -21,7 +23,7 @@ pub struct LayoutDocument {
 }
 
 /// A typed module in document order.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ModuleDocument {
     Metric(MetricDocument),
@@ -58,12 +60,47 @@ pub struct TextDocument {
 }
 
 /// A media module bound to a catalog media source.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MediaDocument {
     pub id: String,
     pub binding: String,
     pub variant: String,
+    /// Optional local media path. An empty path falls back to `binding`.
+    #[serde(default, skip_serializing_if = "is_empty_path")]
+    pub source: PathBuf,
+    /// How the decoded image fills the solved bounds.
+    #[serde(default, skip_serializing_if = "is_default_media_fit")]
+    pub fit: ImageFit,
+    /// Request bridge spanning when the selected profile policy permits it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub span_bridge: bool,
+    /// Image opacity, bounded by the media emitter before scene emission.
+    #[serde(
+        default = "default_media_opacity",
+        skip_serializing_if = "is_default_media_opacity"
+    )]
+    pub opacity: f32,
+}
+
+fn default_media_opacity() -> f32 {
+    1.0
+}
+
+fn is_empty_path(value: &PathBuf) -> bool {
+    value.as_os_str().is_empty()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_default_media_opacity(value: &f32) -> bool {
+    *value == default_media_opacity()
+}
+
+fn is_default_media_fit(value: &ImageFit) -> bool {
+    *value == ImageFit::Contain
 }
 
 /// A named, bounded composition recipe for a target profile.
