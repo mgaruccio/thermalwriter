@@ -230,6 +230,24 @@ Prefer **semantic inspection** over brittle CSS hooks:
 
 Capture `webview_screenshot` + last 50 lines of GUI stderr for failures.
 
+## Journey 6 — Compose tab (typed `.layout.toml`)
+
+**Accepted GUI driver:** Tauri MCP bridge (`tauri-mcp` / `mcp-server-tauri` on `127.0.0.1:9223`). Official WebKit WebDriver is **not** required.
+
+**Goal**: start from Neon Composer, edit modules, preview a native profile, save, activate on the isolated null daemon.
+
+1. Click **Compose**. Confirm **Choose a preset**, **Preview profile**, and **Use preset**.
+2. Click **Use preset** (default name is fine). Confirm **Ordered modules** (Metric + Sparkline) and **Preview ready**.
+3. Optionally add **Text**. On a 480×480 square surface a third 172px card must fail apply with `TWLAYOUT-E022` (capacity). That is correct; do not treat it as a GUI crash.
+4. Switch **Curved** (`2400 × 1080`). Confirm topology legend / native preview (html2canvas may time out on the large canvas; `webview_execute_js` / accessibility snapshot is enough).
+5. **Save layout**. Isolated `$XDG_CONFIG_HOME/thermalwriter/layouts/<name>.layout.toml` must exist.
+6. **Save & activate** a two-module document. Isolated `thermalwriter ctl status` (via the private `dbus.env`) must show `active_layout` ending in `.layout.toml`.
+7. Confirm the login-session daemon is still the pre-test layout (`thermalwriter ctl status` **without** sourcing `dbus.env`).
+
+**Pass criteria**: Compose UI works; save writes a typed document; isolated apply succeeds for a fitting recipe; live user daemon is untouched.
+
+Add this row to the result table: `| Compose preset/save/apply | PASS/FAIL | |`.
+
 ## Cleanup
 
 The cleanup traps stop the daemon through its private bus, signal the GUI launcher PID recorded in `gui.pid`, and terminate the tracked private-session wrapper (`TW_SESSION_PID`); the inner trap signals its exact daemon and GUI child PIDs. Cleanup removes `$TW_AGENT_HOME`, never calls `thermalwriter ctl stop` on the live bus, and never uses broad `pkill`.
@@ -261,6 +279,7 @@ thermalwriter ctl status
 | Theme switch + local fonts | PASS/FAIL | |
 | Stream start/preview/stop | PASS/FAIL | |
 | Error paths | PASS/FAIL | |
+| Compose preset/save/apply | PASS/FAIL | MCP, not WebKit WebDriver |
 
 ### Artifacts
 - Screenshots: ...

@@ -12,6 +12,7 @@
     normalizeLayoutName,
     type ComposerSaveState,
     type LayoutApplyResponse,
+    type LayoutDiagnostic,
     type LayoutDocument,
     type LayoutDocumentResponse,
     type LayoutModule,
@@ -31,6 +32,30 @@
   // thiserror #[error("daemon is not running…")] template in error.rs.
   const DAEMON_OFFLINE_PREFIX = "daemon is not running";
   const DAEMON_STATUS_POLL_MS = 5000;
+
+  function formatInvokeError(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const rec = error as Record<string, unknown>;
+      if (rec.kind === "layout-diagnostics" && Array.isArray(rec.diagnostics)) {
+        return rec.diagnostics
+          .map((item) => {
+            const diagnostic = item as LayoutDiagnostic;
+            return [`${diagnostic.code}: ${diagnostic.message}`, diagnostic.reason, diagnostic.fix]
+              .filter(Boolean)
+              .join("\n");
+          })
+          .join("\n\n");
+      }
+      if (typeof rec.message === "string" && rec.message.trim()) return rec.message;
+      try {
+        return JSON.stringify(error);
+      } catch {
+        /* fall through */
+      }
+    }
+    return String(error);
+  }
 
   type LayoutSummary = {
     name: string;
@@ -353,7 +378,7 @@
       composerPreview = null;
       composerStatus = `Created ${name} from ${preset.label}. Arrange modules, then save when ready.`;
     } catch (e) {
-      if (isCurrentRevision(revision, composerLoadRevision)) composerError = String(e);
+      if (isCurrentRevision(revision, composerLoadRevision)) composerError = formatInvokeError(e);
     } finally {
       if (isCurrentRevision(revision, composerLoadRevision)) composerLoading = false;
     }
@@ -383,7 +408,7 @@
       composerPreview = null;
       composerStatus = `Reopened ${savedName}. Module order is preserved from disk.`;
     } catch (e) {
-      if (isCurrentRevision(revision, composerLoadRevision)) composerError = String(e);
+      if (isCurrentRevision(revision, composerLoadRevision)) composerError = formatInvokeError(e);
     } finally {
       if (isCurrentRevision(revision, composerLoadRevision)) composerLoading = false;
     }
@@ -424,7 +449,7 @@
     } catch (e) {
       if (isCurrentRevision(revision, composerPreviewRevision)) {
         composerPreview = null;
-        composerError = String(e);
+        composerError = formatInvokeError(e);
       }
     } finally {
       if (isCurrentRevision(revision, composerPreviewRevision)) composerPreviewing = false;
@@ -459,7 +484,7 @@
       composerStatus = `Saved ${response.name}. You can reopen it any time.`;
       rememberSavedLayout(response.name);
     } catch (e) {
-      if (isCurrentRevision(revision, composerDraftRevision)) composerError = String(e);
+      if (isCurrentRevision(revision, composerDraftRevision)) composerError = formatInvokeError(e);
     } finally {
       if (isCurrentRevision(revision, composerDraftRevision)) composerSaving = false;
     }
@@ -498,7 +523,7 @@
         composerStatus = `Saved ${response.saved.name}, but activation was not completed: ${response.activation.reason}`;
       }
     } catch (e) {
-      if (isCurrentRevision(revision, composerDraftRevision)) composerError = String(e);
+      if (isCurrentRevision(revision, composerDraftRevision)) composerError = formatInvokeError(e);
     } finally {
       if (isCurrentRevision(revision, composerDraftRevision)) composerApplying = false;
     }
