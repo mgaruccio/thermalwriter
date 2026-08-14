@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ValidationPanel from "./ValidationPanel.svelte";
   import ModuleInspector from "./ModuleInspector.svelte";
   import ModuleList from "./ModuleList.svelte";
   import PresetStarter from "./PresetStarter.svelte";
@@ -199,6 +200,7 @@
       onchange={(module) => updateModule(module.id, module)}
       disabled={controlsDisabled}
     />
+    <ValidationPanel diagnostics={diagnostics} />
   {:else}
     <div class="composer-empty">
       <span class="composer-empty-mark" aria-hidden="true">＋</span>
