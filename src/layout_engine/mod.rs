@@ -6,6 +6,7 @@ pub mod modules;
 pub mod scene;
 pub mod solver;
 pub mod surface;
+pub mod svg_backend;
 pub mod validation;
 
 pub use diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
@@ -30,6 +31,10 @@ pub use surface::{
     DisplaySurfaceProfile, PreviewTopology, SURFACE_PROFILE_REGISTRY, SurfaceBounds,
     SurfaceProfileId, SurfaceProfileRegistry, SurfaceRegion, SurfaceZone, known_surface_profiles,
     rectangular_surface_profile, resolve_surface_profile,
+};
+pub use svg_backend::{
+    MediaAsset, ResolvedMedia, ResvgSceneBackend, SVG_BACKEND_DIAGNOSTIC_CODE, SceneBackend,
+    compile_scene_xml,
 };
 pub use validation::{
     BRIDGE_VIOLATION_CODE, MODULE_ID_CODE, RECIPE_OVERFLOW_CODE, RECIPE_SHAPE_CODE,
