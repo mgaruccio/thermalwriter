@@ -1,18 +1,17 @@
-//! Rectangular recipe validation for the shared layout engine.
+//! Recipe and topology validation for the shared layout engine.
 //!
-//! Validation is intentionally separate from placement.  It resolves the
-//! aspect-class recipe, rejects unsupported topology, checks typed module IDs,
-//! and proves that fixed card extents fit before the solver emits any bounds.
-//! Owners can reorder modules, but cannot bypass these bounded checks by
-//! entering coordinates.
+//! Validation is intentionally separate from placement. It resolves the selected
+//! recipe, rejects unsupported topology, checks typed module IDs, and proves that
+//! fixed module extents fit before the solver emits any bounds. Owners can reorder
+//! modules, but cannot bypass these bounded checks by entering coordinates.
 
 use std::collections::BTreeSet;
 
 use super::diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
 use super::document::LayoutDocument;
 use super::solver::{
-    CARD_MIN_EXTENT, RecipeKind, Rect, card_extent_for_surface, content_inset_for_surface,
-    fixed_module_width,
+    card_extent_for_surface, content_inset_for_surface, fixed_module_width, ordered_panorama_zones,
+    BridgePolicy, RecipeKind, Rect, CARD_MIN_EXTENT,
 };
 use super::surface::DisplaySurfaceProfile;
 
@@ -32,15 +31,16 @@ pub const MODULE_ID_CODE: &str = "TWLAYOUT-E023";
 /// Stable diagnostic for a surface that is not a single rectangular readable
 /// region.
 pub const RECTANGULAR_SURFACE_CODE: &str = "TWLAYOUT-E024";
+/// Stable diagnostic for unsafe or unknown protected-bridge spanning.
+pub const BRIDGE_VIOLATION_CODE: &str = "TWLAYOUT-E026";
+/// Stable diagnostic for a local panorama-zone capacity failure.
+pub const ZONE_OVERFLOW_CODE: &str = "TWLAYOUT-E027";
 
-/// Validate the rectangular recipe and fixed-card capacity for a document.
+/// Validate the selected recipe, topology, and fixed-card capacity for a document.
 ///
-/// The returned recipe is always the aspect-class recipe: `column` for
-/// `height >= width`, and `two-column` for `width > height`.  A matching
-/// profile entry may make that choice explicit, but cannot replace it with a
-/// different rectangular recipe.  `zoned-panorama` is recognized so that it
-/// can produce one stable unsupported diagnostic rather than being treated as
-/// an unknown string.
+/// The rectangular aspect-class recipes retain their existing bounded behavior.
+/// A configured `zoned-panorama` is accepted only for an explicitly curved
+/// surface profile; its local zones and bridge policy are validated here.
 pub fn validate_rectangular_recipe(
     document: &LayoutDocument,
     surface: &DisplaySurfaceProfile,
@@ -48,10 +48,12 @@ pub fn validate_rectangular_recipe(
     let expected = aspect_recipe(surface);
     let configured = configured_recipe(document, surface)?;
 
-    // Resolve the explicit unsupported branch before rectangular topology
-    // checks so a requested panorama always gets the same stable recipe code,
-    // including when the selected surface is itself curved.
+    // A panorama is supported only when its explicit surface topology is selected;
+    // the same recipe remains unsupported on a rectangular surface.
     if configured == Some(RecipeKind::ZonedPanorama) {
+        if surface.is_curved() {
+            return validate_zoned_panorama_recipe(document, surface);
+        }
         return Err(vec![unsupported_recipe_diagnostic(surface)]);
     }
 
@@ -143,6 +145,215 @@ pub fn validate_rectangular_recipe(
     }
 
     Ok(expected)
+}
+
+fn validate_zoned_panorama_recipe(
+    document: &LayoutDocument,
+    surface: &DisplaySurfaceProfile,
+) -> Result<RecipeKind, Vec<LayoutDiagnostic>> {
+    panorama_canvas_bounds(surface).map_err(|diagnostic| vec![diagnostic])?;
+
+    let id_diagnostics = validate_module_ids(document);
+    if !id_diagnostics.is_empty() {
+        return Err(id_diagnostics);
+    }
+
+    let policy =
+        panorama_bridge_policy(document, surface).map_err(|diagnostic| vec![diagnostic])?;
+    let zones = ordered_panorama_zones(surface);
+    let card_extent = card_extent_for_surface(surface);
+    let mut local_counts = [0usize; 2];
+    let mut local_index = 0usize;
+
+    for module in &document.modules {
+        if !policy.can_span(module) {
+            local_counts[local_index % zones.len()] += 1;
+            local_index += 1;
+        }
+    }
+
+    for (zone_index, zone) in zones.iter().enumerate() {
+        let capacity = panorama_zone_capacity(surface, *zone, card_extent);
+        if local_counts[zone_index] > capacity {
+            return Err(vec![zone_overflow_diagnostic(
+                surface,
+                zone.name,
+                local_counts[zone_index],
+                capacity,
+            )]);
+        }
+    }
+
+    Ok(RecipeKind::ZonedPanorama)
+}
+
+/// Resolve the bridge policy selected by the profile for a curved surface.
+pub(crate) fn panorama_bridge_policy(
+    document: &LayoutDocument,
+    surface: &DisplaySurfaceProfile,
+) -> Result<BridgePolicy, LayoutDiagnostic> {
+    let bridge = configured_profile(document, surface)
+        .and_then(|profile| profile.bridge.as_deref())
+        .unwrap_or("local-only")
+        .trim();
+    match bridge {
+        "" | "local-only" => Ok(BridgePolicy::LocalOnly),
+        "media-only" => Ok(BridgePolicy::MediaOnly),
+        "explicit-capable" => Ok(BridgePolicy::ExplicitCapable),
+        _ => Err(bridge_policy_diagnostic(surface, bridge)),
+    }
+}
+
+/// Return the complete native canvas after validating the conservative panorama
+/// topology. Positive-area overlap is rejected; edge contact is intentionally OK.
+pub(crate) fn panorama_canvas_bounds(
+    surface: &DisplaySurfaceProfile,
+) -> Result<Rect, LayoutDiagnostic> {
+    if surface.width == 0 || surface.height == 0 {
+        return Err(surface_diagnostic(
+            surface,
+            "A curved panorama needs a non-zero canvas.",
+            "The selected profile has a zero width or height.",
+            "Select the bounded 2400x1080 curved profile.",
+        ));
+    }
+    if !surface.is_curved() {
+        return Err(surface_diagnostic(
+            surface,
+            "The zoned-panorama recipe requires a curved surface profile.",
+            "The selected surface does not advertise curved-panorama topology.",
+            "Select the explicit Thermalright curved surface profile.",
+        ));
+    }
+    if surface.readable_zones.len() != 2 || surface.protected_regions.len() != 1 {
+        return Err(surface_diagnostic(
+            surface,
+            "The curved panorama topology must have two readable zones and one protected bridge.",
+            "The selected profile does not provide exactly two readable zones and one protected region.",
+            "Use a conservative profile with two local zones separated by one protected bridge.",
+        ));
+    }
+
+    let canvas = Rect::new(0, 0, surface.width, surface.height);
+    let zones = ordered_panorama_zones(surface);
+    let bridge = surface.protected_regions[0].bounds;
+    let bridge = Rect::new(bridge.x, bridge.y, bridge.width, bridge.height);
+
+    if bridge.width == 0 || bridge.height == 0 || !canvas.contains(bridge) {
+        return Err(surface_diagnostic(
+            surface,
+            "The protected panorama bridge is outside the canvas.",
+            "The protected region must have positive size and fit within native canvas bounds.",
+            "Keep the bridge bounded inside the selected curved profile.",
+        ));
+    }
+
+    for zone in zones {
+        let bounds = zone.bounds;
+        let bounds = Rect::new(bounds.x, bounds.y, bounds.width, bounds.height);
+        if bounds.width == 0 || bounds.height == 0 || !canvas.contains(bounds) {
+            return Err(surface_diagnostic(
+                surface,
+                "A readable panorama zone is outside the canvas.",
+                format!(
+                    "Readable zone `{}` is not a positive rectangle contained by the canvas.",
+                    zone.name
+                ),
+                "Keep both readable zones bounded inside the native surface.",
+            ));
+        }
+        if bounds.overlaps(bridge) {
+            return Err(surface_diagnostic(
+                surface,
+                "A readable panorama zone enters the protected bridge.",
+                format!("Readable zone `{}` overlaps the protected bridge interior.", zone.name),
+                "Move the zone to the bridge edge; touching the edge is allowed, but interior overlap is not.",
+            ));
+        }
+    }
+
+    let left = Rect::new(
+        zones[0].bounds.x,
+        zones[0].bounds.y,
+        zones[0].bounds.width,
+        zones[0].bounds.height,
+    );
+    let right = Rect::new(
+        zones[1].bounds.x,
+        zones[1].bounds.y,
+        zones[1].bounds.width,
+        zones[1].bounds.height,
+    );
+    if left.overlaps(right) {
+        return Err(surface_diagnostic(
+            surface,
+            "Readable panorama zones overlap.",
+            "The two local readable zones must remain disjoint.",
+            "Separate the zones and keep their interiors outside the bridge.",
+        ));
+    }
+
+    Ok(canvas)
+}
+
+/// Inset content bounds for one local panorama zone.
+pub(crate) fn panorama_zone_content_bounds(
+    surface: &DisplaySurfaceProfile,
+    zone: super::surface::SurfaceZone,
+) -> Rect {
+    let inset = content_inset_for_surface(surface);
+    let double_inset = inset.saturating_mul(2);
+    Rect::new(
+        zone.bounds.x.saturating_add(inset),
+        zone.bounds.y.saturating_add(inset),
+        zone.bounds.width.saturating_sub(double_inset),
+        zone.bounds.height.saturating_sub(double_inset),
+    )
+}
+
+pub(crate) fn panorama_zone_capacity(
+    surface: &DisplaySurfaceProfile,
+    zone: super::surface::SurfaceZone,
+    card_extent: u32,
+) -> usize {
+    let bounds = panorama_zone_content_bounds(surface, zone);
+    if card_extent == 0 || bounds.width < CARD_MIN_EXTENT {
+        return 0;
+    }
+    usize::try_from(u64::from(bounds.height) / u64::from(card_extent)).unwrap_or(usize::MAX)
+}
+
+pub(crate) fn zone_overflow_diagnostic(
+    surface: &DisplaySurfaceProfile,
+    zone: &str,
+    count: usize,
+    capacity: usize,
+) -> LayoutDiagnostic {
+    let mut diagnostic = LayoutDiagnostic::new(
+        ZONE_OVERFLOW_CODE,
+        DiagnosticSeverity::Error,
+        "Curved panorama zone capacity exceeded",
+        format!(
+            "Readable zone `{zone}` cannot place {count} local modules within capacity {capacity}; modules must not spill through the protected bridge.",
+        ),
+        "Remove or reorder modules so each readable zone stays within its local capacity.",
+    );
+    diagnostic.profile = Some(surface.id.as_str().to_owned());
+    diagnostic.property_path = Some(format!("zones.{zone}.modules"));
+    diagnostic
+}
+
+fn bridge_policy_diagnostic(surface: &DisplaySurfaceProfile, policy: &str) -> LayoutDiagnostic {
+    let mut diagnostic = LayoutDiagnostic::new(
+        BRIDGE_VIOLATION_CODE,
+        DiagnosticSeverity::Error,
+        "Unsafe curved panorama bridge policy",
+        format!("Bridge policy `{policy}` is not a supported explicit opt-in."),
+        "Use `local-only`, `media-only`, or `explicit-capable`; only capable modules may span.",
+    );
+    diagnostic.profile = Some(surface.id.as_str().to_owned());
+    diagnostic.property_path = Some("bridge".to_owned());
+    diagnostic
 }
 
 /// Short alias for callers that do not need to spell out the rectangular
@@ -243,16 +454,22 @@ fn aspect_name(surface: &DisplaySurfaceProfile) -> &'static str {
     }
 }
 
+fn configured_profile<'a>(
+    document: &'a LayoutDocument,
+    surface: &DisplaySurfaceProfile,
+) -> Option<&'a super::document::ProfileRecipeDocument> {
+    let aspect = aspect_name(surface);
+    document
+        .profiles
+        .get(surface.id.as_str())
+        .or_else(|| document.profiles.get(aspect))
+}
+
 fn configured_recipe(
     document: &LayoutDocument,
     surface: &DisplaySurfaceProfile,
 ) -> Result<Option<RecipeKind>, Vec<LayoutDiagnostic>> {
-    let aspect = aspect_name(surface);
-    let profile = document
-        .profiles
-        .get(surface.id.as_str())
-        .or_else(|| document.profiles.get(aspect));
-    let Some(profile) = profile else {
+    let Some(profile) = configured_profile(document, surface) else {
         return Ok(None);
     };
     let Some(recipe) = RecipeKind::parse(profile.recipe.trim()) else {
@@ -395,7 +612,7 @@ mod tests {
 
     use super::*;
     use crate::layout_engine::document::{
-        CURRENT_VERSION, LayoutDocument, MetricDocument, ModuleDocument, ProfileRecipeDocument,
+        LayoutDocument, MetricDocument, ModuleDocument, ProfileRecipeDocument, CURRENT_VERSION,
     };
     use crate::layout_engine::surface::rectangular_surface_profile;
 

@@ -67,6 +67,15 @@ impl SurfaceBounds {
         self.y.saturating_add(self.height)
     }
 
+    /// Return whether two bounds overlap in their positive-area interiors.
+    /// Edge contact is not overlap, which keeps protected boundaries usable.
+    pub const fn overlaps(self, other: Self) -> bool {
+        self.x < other.right()
+            && other.x < self.right()
+            && self.y < other.bottom()
+            && other.y < self.bottom()
+    }
+
     pub const fn contains(self, x: u32, y: u32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
@@ -303,6 +312,16 @@ mod tests {
         assert_eq!(bridge.right(), right.x);
         assert_eq!(left.bottom(), 1080);
         assert_eq!(right.bottom(), 1080);
+    }
+
+    #[test]
+    fn protected_bridge_edge_contact_is_safe_but_interior_overlap_is_not() {
+        let left = SurfaceBounds::new(0, 0, 960, 1080);
+        let bridge = SurfaceBounds::new(960, 0, 480, 1080);
+        let interior = SurfaceBounds::new(959, 0, 481, 1080);
+
+        assert!(!left.overlaps(bridge));
+        assert!(interior.overlaps(bridge));
     }
 
     #[test]

@@ -1,9 +1,9 @@
-//! Deterministic rectangular layout recipes.
+//! Deterministic layout recipes for rectangular and curved-panorama surfaces.
 //!
 //! The solver deliberately keeps the authoring model small: modules are ordered
-//! in the document and a recipe places them on a bounded rectangular surface.
-//! It never accepts coordinates from an owner, grows a card to consume leftover
-//! space, or guesses at curved-display geometry.
+//! in the document and a recipe places them on bounded surface regions. It never
+//! accepts coordinates from an owner, grows a card to consume leftover space, or
+//! guesses at curved-display geometry.
 
 use std::fmt;
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::diagnostic::LayoutDiagnostic;
 use super::document::{LayoutDocument, ModuleDocument};
-use super::surface::DisplaySurfaceProfile;
+use super::surface::{DisplaySurfaceProfile, SurfaceZone};
 use super::validation;
 
 /// The base content inset used by the 480-pixel display fixtures.
@@ -48,8 +48,47 @@ pub enum RecipeKind {
     /// Place fixed-width modules in two horizontal tracks, adding rows as
     /// needed while preserving document order.
     TwoColumn,
-    /// Reserved for the curved-display phase; this task does not solve it.
+    /// Place ordered modules into the readable zones of a curved panorama.
     ZonedPanorama,
+}
+
+/// Policy controlling which typed modules may span a protected panorama bridge.
+///
+/// A policy is only one half of the spanning decision: the module must also
+/// advertise the corresponding capability. The current typed catalog grants that
+/// capability to media modules; metrics, sparklines, and text remain local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgePolicy {
+    /// Keep every module inside one readable zone.
+    LocalOnly,
+    /// Permit capable media modules to span when explicitly selected.
+    MediaOnly,
+    /// Permit any future module with an explicit bridge capability to span.
+    ExplicitCapable,
+}
+
+impl BridgePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalOnly => "local-only",
+            Self::MediaOnly => "media-only",
+            Self::ExplicitCapable => "explicit-capable",
+        }
+    }
+
+    pub(crate) const fn can_span(self, module: &ModuleDocument) -> bool {
+        match self {
+            Self::LocalOnly => false,
+            Self::MediaOnly | Self::ExplicitCapable => matches!(module, ModuleDocument::Media(_)),
+        }
+    }
+}
+
+impl fmt::Display for BridgePolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl RecipeKind {
@@ -144,33 +183,37 @@ pub struct SolvedLayout {
     pub modules: Vec<SolvedModule>,
 }
 
-/// Solve a typed layout document for a rectangular display profile.
+/// Solve a typed layout document for a bounded display profile.
 ///
 /// Square and portrait surfaces select [`RecipeKind::Column`]; wide surfaces
-/// select [`RecipeKind::TwoColumn`].  A profile may make that choice explicit
-/// in the document, but cannot override the aspect-class rule.  Module order
-/// is preserved exactly.  Fixed module extents use space-between placement:
-/// leftover pixels become equal inter-module gaps, while the first and last
-/// modules remain on the content edges.
-///
-/// Curved surfaces and [`RecipeKind::ZonedPanorama`] are intentionally rejected
-/// with a stable diagnostic until the separate curved solver is implemented.
+/// select [`RecipeKind::TwoColumn`]. An explicitly configured curved profile
+/// selects [`RecipeKind::ZonedPanorama`], preserving local module order while
+/// keeping non-spanning modules out of its protected bridge.
 pub fn solve(
     document: &LayoutDocument,
     surface: &DisplaySurfaceProfile,
 ) -> Result<SolvedLayout, Vec<LayoutDiagnostic>> {
-    let recipe = validation::validate_rectangular_recipe(document, surface)?;
-    let bounds = validation::rectangular_content_bounds(surface)
-        .expect("validated rectangular surface must provide content bounds");
-    let card_extent = card_extent_for_surface(surface);
-
-    let modules = match recipe {
-        RecipeKind::Column => solve_column(document, bounds, card_extent),
-        RecipeKind::TwoColumn => solve_two_column(document, surface, bounds, card_extent),
-        // Validation owns this branch and always rejects it.  Keeping the
-        // branch explicit makes the unsupported curved boundary impossible to
-        // accidentally turn into invented geometry later.
-        RecipeKind::ZonedPanorama => unreachable!("zoned-panorama is rejected by validation"),
+    let recipe = validation::validate(document, surface)?;
+    let (bounds, modules) = match recipe {
+        RecipeKind::Column => {
+            let bounds = validation::rectangular_content_bounds(surface)
+                .expect("validated rectangular surface must provide content bounds");
+            let card_extent = card_extent_for_surface(surface);
+            (bounds, solve_column(document, bounds, card_extent))
+        }
+        RecipeKind::TwoColumn => {
+            let bounds = validation::rectangular_content_bounds(surface)
+                .expect("validated rectangular surface must provide content bounds");
+            let card_extent = card_extent_for_surface(surface);
+            (
+                bounds,
+                solve_two_column(document, surface, bounds, card_extent),
+            )
+        }
+        RecipeKind::ZonedPanorama => {
+            let bounds = Rect::new(0, 0, surface.width, surface.height);
+            (bounds, solve_zoned_panorama(document, surface)?)
+        }
     };
 
     Ok(SolvedLayout {
@@ -180,6 +223,76 @@ pub fn solve(
     })
 }
 
+fn solve_zoned_panorama(
+    document: &LayoutDocument,
+    surface: &DisplaySurfaceProfile,
+) -> Result<Vec<SolvedModule>, Vec<LayoutDiagnostic>> {
+    let policy = validation::panorama_bridge_policy(document, surface)
+        .map_err(|diagnostic| vec![diagnostic])?;
+    let zones = ordered_panorama_zones(surface);
+    let card_extent = card_extent_for_surface(surface);
+    let mut assignments = [Vec::new(), Vec::new()];
+    let mut solved = vec![None; document.modules.len()];
+    let mut local_index = 0usize;
+
+    for (module_index, module) in document.modules.iter().enumerate() {
+        if policy.can_span(module) {
+            solved[module_index] = Some(SolvedModule {
+                id: module_id(module).to_owned(),
+                bounds: Rect::new(0, 0, surface.width, surface.height),
+                zone: None,
+            });
+        } else {
+            assignments[local_index % zones.len()].push(module_index);
+            local_index += 1;
+        }
+    }
+
+    for (zone_index, zone) in zones.iter().enumerate() {
+        let assignment = &assignments[zone_index];
+        let capacity = validation::panorama_zone_capacity(surface, *zone, card_extent);
+        if assignment.len() > capacity {
+            return Err(vec![validation::zone_overflow_diagnostic(
+                surface,
+                zone.name,
+                assignment.len(),
+                capacity,
+            )]);
+        }
+    }
+
+    for (zone_index, zone) in zones.iter().enumerate() {
+        let zone_bounds = validation::panorama_zone_content_bounds(surface, *zone);
+        let positions = space_between_positions(
+            zone_bounds.y,
+            zone_bounds.height,
+            card_extent,
+            assignments[zone_index].len(),
+        );
+        for (&module_index, y) in assignments[zone_index].iter().zip(positions) {
+            let module = &document.modules[module_index];
+            solved[module_index] = Some(SolvedModule {
+                id: module_id(module).to_owned(),
+                bounds: Rect::new(zone_bounds.x, y, zone_bounds.width, card_extent),
+                zone: Some(zone.name.to_owned()),
+            });
+        }
+    }
+
+    Ok(solved
+        .into_iter()
+        .map(|module| module.expect("validated panorama assignment is complete"))
+        .collect())
+}
+
+/// Return the two panorama zones in physical left-to-right order.
+pub(crate) fn ordered_panorama_zones(surface: &DisplaySurfaceProfile) -> [SurfaceZone; 2] {
+    let mut zones = [surface.readable_zones[0], surface.readable_zones[1]];
+    if zones[1].bounds.x < zones[0].bounds.x {
+        zones.swap(0, 1);
+    }
+    zones
+}
 fn solve_column(document: &LayoutDocument, bounds: Rect, card_extent: u32) -> Vec<SolvedModule> {
     let positions =
         space_between_positions(bounds.y, bounds.height, card_extent, document.modules.len());
@@ -293,11 +406,15 @@ pub(crate) fn space_between_positions(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
-    use crate::layout_engine::document::{CURRENT_VERSION, MetricDocument, ProfileRecipeDocument};
-    use crate::layout_engine::surface::rectangular_surface_profile;
+    use crate::layout_engine::document::{
+        MediaDocument, MetricDocument, ProfileRecipeDocument, TextDocument, CURRENT_VERSION,
+    };
+    use crate::layout_engine::surface::{
+        rectangular_surface_profile, resolve_surface_profile, DisplaySurfaceProfile,
+        PreviewTopology, SurfaceBounds, SurfaceProfileId, SurfaceRegion, SurfaceZone,
+    };
+    use std::collections::BTreeMap;
 
     fn document(ids: &[&str], recipe: Option<(&str, &str)>) -> LayoutDocument {
         let modules = ids
@@ -329,6 +446,185 @@ mod tests {
             modules,
             profiles,
         }
+    }
+
+    fn curved_document(modules: Vec<ModuleDocument>, bridge: Option<&str>) -> LayoutDocument {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            SurfaceProfileId::ThermalrightCurved2400x1080
+                .as_str()
+                .to_owned(),
+            ProfileRecipeDocument {
+                recipe: "zoned-panorama".to_owned(),
+                bridge: bridge.map(str::to_owned),
+            },
+        );
+        LayoutDocument {
+            version: CURRENT_VERSION,
+            name: "curved-test".to_owned(),
+            preset: None,
+            modules,
+            profiles,
+        }
+    }
+
+    fn metric(id: &str) -> ModuleDocument {
+        ModuleDocument::Metric(MetricDocument {
+            id: id.to_owned(),
+            binding: format!("{id}.value"),
+            variant: "default".to_owned(),
+        })
+    }
+
+    fn media(id: &str) -> ModuleDocument {
+        ModuleDocument::Media(MediaDocument {
+            id: id.to_owned(),
+            binding: format!("{id}.source"),
+            variant: "default".to_owned(),
+        })
+    }
+
+    fn text(id: &str) -> ModuleDocument {
+        ModuleDocument::Text(TextDocument {
+            id: id.to_owned(),
+            binding: format!("{id}.text"),
+            variant: "default".to_owned(),
+        })
+    }
+
+    #[test]
+    fn curved_panorama_assigns_ordered_modules_to_both_zones() {
+        let surface =
+            resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080)
+                .expect("curved fixture");
+        let layout = solve(
+            &curved_document(
+                vec![
+                    metric("one"),
+                    metric("two"),
+                    metric("three"),
+                    metric("four"),
+                ],
+                None,
+            ),
+            surface,
+        )
+        .expect("curved solve");
+
+        assert_eq!(layout.recipe, RecipeKind::ZonedPanorama);
+        assert_eq!(layout.bounds, Rect::new(0, 0, 2400, 1080));
+        assert_eq!(
+            layout
+                .modules
+                .iter()
+                .map(|module| (module.id.as_str(), module.zone.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("one", Some("left-readable")),
+                ("two", Some("right-readable")),
+                ("three", Some("left-readable")),
+                ("four", Some("right-readable")),
+            ],
+        );
+        assert!(layout
+            .modules
+            .iter()
+            .all(|module| { module.bounds.x < 960 || module.bounds.x >= 1440 }));
+    }
+
+    #[test]
+    fn curved_panorama_normalizes_reversed_zone_declaration_order() {
+        static ZONES: [SurfaceZone; 2] = [
+            SurfaceZone::new("right-readable", SurfaceBounds::new(1440, 0, 960, 1080)),
+            SurfaceZone::new("left-readable", SurfaceBounds::new(0, 0, 960, 1080)),
+        ];
+        static BRIDGE: [SurfaceRegion; 1] = [SurfaceRegion::new(
+            "center-bridge",
+            SurfaceBounds::new(960, 0, 480, 1080),
+        )];
+        static SURFACE: DisplaySurfaceProfile = DisplaySurfaceProfile {
+            id: SurfaceProfileId::ThermalrightCurved2400x1080,
+            width: 2400,
+            height: 1080,
+            readable_zones: &ZONES,
+            protected_regions: &BRIDGE,
+            preview: PreviewTopology::CurvedPanorama,
+        };
+
+        let layout = solve(
+            &curved_document(vec![metric("left-first"), metric("right-second")], None),
+            &SURFACE,
+        )
+        .expect("reversed zones still solve");
+        assert_eq!(layout.modules[0].zone.as_deref(), Some("left-readable"));
+        assert_eq!(layout.modules[1].zone.as_deref(), Some("right-readable"));
+    }
+
+    #[test]
+    fn capable_media_spans_only_with_explicit_opt_in() {
+        let surface =
+            resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080)
+                .expect("curved fixture");
+        let spanning = solve(
+            &curved_document(
+                vec![media("wallpaper"), metric("metric"), text("label")],
+                Some("media-only"),
+            ),
+            surface,
+        )
+        .expect("media span solve");
+        assert_eq!(spanning.modules[0].bounds, Rect::new(0, 0, 2400, 1080));
+        assert_eq!(spanning.modules[0].zone, None);
+        assert!(spanning.modules[1].bounds.x < 960);
+        assert!(spanning.modules[2].bounds.x >= 1440);
+
+        let local = solve(
+            &curved_document(
+                vec![media("wallpaper"), metric("metric"), text("label")],
+                None,
+            ),
+            surface,
+        )
+        .expect("local media solve");
+        assert!(local.modules[0].bounds.x < 960);
+        assert_eq!(local.modules[0].zone.as_deref(), Some("left-readable"));
+    }
+
+    #[test]
+    fn unknown_bridge_policy_uses_new_stable_diagnostic() {
+        let surface =
+            resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080)
+                .expect("curved fixture");
+        let error = solve(
+            &curved_document(vec![metric("metric")], Some("all-modules")),
+            surface,
+        )
+        .expect_err("unknown bridge policy must be rejected");
+        assert_eq!(error[0].code, validation::BRIDGE_VIOLATION_CODE);
+        assert_ne!(error[0].code, "TWLAYOUT-E014");
+    }
+
+    #[test]
+    fn panorama_zone_overflow_is_diagnosed_without_bridge_spill() {
+        let surface =
+            resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080)
+                .expect("curved fixture");
+        let error = solve(
+            &curved_document(
+                vec![
+                    metric("one"),
+                    metric("two"),
+                    metric("three"),
+                    metric("four"),
+                    metric("five"),
+                ],
+                None,
+            ),
+            surface,
+        )
+        .expect_err("three modules in one local zone must overflow");
+        assert_eq!(error[0].code, validation::ZONE_OVERFLOW_CODE);
+        assert!(error[0].reason.contains("left-readable"));
     }
 
     #[test]
