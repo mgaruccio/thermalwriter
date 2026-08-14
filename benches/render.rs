@@ -5,10 +5,15 @@
 //! Compare workflow: `cargo bench -- --save-baseline before`, make a change,
 //! then `cargo bench -- --baseline before` to diff against the saved run.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
-use thermalwriter::config::builtin_layouts;
+use std::time::Instant;
+use thermalwriter::config::{Config, builtin_layouts};
+use thermalwriter::layout_engine::{
+    LayoutDocument, LayoutEngineRenderer, ResvgSceneBackend, SurfaceProfileId,
+    resolve_surface_profile,
+};
 use thermalwriter::render::background::decode_to_pixmap;
 use thermalwriter::render::frontmatter::LayoutFrontmatter;
 use thermalwriter::render::svg::{SvgRenderer, composite, parse_svg, rasterize};
@@ -133,11 +138,174 @@ fn bench_raw_frame_from_pixmap(c: &mut Criterion) {
     });
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TargetProfile {
+    id: &'static str,
+    width: u32,
+    height: u32,
+    surface_id: SurfaceProfileId,
+}
+
+impl TargetProfile {
+    const fn pixels(self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+}
+
+const TARGET_PROFILES: &[TargetProfile] = &[
+    TargetProfile {
+        id: "square",
+        width: 480,
+        height: 480,
+        surface_id: SurfaceProfileId::Rectangular,
+    },
+    TargetProfile {
+        id: "portrait",
+        width: 480,
+        height: 1280,
+        surface_id: SurfaceProfileId::Rectangular,
+    },
+    TargetProfile {
+        id: "wide",
+        width: 1280,
+        height: 480,
+        surface_id: SurfaceProfileId::Rectangular,
+    },
+    TargetProfile {
+        id: "thermalright-curved-2400x1080",
+        width: 2400,
+        height: 1080,
+        surface_id: SurfaceProfileId::ThermalrightCurved2400x1080,
+    },
+];
+
+#[derive(Debug)]
+struct ProfileMeasurement {
+    profile: TargetProfile,
+    median_ms: f64,
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    assert!(
+        !values.is_empty(),
+        "Criterion did not produce timing samples"
+    );
+    values.sort_by(|left, right| left.total_cmp(right));
+    values[values.len() / 2]
+}
+
+fn build_layout_engine_renderer(profile: TargetProfile) -> LayoutEngineRenderer<ResvgSceneBackend> {
+    let document = LayoutDocument::from_toml(builtin_layouts::NEON_COMPOSER)
+        .expect("flagship layout document should parse");
+    let surface = resolve_surface_profile(profile.width, profile.height, profile.surface_id)
+        .expect("target profile should be registered");
+    LayoutEngineRenderer::new(document, *surface, ResvgSceneBackend)
+}
+
+/// Measure the flagship document through the shared LayoutEngineRenderer path at
+/// every target surface. Criterion's custom timing loop supplies both the
+/// statistical benchmark and the samples used by the normalized scaling gate.
+fn bench_layout_document_scaling(c: &mut Criterion) {
+    let sensors = mock_sensors();
+    let mut group = c.benchmark_group("layout_document_scaling");
+    group.sample_size(10);
+    let mut measurements = Vec::with_capacity(TARGET_PROFILES.len());
+
+    for &profile in TARGET_PROFILES {
+        let mut renderer = build_layout_engine_renderer(profile);
+        renderer
+            .render(&sensors)
+            .expect("flagship layout document should render during warmup");
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let recorded_samples = Arc::clone(&samples);
+
+        group.throughput(Throughput::Elements(profile.pixels()));
+        group.bench_with_input(
+            BenchmarkId::new("layout_document", profile.id),
+            &profile,
+            |b, _profile| {
+                b.iter_custom(|iters| {
+                    let started = Instant::now();
+                    for _ in 0..iters {
+                        black_box(
+                            renderer
+                                .render(black_box(&sensors))
+                                .expect("flagship layout document should render"),
+                        );
+                    }
+                    let elapsed = started.elapsed();
+                    let per_iter_ms = elapsed.as_secs_f64() * 1_000.0 / iters as f64;
+                    recorded_samples.lock().unwrap().push(per_iter_ms);
+                    elapsed
+                });
+            },
+        );
+        drop(recorded_samples);
+
+        let mut samples = Arc::try_unwrap(samples)
+            .expect("Criterion timing samples should have one owner")
+            .into_inner()
+            .unwrap();
+        measurements.push(ProfileMeasurement {
+            profile,
+            median_ms: median(&mut samples),
+        });
+    }
+    group.finish();
+
+    let tick_rate = Config::default().display.tick_rate;
+    assert!(tick_rate > 0, "default display tick rate must be positive");
+    let tick_deadline_ms = 1_000.0 / f64::from(tick_rate);
+    let square = measurements
+        .first()
+        .expect("target profile matrix must include the square baseline");
+    let square_pixels = square.profile.pixels() as f64;
+
+    eprintln!(
+        "layout_engine_scaling backend=resvg tick_rate={}fps tick_deadline_ms={:.3}",
+        tick_rate, tick_deadline_ms
+    );
+    for measurement in &measurements {
+        let pixels = measurement.profile.pixels() as f64;
+        let ms_per_megapixel = measurement.median_ms * 1_000_000.0 / pixels;
+        let latency_ratio = measurement.median_ms / square.median_ms;
+        let pixel_ratio = pixels / square_pixels;
+        let allowed_ratio = 1.30 * pixel_ratio;
+        let scaling_pass = latency_ratio <= allowed_ratio;
+        let tick_pass = measurement.median_ms <= tick_deadline_ms;
+
+        eprintln!(
+            "layout_engine_scaling profile={} dimensions={}x{} latency_ms={:.3} ms_per_megapixel={:.3} scaling_ratio={:.3}/{:.3} scaling={} tick={}",
+            measurement.profile.id,
+            measurement.profile.width,
+            measurement.profile.height,
+            measurement.median_ms,
+            ms_per_megapixel,
+            latency_ratio,
+            allowed_ratio,
+            if scaling_pass { "PASS" } else { "FAIL" },
+            if tick_pass { "PASS" } else { "FAIL" },
+        );
+
+        assert!(
+            scaling_pass,
+            "resvg pixel-scaling gate failed for {}: latency ratio {:.3} > allowed {:.3}",
+            measurement.profile.id, latency_ratio, allowed_ratio
+        );
+        assert!(
+            tick_pass,
+            "resvg tick deadline failed for {}: {:.3} ms > {:.3} ms",
+            measurement.profile.id, measurement.median_ms, tick_deadline_ms
+        );
+    }
+}
+
 criterion_group!(
     benches,
     bench_full_render_per_layout,
     bench_render_sub_stages,
     bench_decode_background,
-    bench_raw_frame_from_pixmap
+    bench_raw_frame_from_pixmap,
+    bench_layout_document_scaling
 );
 criterion_main!(benches);

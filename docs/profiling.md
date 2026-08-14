@@ -4,6 +4,8 @@ This is the working README for keeping `thermalwriter` lightweight. It covers
 the two profiling layers in this repo, how to run them safely, what each output
 means, and the repeatable autoresearch loop to use when chasing a regression.
 
+> **Layout-engine backend gate: PASS (resvg).** The flagship `neon-composer` document passed the pixel-scaling and default display-tick gates with `cargo bench --bench render -- --quick layout_document_scaling`; the run measured 480×480 **1.143 ms / 4.962 ms/MP**, 480×1280 **1.343 ms / 2.186 ms/MP**, 1280×480 **1.338 ms / 2.178 ms/MP**, and 2400×1080 curved **5.432 ms / 2.096 ms/MP**. Each result stayed below the 500 ms (2 FPS) default tick deadline, and no direct tiny-skia backend switch is required. These are host-specific gate measurements, not an automatic refresh of the human interpretation baselines.
+
 Use the two layers for different questions:
 
 | Tool | Command | Answers | Best for |
