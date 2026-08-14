@@ -25,6 +25,16 @@ cargo run --example preview_layout -- --matrix layouts/neon-composer.layout.toml
 
 The command validates all requested targets before rendering and prints exact native PNG paths. Use `--format json` when an agent needs stable diagnostic fields. A passing command still requires visual inspection.
 
+## Agent bootstrap and self-review
+
+Use the copyable [layout-agent bootstrap prompt](./references/bootstrap-prompt.md) when asking a model to design a typed layout. For repository-capable work, recommend a coding agent such as OpenAI Codex or Claude Code, but do not assume that the current chat has a repository, shell, GUI, image viewer, hidden system prompt, or LLM service.
+
+The capable-agent loop is mandatory: **generate → validate → preview all targets → open every generated PNG and inspect the actual native output → revise → repeat**. Run the real preview example's deterministic validation (`--format json --profile ...`) and then the full square/portrait/wide/`thermalright-curved-2400x1080` matrix; fix diagnostics before reviewing pixels. A passing exit status or generated file is not visual proof.
+
+The paste-only branch must work without repository or tool access. Ask the user to paste the current `.layout.toml`, `Copy Error`, `Copy Preview Image` for each target (or the actual images), and `Copy Design Context`; reason from those artifacts and request the next paste after each revision. Never claim to have run a command or opened an image when you could not.
+
+Deterministic validation and the native preview matrix are the landed authoring checks. Human or vision review can be an optional release-quality supplement, but a vision gate is **not landed** and preview output must never be auto-accepted. See the bootstrap prompt for the complete hand-off wording and washed-out LCD/curved-topology checklist.
+
 ## The visual goal
 
 **Attractive is more important than informational.** Thermalright panels are compact and can look washed out inside a case. Design for a consumer display such as CAM or iCUE, not a terminal wall: bold hierarchy, a dark tinted background, a few large values, and clear accent colors.
