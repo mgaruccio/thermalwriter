@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Typed `.layout.toml` layout composer: Metric, Sparkline, Text, and Media modules with square, portrait, wide, and Thermalright curved 2400×1080 profiles. Config GUI Compose tab, native preview, save/apply over D-Bus, and `preview_layout` matrix/JSON diagnostics. Leftover space stays gap; curved metrics stay in readable zones unless media explicitly spans the bridge. Authoring reference in `skills/designing-layouts/references/layout-toml.md`.
+- Config GUI desktop launcher (`Thermalwriter Config`) installed to `~/.local/share/applications` by `packaging/install.sh` when `thermalwriter-gui` is present.
 
 - Discover HID Type2 interrupt endpoints; local `0416:5302` negotiates PM128/SUB1 at 1280×480 (active cards still conservative-stop).
 - Independent multi-display via `[[displays]]`: bind distinct `VID:PID` targets with per-output layout/mode/rotation while keeping `display.device = "all"` mirror mode.
