@@ -1252,6 +1252,7 @@ fn discovered_for_selector(
         Err(error) => {
             #[cfg(test)]
             {
+                let _ = &error;
                 return crate::transport::discovery::discovered_bulk_from_fingerprint(
                     vid,
                     pid,
