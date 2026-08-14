@@ -3,6 +3,22 @@
   import { invoke } from "@tauri-apps/api/core";
   import BgGallery from "./lib/BgGallery.svelte";
   import StreamTab from "./lib/StreamTab.svelte";
+  import LayoutComposer from "./lib/layout/LayoutComposer.svelte";
+  import LayoutPreview from "./lib/layout/LayoutPreview.svelte";
+  import {
+    COMPOSER_PRESETS,
+    createModule,
+    normalizeLayoutName,
+    type ComposerSaveState,
+    type LayoutApplyResponse,
+    type LayoutDocument,
+    type LayoutDocumentResponse,
+    type LayoutPreviewResponse,
+    type LayoutPreset,
+    type LayoutSaveResponse,
+    type ModuleKind,
+    type ModuleReorderDirection,
+  } from "./lib/layout/types";
   import { bumpRevision, isCurrentRevision } from "./lib/asyncSelection";
 
   // Canonical prefix of AppError::DaemonUnavailable's serialized Display string.
@@ -44,6 +60,12 @@
     resolution: string;
   };
 
+  type NativeDimensions = {
+    width: number;
+    height: number;
+  };
+
+
   type ThemeId =
     | "tokyo-night-storm"
     | "tokyo-night"
@@ -82,7 +104,22 @@
   let daemonProbeInFlight = false;
   let daemonProbeQueued = false;
   let appMounted = false;
-  let activeTab = $state<"variables" | "stream">("variables");
+  let activeTab = $state<"variables" | "stream" | "compose">("variables");
+  let composerDraft = $state<LayoutDocument | null>(null);
+  let composerFingerprint = $state<string | null>(null);
+  let composerSavedName = $state<string | null>(null);
+  let composerSaveState = $state<ComposerSaveState>("unsaved");
+  let composerPreview = $state<LayoutPreviewResponse | null>(null);
+  let composerPreviewing = $state(false);
+  let composerLoading = $state(false);
+  let composerSaving = $state(false);
+  let composerApplying = $state(false);
+  let composerStatus = $state("");
+  let composerError = $state("");
+  let composerLoadRevision = 0;
+  let composerDraftRevision = 0;
+  let composerPreviewRevision = 0;
+  let composerPreviewTimer: number | undefined;
   let theme = $state<ThemeId>(
     (localStorage.getItem("tw-theme") as ThemeId) || "tokyo-night-storm",
   );
@@ -91,6 +128,15 @@
   const hasColorVars = $derived(variables.some((variable) => variable.type === "color"));
   const configurableLayouts = $derived(layouts.filter((l) => l.configurable));
   const previewOnlyLayouts = $derived(layouts.filter((l) => !l.configurable));
+
+  const composerLayouts = $derived(layouts.filter((layout) => layout.kind === "layout"));
+  const nativeDimensions = $derived(parseNativeDimensions(daemonStatus?.resolution));
+  const composerPreviewValid = $derived(
+    composerPreview
+      ? composerPreview.diagnostics.every((diagnostic) => diagnostic.severity !== "error") &&
+        composerPreview.rgba.length > 0
+      : null,
+  );
 
   const activeDaemonLayout = $derived(daemonStatus?.active_layout ?? "");
   const titlebarResolution = $derived((daemonStatus?.resolution || "480x480").replace("x", " × "));
@@ -148,6 +194,10 @@
       clearInterval(daemonProbeTimer);
       daemonProbeTimer = undefined;
     }
+    if (composerPreviewTimer !== undefined) {
+      window.clearTimeout(composerPreviewTimer);
+      composerPreviewTimer = undefined;
+    }
   });
 
   async function probeDaemon() {
@@ -183,6 +233,13 @@
     schedulePreview();
   });
 
+  $effect(() => {
+    const draftSnapshot = composerDraft;
+    const dimensions = nativeDimensions;
+    JSON.stringify(draftSnapshot);
+    scheduleComposerPreview(draftSnapshot, dimensions);
+  });
+
   async function selectLayout(name: string) {
     const rev = (layoutSelectionRev = bumpRevision(layoutSelectionRev));
     selectedLayout = name;
@@ -206,6 +263,240 @@
       if (selectName) selectedBackground = selectName;
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  function parseNativeDimensions(value: string | undefined): NativeDimensions | null {
+    const match = /^(\d+)\s*[x×]\s*(\d+)$/.exec(value?.trim() ?? "");
+    if (!match) return null;
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+      return null;
+    }
+    return { width, height };
+  }
+
+  function commitComposerDraft(nextDraft: LayoutDocument) {
+    composerDraft = nextDraft;
+    composerDraftRevision = bumpRevision(composerDraftRevision);
+    composerSaveState = "unsaved";
+    const nextName = normalizeLayoutName(nextDraft.name);
+    if (composerSavedName !== nextName) composerFingerprint = null;
+    composerStatus = "";
+    composerError = "";
+    composerPreview = null;
+  }
+
+  function renameDraft(name: string) {
+    if (!composerDraft || composerDraft.name === name) return;
+    commitComposerDraft({ ...composerDraft, name });
+  }
+
+  function addModule(kind: ModuleKind) {
+    if (!composerDraft) return;
+    const module = createModule(kind, composerDraft.modules);
+    commitComposerDraft({ ...composerDraft, modules: [...composerDraft.modules, module] });
+  }
+
+  function removeModule(id: string) {
+    if (!composerDraft || !composerDraft.modules.some((module) => module.id === id)) return;
+    commitComposerDraft({
+      ...composerDraft,
+      modules: composerDraft.modules.filter((module) => module.id !== id),
+    });
+  }
+
+  function reorderModule(id: string, direction: ModuleReorderDirection) {
+    if (!composerDraft) return;
+    const modules = [...composerDraft.modules];
+    const index = modules.findIndex((module) => module.id === id);
+    const destination = direction === "up" ? index - 1 : index + 1;
+    if (index < 0 || destination < 0 || destination >= modules.length) return;
+    [modules[index], modules[destination]] = [modules[destination], modules[index]];
+    commitComposerDraft({ ...composerDraft, modules });
+  }
+
+  function rememberSavedLayout(name: string) {
+    const filename = `${name}.layout.toml`;
+    if (layouts.some((layout) => layout.name === filename)) return;
+    layouts = [...layouts, { name: filename, kind: "layout", configurable: false }];
+  }
+
+  async function createFromPreset(preset: LayoutPreset, requestedName: string) {
+    const revision = (composerLoadRevision = bumpRevision(composerLoadRevision));
+    const draftRevision = composerDraftRevision;
+    composerLoading = true;
+    composerStatus = `Loading ${preset.label}…`;
+    composerError = "";
+    try {
+      const response = await invoke<LayoutDocumentResponse>("load_layout_preset", {
+        preset: preset.id,
+      });
+      if (
+        !isCurrentRevision(revision, composerLoadRevision) ||
+        !isCurrentRevision(draftRevision, composerDraftRevision)
+      ) {
+        return;
+      }
+      const name = normalizeLayoutName(requestedName) || response.document.name || preset.id;
+      composerDraft = { ...response.document, name };
+      composerFingerprint = null;
+      composerSavedName = null;
+      composerSaveState = "unsaved";
+      composerDraftRevision = bumpRevision(composerDraftRevision);
+      composerPreviewRevision = bumpRevision(composerPreviewRevision);
+      composerPreview = null;
+      composerStatus = `Created ${name} from ${preset.label}. Arrange modules, then save when ready.`;
+    } catch (e) {
+      if (isCurrentRevision(revision, composerLoadRevision)) composerError = String(e);
+    } finally {
+      if (isCurrentRevision(revision, composerLoadRevision)) composerLoading = false;
+    }
+  }
+
+  async function reopenDocument(name: string) {
+    const revision = (composerLoadRevision = bumpRevision(composerLoadRevision));
+    const draftRevision = composerDraftRevision;
+    composerLoading = true;
+    composerStatus = `Opening ${name.replace(/\.layout\.toml$/i, "")}…`;
+    composerError = "";
+    try {
+      const response = await invoke<LayoutDocumentResponse>("load_layout_document", { name });
+      if (
+        !isCurrentRevision(revision, composerLoadRevision) ||
+        !isCurrentRevision(draftRevision, composerDraftRevision)
+      ) {
+        return;
+      }
+      const savedName = normalizeLayoutName(response.document.name || name);
+      composerDraft = { ...response.document, name: savedName };
+      composerFingerprint = response.document_fingerprint;
+      composerSavedName = savedName;
+      composerSaveState = "saved";
+      composerDraftRevision = bumpRevision(composerDraftRevision);
+      composerPreviewRevision = bumpRevision(composerPreviewRevision);
+      composerPreview = null;
+      composerStatus = `Reopened ${savedName}. Module order is preserved from disk.`;
+    } catch (e) {
+      if (isCurrentRevision(revision, composerLoadRevision)) composerError = String(e);
+    } finally {
+      if (isCurrentRevision(revision, composerLoadRevision)) composerLoading = false;
+    }
+  }
+
+  function scheduleComposerPreview(
+    draftSnapshot: LayoutDocument | null,
+    dimensions: NativeDimensions | null,
+  ) {
+    if (composerPreviewTimer !== undefined) window.clearTimeout(composerPreviewTimer);
+    composerPreviewTimer = undefined;
+    if (activeTab !== "compose" || !draftSnapshot || !dimensions) return;
+    composerPreviewTimer = window.setTimeout(() => {
+      composerPreviewTimer = undefined;
+      void renderComposerPreview(draftSnapshot, dimensions);
+    }, 120);
+  }
+
+  async function renderComposerPreview(draftSnapshot: LayoutDocument, dimensions: NativeDimensions) {
+    const revision = (composerPreviewRevision = bumpRevision(composerPreviewRevision));
+    const draftRevision = composerDraftRevision;
+    composerPreviewing = true;
+    composerError = "";
+    try {
+      const response = await invoke<LayoutPreviewResponse>("preview_layout_document", {
+        draft: draftSnapshot,
+        profile: "rectangular",
+        width: dimensions.width,
+        height: dimensions.height,
+      });
+      if (
+        !isCurrentRevision(revision, composerPreviewRevision) ||
+        !isCurrentRevision(draftRevision, composerDraftRevision)
+      ) {
+        return;
+      }
+      composerPreview = response;
+    } catch (e) {
+      if (isCurrentRevision(revision, composerPreviewRevision)) {
+        composerPreview = null;
+        composerError = String(e);
+      }
+    } finally {
+      if (isCurrentRevision(revision, composerPreviewRevision)) composerPreviewing = false;
+    }
+  }
+
+  async function saveDraft() {
+    const draftSnapshot = composerDraft;
+    if (!draftSnapshot || composerSaving || composerApplying) return;
+    const name = normalizeLayoutName(draftSnapshot.name);
+    if (!name) {
+      composerError = "Give this layout a name before saving.";
+      return;
+    }
+    const revision = composerDraftRevision;
+    const expectedFingerprint = composerSavedName === name ? composerFingerprint : null;
+    composerSaving = true;
+    composerStatus = "Saving typed layout…";
+    composerError = "";
+    try {
+      const response = await invoke<LayoutSaveResponse>("save_layout_document", {
+        name,
+        expected_fingerprint: expectedFingerprint,
+        draft: { ...draftSnapshot, name },
+      });
+      if (!isCurrentRevision(revision, composerDraftRevision)) return;
+      composerDraft = { ...draftSnapshot, name: response.name };
+      composerPreviewRevision = bumpRevision(composerPreviewRevision);
+      composerFingerprint = response.document_fingerprint;
+      composerSavedName = response.name;
+      composerSaveState = "saved";
+      composerStatus = `Saved ${response.name}. You can reopen it any time.`;
+      rememberSavedLayout(response.name);
+    } catch (e) {
+      if (isCurrentRevision(revision, composerDraftRevision)) composerError = String(e);
+    } finally {
+      if (isCurrentRevision(revision, composerDraftRevision)) composerSaving = false;
+    }
+  }
+
+  async function applyDraft() {
+    const draftSnapshot = composerDraft;
+    if (!draftSnapshot || composerSaving || composerApplying) return;
+    const name = normalizeLayoutName(draftSnapshot.name);
+    if (!name) {
+      composerError = "Give this layout a name before activating.";
+      return;
+    }
+    const revision = composerDraftRevision;
+    const expectedFingerprint = composerSavedName === name ? composerFingerprint : null;
+    composerApplying = true;
+    composerStatus = "Saving and activating typed layout…";
+    composerError = "";
+    try {
+      const response = await invoke<LayoutApplyResponse>("apply_layout_document", {
+        name,
+        expected_fingerprint: expectedFingerprint,
+        draft: { ...draftSnapshot, name },
+      });
+      if (!isCurrentRevision(revision, composerDraftRevision)) return;
+      composerDraft = { ...draftSnapshot, name: response.saved.name };
+      composerPreviewRevision = bumpRevision(composerPreviewRevision);
+      composerFingerprint = response.saved.document_fingerprint;
+      composerSavedName = response.saved.name;
+      rememberSavedLayout(response.saved.name);
+      if (response.activation.state === "active") {
+        composerSaveState = "active";
+        composerStatus = `Active on the device: ${response.saved.name}.`;
+      } else {
+        composerSaveState = "saved";
+        composerStatus = `Saved ${response.saved.name}, but activation was not completed: ${response.activation.reason}`;
+      }
+    } catch (e) {
+      if (isCurrentRevision(revision, composerDraftRevision)) composerError = String(e);
+    } finally {
+      if (isCurrentRevision(revision, composerDraftRevision)) composerApplying = false;
     }
   }
 
@@ -310,6 +601,18 @@
     return "kind-svg";
   }
 
+  function displayLayoutName(name: string): string {
+    return name.replace(/\.(?:layout\.toml|svg|html)$/i, "");
+  }
+
+  function layoutKindLabel(kind: string): string {
+    if (kind === "layout") return "Composer";
+    if (kind === "svg") return "Display";
+    if (kind === "html") return "Web";
+    if (kind === "xvfb") return "Stream";
+    return kind;
+  }
+
   function formatSensorCost(costUs: number): string {
     if (!costUs || costUs <= 0) return "~0 µs";
     if (costUs < 1000) return `${Math.round(costUs)} µs`;
@@ -400,8 +703,8 @@
                   onclick={() => selectLayout(layout.name)}
                 >
                   <span class="kind-dot"></span>
-                  <span class="name">{layout.name}</span>
-                  <span class="meta">{layout.kind}</span>
+                  <span class="name">{displayLayoutName(layout.name)}</span>
+                  <span class="meta">{layoutKindLabel(layout.kind)}</span>
                 </button>
               {/each}
             </div>
@@ -421,8 +724,8 @@
                   onclick={() => selectLayout(layout.name)}
                 >
                   <span class="kind-dot"></span>
-                  <span class="name">{layout.name}</span>
-                  <span class="meta">{layout.kind}</span>
+                  <span class="name">{displayLayoutName(layout.name)}</span>
+                  <span class="meta">{layoutKindLabel(layout.kind)}</span>
                 </button>
               {/each}
             </div>
@@ -441,36 +744,58 @@
       </div>
     </section>
 
-    <!-- ───────── Preview ───────── -->
+    <!-- ───────── Preview pane ───────── -->
     <section class="panel preview-pane">
       <div class="panel-header">
         <div class="panel-title">
           <span class="marker">&#x25c9;</span>
-          <span>Live preview</span>
+          <span>{activeTab === "compose" ? "Composition preview" : "Live preview"}</span>
         </div>
         <div class="panel-title" style="color: var(--text-dim)">
-          <span>{previewing ? "RENDER" : "READY"}</span>
+          <span>
+            {activeTab === "compose"
+              ? composerPreviewing
+                ? "PREVIEWING"
+                : composerPreviewValid === false
+                  ? "CHECK"
+                  : composerPreviewValid === null
+                    ? "WAITING"
+                    : "READY"
+              : previewing
+                ? "RENDER"
+                : "READY"}
+          </span>
         </div>
       </div>
       <div class="panel-body">
-        <div class="canvas-wrap">
-          <div class="canvas-frame">
-            <canvas bind:this={canvas} width="480" height="480"></canvas>
+        {#if activeTab === "compose"}
+          <LayoutPreview
+            preview={composerPreview}
+            previewing={composerPreviewing}
+            draftName={composerDraft?.name ?? ""}
+            saveState={composerSaveState}
+            nativeDimensionsAvailable={nativeDimensions !== null}
+            error={composerError}
+          />
+        {:else}
+          <div class="canvas-wrap">
+            <div class="canvas-frame">
+              <canvas bind:this={canvas} width="480" height="480"></canvas>
+            </div>
           </div>
-        </div>
-
-        <div class="preview-meta">
-          <span class="layout-name">{selectedLayout || "— no layout —"}</span>
-          <span class="meta-mid">
-            <span class="dot"></span>
-            <span>{selected?.kind ?? "—"}</span>
-            <span class="dot"></span>
-            <span>{selected?.configurable ? "editable" : "preview-only"}</span>
-          </span>
-          <span class="render-status" class:busy={previewing}>
-            {previewing ? "Rendering…" : "Idle"}
-          </span>
-        </div>
+          <div class="preview-meta">
+            <span class="layout-name">{selectedLayout ? displayLayoutName(selectedLayout) : "— no layout —"}</span>
+            <span class="meta-mid">
+              <span class="dot"></span>
+              <span>{layoutKindLabel(selected?.kind ?? "—")}</span>
+              <span class="dot"></span>
+              <span>{selected?.configurable ? "editable" : "preview-only"}</span>
+            </span>
+            <span class="render-status" class:busy={previewing}>
+              {previewing ? "Rendering…" : "Idle"}
+            </span>
+          </div>
+        {/if}
       </div>
     </section>
 
@@ -486,6 +811,12 @@
               class:active={activeTab === "variables"}
               onclick={() => { activeTab = "variables"; }}
             >Variables</button>
+            <button
+              type="button"
+              class="tab-btn kind-layout"
+              class:active={activeTab === "compose"}
+              onclick={() => { activeTab = "compose"; }}
+            >Compose</button>
             <button
               type="button"
               class="tab-btn kind-xvfb"
@@ -521,7 +852,29 @@
         {/if}
       </div>
       <div class="panel-body">
-        {#if activeTab === "variables"}
+        {#if activeTab === "compose"}
+          <LayoutComposer
+            presets={COMPOSER_PRESETS}
+            savedLayouts={composerLayouts}
+            draft={composerDraft}
+            saveState={composerSaveState}
+            previewing={composerPreviewing}
+            previewValid={composerPreviewValid}
+            loading={composerLoading}
+            saving={composerSaving}
+            applying={composerApplying}
+            status={composerStatus}
+            error={composerError}
+            createFromPreset={createFromPreset}
+            reopenDocument={reopenDocument}
+            renameDraft={renameDraft}
+            addModule={addModule}
+            removeModule={removeModule}
+            reorderModule={reorderModule}
+            saveDraft={saveDraft}
+            applyDraft={applyDraft}
+          />
+        {:else if activeTab === "variables"}
           {#if !selectedLayout}
             <div class="empty">Select a layout to edit its variables.</div>
           {:else if variables.length === 0}
