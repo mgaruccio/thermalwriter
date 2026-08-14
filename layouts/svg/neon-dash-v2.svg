@@ -87,17 +87,15 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
   </g>
   {% elif is_portrait %}
   {% set m = token_margin %}
-  {% set g = token_gap %}
   {% set cw = width - m * 2 %}
-  {% set card_h = 172 %}
-  {% set used = card_h * 6 + g * 5 %}
-  {% set pad = (height - used) / 2 %}
-  {% set cpu_y = pad %}
-  {% set gpu_y = cpu_y + card_h + g %}
-  {% set ram_y = gpu_y + card_h + g %}
-  {% set vram_y = ram_y + card_h + g %}
-  {% set fps_y = vram_y + card_h + g %}
-  {% set net_y = fps_y + card_h + g %}
+  {% set card_h = token_card %}
+  {% set ys = stack(count=6, item=token_card, origin=token_margin, span=height - token_margin * 2) %}
+  {% set cpu_y = ys[0] %}
+  {% set gpu_y = ys[1] %}
+  {% set ram_y = ys[2] %}
+  {% set vram_y = ys[3] %}
+  {% set fps_y = ys[4] %}
+  {% set net_y = ys[5] %}
   {% set cpu_spark_fill = theme_primary ~ "22" %}
   {% set cpu_spark_stroke = theme_primary ~ "66" %}
   {% set gpu_spark_fill = theme_secondary ~ "22" %}

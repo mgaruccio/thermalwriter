@@ -223,6 +223,29 @@ Each declared metric becomes available as `{metric}_history` in the Tera context
 
 ---
 
+## `stack` — 1D flow (Grafana-style tracks)
+
+Returns an array of start positions. Each item has a **fixed** extent (`item`); leftover space in `span` is split equally **between** items (`space-between`). Cards do not stretch. This is the small-LCD version of Grafana auto-grid tracks (row height in units, viewport mapping) plus CSS Box Alignment `space-between`.
+
+**Required:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `count` | int | Number of items |
+| `item` | number | Fixed extent of each item (use `token_card`) |
+| `origin` | number | Start of the content box |
+| `span` | number | Length of the content box |
+
+**Optional:** `gap_min` — floor for the distributed gap.
+
+```xml
+{% set ys = stack(count=6, item=token_card, origin=token_margin, span=height - token_margin * 2) %}
+<rect x="{{ token_margin }}" y="{{ ys[0] }}" width="{{ width - token_margin * 2 }}" height="{{ token_card }}"/>
+```
+
+On overflow, gap clamps to 0 and items start-align. Prefer this over per-resolution `y` tables. A column vs row **composition** fork is still allowed; do not fork coordinates per pixel size.
+
+---
+
 ## Theme Variables
 
 Inject the active theme palette by calling `theme.inject_into_context()` (done automatically by the daemon and preview tools). Variables available in all SVG templates:

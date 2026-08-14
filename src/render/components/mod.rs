@@ -2,6 +2,7 @@ pub mod animation;
 pub mod background;
 pub mod btop;
 pub mod graph;
+pub mod stack;
 
 use tera::Tera;
 
@@ -12,4 +13,5 @@ pub fn register_all(tera: &mut Tera) {
     tera.register_function("btop_net", btop::BtopNetFunction);
     tera.register_function("btop_ram", btop::BtopRamFunction);
     tera.register_function("graph", graph::GraphFunction);
+    tera.register_function("stack", stack::StackFunction);
 }

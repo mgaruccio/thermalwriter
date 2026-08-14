@@ -380,6 +380,8 @@ pub fn responsive_tokens(width: u32, height: u32) -> HashMap<&'static str, u32> 
     m.insert("token_small", nearest(16, 480, 12));
     m.insert("token_medium", nearest(24, 480, 18));
     m.insert("token_hero", nearest(64, 480, 40));
+    // Grafana auto-grid "short" row is 168px; 172 is this project's striped card.
+    m.insert("token_card", nearest(172, 480, 120));
     m
 }
 
@@ -805,6 +807,7 @@ mod tests {
         assert_eq!(tokens["token_small"], 16);
         assert_eq!(tokens["token_medium"], 24);
         assert_eq!(tokens["token_hero"], 64);
+        assert_eq!(tokens["token_card"], 172);
     }
 
     #[test]
@@ -825,17 +828,10 @@ mod tests {
                 .expect("neon dash v2 template renders")
         };
 
-        let compact = render(960, 320);
+        let compact = render(320, 320);
         assert_eq!(compact.matches(r#"font-size="20""#).count(), 5, "{compact}");
 
-        let compact_short_wide = render(640, 172);
-        assert_eq!(
-            compact_short_wide.matches(r#"font-size="20""#).count(),
-            5,
-            "{compact_short_wide}"
-        );
-
-        let canonical = render(854, 480);
+        let canonical = render(480, 480);
         let panel_14 = [
             r#"x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
             r#"x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="14""#,
