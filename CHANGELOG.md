@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Typed `.layout.toml` layout composer: Metric, Sparkline, Text, and Media modules with square, portrait, wide, and Thermalright curved 2400×1080 profiles. Config GUI Compose tab, native preview, save/apply over D-Bus, and `preview_layout` matrix/JSON diagnostics. Leftover space stays gap; curved metrics stay in readable zones unless media explicitly spans the bridge. Authoring reference in `skills/designing-layouts/references/layout-toml.md`.
+
 - Discover HID Type2 interrupt endpoints; local `0416:5302` negotiates PM128/SUB1 at 1280×480 (active cards still conservative-stop).
 - Independent multi-display via `[[displays]]`: bind distinct `VID:PID` targets with per-output layout/mode/rotation while keeping `display.device = "all"` mirror mode.
 
@@ -17,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Type2 devices now negotiate an exact policy (PM58 hidraw vs PM128 interrupt libusb). A session that fails mid-transfer clears authorization so reconnect repeats the full gate. `validate-device` shares that PM128 claim/init path.
-- Layout engine: versioned `.layout.toml` document schema, stable diagnostics, and explicit rectangular/curved surface profiles live under `src/layout_engine/`.
+- Layout engine: typed `.layout.toml` is the new owner authoring path (shared Rust solver/renderer for GUI, `preview_layout`, and daemon). Legacy SVG/Tera and HTML files stay untouched and are not imported by Layout Studio.
 
 ### Fixed
 - Dual-display discovery: bulk `validate-device` opens the explicitly selected unit when a peer HID cooler remains attached.

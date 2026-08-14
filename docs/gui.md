@@ -13,7 +13,7 @@ While the GUI can perform several actions offline (without the daemon running), 
 ## Offline Features
 
 When the daemon is offline, the status bar will show `Daemon · Offline`. You can still:
-- **Browse and Preview layouts**: Select any layout to render a local 480x480 preview.
+- **Browse and Preview layouts**: Select any layout for a local preview. Typed `.layout.toml` compositions preview at the selected native profile (square, portrait, wide, or curved); legacy SVG/HTML layouts still preview at 480×480.
 - **Save Configuration offline**: Clicking **Apply** saves your layout variables and settings to `~/.config/thermalwriter/config.toml` so they load automatically on the next daemon start.
 
 ---

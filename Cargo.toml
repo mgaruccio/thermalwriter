@@ -32,6 +32,7 @@ include = [
     "/layouts/minimal.html",
     "/layouts/neon-dash.html",
     "/layouts/system-stats.html",
+    "/layouts/neon-composer.layout.toml",
     "/layouts/svg/**",
     "/layouts/wrappers/**",
     "/packaging/**",
@@ -45,8 +46,10 @@ include = [
     "/docs/agent-testing.md",
     "/docs/profiling.md",
     "/docs/profiling-baselines.md",
+    "/docs/layout-engine.md",
     "/docs/assets/**",
     "/skills/designing-layouts/SKILL.md",
+    "/skills/designing-layouts/references/**",
 ]
 
 [workspace]
