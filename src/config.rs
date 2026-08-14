@@ -571,7 +571,7 @@ impl Config {
     }
 }
 
-/// Built-in layout HTML content, embedded at compile time.
+/// Built-in layout content, embedded at compile time.
 pub mod builtin_layouts {
     pub const SYSTEM_STATS: &str = include_str!("../layouts/system-stats.html");
     pub const GPU_FOCUS: &str = include_str!("../layouts/gpu-focus.html");
@@ -582,6 +582,7 @@ pub mod builtin_layouts {
     pub const SVG_ARC_GAUGE: &str = include_str!("../layouts/svg/arc-gauge.svg");
     pub const SVG_CYBER_GRID: &str = include_str!("../layouts/svg/cyber-grid.svg");
     pub const SVG_NEON_DASH_V2: &str = include_str!("../layouts/svg/neon-dash-v2.svg");
+    pub const NEON_COMPOSER: &str = include_str!("../layouts/neon-composer.layout.toml");
 
     // Xvfb wrapper configs (conky + cava starter presets for LCD streaming)
     pub const WRAPPER_CONKY: &str = include_str!("../layouts/wrappers/conky-480.conf");
@@ -636,6 +637,8 @@ pub mod builtin_layouts {
         Ok(())
     }
 
+    /// Builtin layout identity used when a configured `.layout.toml` file is missing.
+    pub const FALLBACK_LAYOUT_NAME: &str = "neon-composer.layout.toml";
     /// Builtin layout identity used when a configured `.svg` file is missing.
     pub const FALLBACK_SVG_NAME: &str = "svg/neon-dash-v2.svg";
     /// Builtin layout identity used when a configured HTML file is missing.
@@ -653,6 +656,9 @@ pub mod builtin_layouts {
     ) -> (String, String) {
         match on_disk {
             Some(content) => (configured_name.to_string(), content),
+            None if configured_name.ends_with(".layout.toml") => {
+                (FALLBACK_LAYOUT_NAME.to_string(), NEON_COMPOSER.to_string())
+            }
             None if configured_name.ends_with(".svg") => {
                 (FALLBACK_SVG_NAME.to_string(), SVG_NEON_DASH_V2.to_string())
             }
@@ -672,6 +678,7 @@ pub mod builtin_layouts {
             ("svg/arc-gauge.svg", SVG_ARC_GAUGE),
             ("svg/cyber-grid.svg", SVG_CYBER_GRID),
             ("svg/neon-dash-v2.svg", SVG_NEON_DASH_V2),
+            ("neon-composer.layout.toml", NEON_COMPOSER),
         ];
         for (name, content) in &layouts {
             let dest = layout_dir.join(name);
@@ -694,6 +701,10 @@ pub mod builtin_layouts {
 mod tests {
     use super::builtin_layouts;
     use super::{Config, DisplayOutputConfig, ThemeConfig};
+    use crate::layout_engine::{
+        ModuleDocument, RecipeKind, SurfaceProfileId, rectangular_surface_profile,
+        resolve_surface_profile, solve, validate,
+    };
     use crate::render::svg::SvgRenderer;
     use crate::theme::ThemePalette;
 
@@ -726,6 +737,80 @@ mod tests {
         );
         assert_eq!(name, "svg/custom.svg");
         assert_eq!(content, "<svg></svg>");
+    }
+
+    #[test]
+    fn missing_layout_toml_falls_back_to_flagship_preset() {
+        let (name, content) =
+            builtin_layouts::resolve_layout_identity("missing/custom.layout.toml", None);
+        assert_eq!(name, builtin_layouts::FALLBACK_LAYOUT_NAME);
+        assert_eq!(content, builtin_layouts::NEON_COMPOSER);
+    }
+
+    #[test]
+    fn neon_composer_layout_is_registered_and_solves_all_profiles() {
+        let document =
+            crate::layout_engine::LayoutDocument::from_toml(builtin_layouts::NEON_COMPOSER)
+                .expect("registered flagship preset must parse");
+        assert_eq!(document.name, "neon-composer");
+        assert_eq!(document.preset.as_deref(), Some("neon-composer"));
+        assert_eq!(document.profiles.len(), 4);
+
+        let module_ids: Vec<&str> = document
+            .modules
+            .iter()
+            .map(|module| match module {
+                ModuleDocument::Metric(module) => module.id.as_str(),
+                ModuleDocument::Sparkline(module) => module.id.as_str(),
+                ModuleDocument::Text(module) => module.id.as_str(),
+                ModuleDocument::Media(module) => module.id.as_str(),
+            })
+            .collect();
+        assert_eq!(module_ids, ["cpu-temp", "history"]);
+
+        for &(width, height, expected_recipe) in &[
+            (480, 480, RecipeKind::Column),
+            (480, 1280, RecipeKind::Column),
+            (1280, 480, RecipeKind::TwoColumn),
+        ] {
+            let surface = rectangular_surface_profile(width, height).expect("fixture surface");
+            assert_eq!(
+                validate(&document, surface).expect("preset validates"),
+                expected_recipe
+            );
+            let solved = solve(&document, surface).expect("preset solves");
+            assert_eq!(solved.recipe, expected_recipe);
+            assert_eq!(solved.modules.len(), document.modules.len());
+        }
+
+        let curved =
+            resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080)
+                .expect("curved fixture surface");
+        assert_eq!(
+            validate(&document, curved).expect("curved preset validates"),
+            RecipeKind::ZonedPanorama
+        );
+        let solved = solve(&document, curved).expect("curved preset solves");
+        assert_eq!(solved.recipe, RecipeKind::ZonedPanorama);
+        assert_eq!(solved.modules[0].zone.as_deref(), Some("left-readable"));
+        assert_eq!(solved.modules[1].zone.as_deref(), Some("right-readable"));
+    }
+
+    #[test]
+    fn seed_layout_dir_registers_flagship_without_clobbering_user_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout_path = tmp.path().join("neon-composer.layout.toml");
+
+        builtin_layouts::seed_layout_dir(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&layout_path).unwrap(),
+            builtin_layouts::NEON_COMPOSER
+        );
+
+        let user_content = "# user edit\n";
+        std::fs::write(&layout_path, user_content).unwrap();
+        builtin_layouts::seed_layout_dir(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(layout_path).unwrap(), user_content);
     }
 
     #[test]

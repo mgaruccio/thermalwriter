@@ -1,0 +1,29 @@
+version = 1
+name = "neon-composer"
+preset = "neon-composer"
+
+# The flagship keeps the CPU value and its history together in document order.
+[[modules]]
+id = "cpu-temp"
+kind = "metric"
+binding = "cpu.temperature"
+variant = "hero"
+
+[[modules]]
+id = "history"
+kind = "sparkline"
+binding = "cpu.temperature.history"
+variant = "neon"
+
+[profiles.square]
+recipe = "column"
+
+[profiles.portrait]
+recipe = "column"
+
+[profiles.wide]
+recipe = "two-column"
+
+[profiles.thermalright-curved-2400x1080]
+recipe = "zoned-panorama"
+bridge = "media-only"
