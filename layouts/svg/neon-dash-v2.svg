@@ -1,5 +1,5 @@
 {# canvas: responsive #}
-{# history: cpu_temp=60s, gpu_temp=60s, ram_used=120s #}
+{# history: cpu_temp=60s, gpu_temp=60s, ram_used=120s, net_rx=60s, net_tx=60s #}
 {# vars:
 theme_primary: color = "#e94560" "CPU accent color"
 theme_secondary: color = "#53d8fb" "GPU accent color"
@@ -20,12 +20,8 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
       <stop offset="100%" stop-color="#0e0e18" stop-opacity="{{ panel_opacity }}"/>
     </linearGradient>
   </defs>
-  {% if is_portrait or is_square %}
-  {% if is_portrait %}
-  <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
-  {% else %}
+  {% if is_square %}
   <g transform="scale({{ width * 1.0 / 480 }})">
-  {% endif %}
 
   <rect x="16" y="16" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
 
@@ -89,9 +85,78 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
   <text x="394" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}16{% endif %}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ fps_label }}</text>
 
   </g>
-  {% if is_portrait and height - width > 40 %}
-  <text x="{{ width / 2 }}" y="{{ token_margin + token_label }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_accent }}">NEON DASH</text>
+  {% elif is_portrait %}
+  {% set m = token_margin %}
+  {% set g = token_gap %}
+  {% set cw = width - m * 2 %}
+  {% set hero_h = 240 %}
+  {% set mid_h = 168 %}
+  {% set net_h = 140 %}
+  {% set used = hero_h * 2 + mid_h * 2 + net_h + g * 4 %}
+  {% set extra = height - m * 2 - used %}
+  {% if extra > 0 %}
+    {% set hero_h = hero_h + extra / 2 %}
   {% endif %}
+  {% set cpu_y = m %}
+  {% set gpu_y = cpu_y + hero_h + g %}
+  {% set ram_y = gpu_y + hero_h + g %}
+  {% set fps_y = ram_y + mid_h + g %}
+  {% set net_y = fps_y + mid_h + g %}
+  {% set net_h = height - m - net_y %}
+  {% set cpu_spark_fill = theme_primary ~ "22" %}
+  {% set cpu_spark_stroke = theme_primary ~ "66" %}
+  {% set gpu_spark_fill = theme_secondary ~ "22" %}
+  {% set gpu_spark_stroke = theme_secondary ~ "66" %}
+  {% set ram_total_safe = ram_total | default(value=64.0) %}
+  {% set ram_fill = theme_accent ~ "44" %}
+
+  <rect x="{{ m }}" y="{{ cpu_y }}" width="{{ cw }}" height="{{ hero_h }}" rx="8" fill="url(#panelGrad)"/>
+  {{ graph(data=cpu_temp_history, x=m, y=cpu_y + hero_h - 88, w=cw, h=88,
+           style="area", fill=cpu_spark_fill, stroke=cpu_spark_stroke, stroke_width=1) }}
+  <rect x="{{ m }}" y="{{ cpu_y }}" width="4" height="{{ hero_h }}" rx="2" fill="{{ theme_primary }}"/>
+  <text x="{{ m + 20 }}" y="{{ cpu_y + 32 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ cpu_label }}</text>
+  {% if cpu_temp and cpu_temp | int >= 80 %}
+    <text x="{{ m + 20 }}" y="{{ cpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_critical }}" font-weight="bold">{{ cpu_temp }}°C</text>
+  {% elif cpu_temp and cpu_temp | int >= 60 %}
+    <text x="{{ m + 20 }}" y="{{ cpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_warning }}" font-weight="bold">{{ cpu_temp }}°C</text>
+  {% else %}
+    <text x="{{ m + 20 }}" y="{{ cpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_primary }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
+  {% endif %}
+  <text x="{{ m + 20 }}" y="{{ cpu_y + 32 + token_hero + token_medium + 6 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_primary }}" opacity="0.7">{{ cpu_util | default(value="--") }}% LOAD</text>
+  <text x="{{ m + cw - 16 }}" y="{{ cpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero - 12 }}" fill="{{ theme_primary }}" text-anchor="end" opacity="0.7">{{ cpu_power | default(value="--") }}W</text>
+
+  <rect x="{{ m }}" y="{{ gpu_y }}" width="{{ cw }}" height="{{ hero_h }}" rx="8" fill="url(#panelGrad)"/>
+  {{ graph(data=gpu_temp_history, x=m, y=gpu_y + hero_h - 88, w=cw, h=88,
+           style="area", fill=gpu_spark_fill, stroke=gpu_spark_stroke, stroke_width=1) }}
+  <rect x="{{ m }}" y="{{ gpu_y }}" width="4" height="{{ hero_h }}" rx="2" fill="{{ theme_secondary }}"/>
+  <text x="{{ m + 20 }}" y="{{ gpu_y + 32 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ gpu_label }}</text>
+  {% if gpu_temp and gpu_temp | int >= 80 %}
+    <text x="{{ m + 20 }}" y="{{ gpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_critical }}" font-weight="bold">{{ gpu_temp }}°C</text>
+  {% elif gpu_temp and gpu_temp | int >= 60 %}
+    <text x="{{ m + 20 }}" y="{{ gpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_warning }}" font-weight="bold">{{ gpu_temp }}°C</text>
+  {% else %}
+    <text x="{{ m + 20 }}" y="{{ gpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_secondary }}" font-weight="bold">{{ gpu_temp | default(value="--") }}°C</text>
+  {% endif %}
+  <text x="{{ m + 20 }}" y="{{ gpu_y + 32 + token_hero + token_medium + 6 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_secondary }}" opacity="0.7">{{ gpu_util | default(value="--") }}% LOAD · {{ vram_used | default(value="--") }}G</text>
+  <text x="{{ m + cw - 16 }}" y="{{ gpu_y + 32 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero - 12 }}" fill="{{ theme_secondary }}" text-anchor="end" opacity="0.7">{{ gpu_power | default(value="--") }}W</text>
+
+  <rect x="{{ m }}" y="{{ ram_y }}" width="{{ cw }}" height="{{ mid_h }}" rx="8" fill="url(#panelGrad)"/>
+  {{ btop_ram(data=ram_used_history, total=ram_total_safe, x=m, y=ram_y + 48, w=cw, h=mid_h - 48, fill=ram_fill) }}
+  <rect x="{{ m }}" y="{{ ram_y }}" width="4" height="{{ mid_h }}" rx="2" fill="{{ theme_accent }}"/>
+  <text x="{{ m + 20 }}" y="{{ ram_y + 28 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ ram_label }}</text>
+  <text x="{{ m + cw - 16 }}" y="{{ ram_y + 36 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_accent }}" text-anchor="end">{{ ram_used | default(value="--") }}G</text>
+
+  <rect x="{{ m }}" y="{{ fps_y }}" width="{{ cw }}" height="{{ mid_h }}" rx="8" fill="url(#panelGrad)"/>
+  <rect x="{{ m }}" y="{{ fps_y }}" width="4" height="{{ mid_h }}" rx="2" fill="{{ theme_accent }}"/>
+  <text x="{{ m + 20 }}" y="{{ fps_y + 28 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ fps_label }}</text>
+  <text x="{{ m + 20 }}" y="{{ fps_y + 28 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_accent }}" font-weight="bold">{{ fps | default(value="--") }}</text>
+  <text x="{{ m + cw - 16 }}" y="{{ fps_y + 28 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_accent }}" text-anchor="end" opacity="0.8">{{ frametime | default(value="--") }}ms</text>
+
+  <rect x="{{ m }}" y="{{ net_y }}" width="{{ cw }}" height="{{ net_h }}" rx="8" fill="url(#panelGrad)"/>
+  <rect x="{{ m }}" y="{{ net_y }}" width="4" height="{{ net_h }}" rx="2" fill="{{ theme_secondary }}"/>
+  <text x="{{ m + 20 }}" y="{{ net_y + 26 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">NET</text>
+  <text x="{{ m + cw - 16 }}" y="{{ net_y + 26 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_small }}" fill="{{ theme_text_dim }}" text-anchor="end">{{ net_rx | default(value="--") }}↓ {{ net_tx | default(value="--") }}↑</text>
+  {{ btop_net(rx_data=net_rx_history, tx_data=net_tx_history, x=m + 8, y=net_y + 36, w=cw - 16, h=net_h - 44, rx_color=theme_secondary, tx_color=theme_primary) }}
   {% else %}
   {% set m = token_margin %}
   {% set g = token_gap %}
