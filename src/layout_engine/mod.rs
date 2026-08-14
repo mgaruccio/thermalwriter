@@ -2,7 +2,9 @@
 
 pub mod diagnostic;
 pub mod document;
+pub mod media_cache;
 pub mod modules;
+pub mod renderer;
 pub mod scene;
 pub mod solver;
 pub mod surface;
@@ -14,11 +16,16 @@ pub use document::{
     CURRENT_VERSION, LayoutDocument, LayoutDocumentError, MediaDocument, MetricDocument,
     ModuleDocument, ProfileRecipeDocument, SparklineDocument, TextDocument,
 };
+pub use media_cache::{
+    MAX_MEDIA_ALLOC_BYTES, MAX_MEDIA_DIMENSION, MAX_MEDIA_FILE_BYTES, MEDIA_CACHE_DIAGNOSTIC_CODE,
+    MediaCache, MediaCacheKey,
+};
 pub use modules::{
     BindingValue, HistoryBinding, MediaFit, MediaModule, MetricModule, MetricVariant,
     ModuleCapabilities, ModuleEmitter, ResolvedBindings, SparklineModule, SparklineStyle,
     SparklineVariant, TextModule, ThemeTokens, ValueRange,
 };
+pub use renderer::{LayoutEngineRenderer, resolved_bindings};
 pub use scene::{
     ClipNode, Color, ImageFit, ImageNode, MIN_FOREGROUND_CHANNEL, MIN_OPACITY, MIN_TEXT_SIZE,
     PathNode, Point, RectNode, Scene, SceneNode, TextAlignment, TextNode, TextRole,
