@@ -1,91 +1,38 @@
-> **Status (2026-08-14):** This note is the historical SVG/`stack()` pickup path, **not** the current engine destination. New work lives under `src/layout_engine/`: typed `.layout.toml`, solver recipes (column / two-column / zoned-panorama), and a Config GUI module composer. Legacy SVG/Tera files stay untouched and are not a compatibility requirement. `stack()` remains only for existing templates.
+# Layout engine
 
-# Layout engine status
+> **Current destination (2026-08-14):** New layouts use the typed, bounded `.layout.toml` document and the shared module composer. The Config GUI and daemon consume the same Rust document, validator, solver, module emitters, and native preview renderer.
 
-Pickup note for standardizing SVG layout flow, then measuring performance.
-Visual polish of individual cards is out of scope here.
+Read the complete [`.layout.toml` authoring reference](../skills/designing-layouts/references/layout-toml.md) for the schema, module catalog, profile recipes, curved-surface policy, diagnostics, CLI loop, visual checklist, and typed-module extension path. The repository skill banner points to the same reference for agents and layout authors.
 
-Related: [#99](https://github.com/mgaruccio/thermalwriter/issues/99), [#100](https://github.com/mgaruccio/thermalwriter/issues/100), [#101](https://github.com/mgaruccio/thermalwriter/issues/101), [#102](https://github.com/mgaruccio/thermalwriter/issues/102), [#103](https://github.com/mgaruccio/thermalwriter/issues/103),
-`skills/designing-layouts/`, `docs/profiling.md`.
+Related: [#99](https://github.com/mgaruccio/thermalwriter/issues/99), [#100](https://github.com/mgaruccio/thermalwriter/issues/100), [#101](https://github.com/mgaruccio/thermalwriter/issues/101), [#102](https://github.com/mgaruccio/thermalwriter/issues/102), [#103](https://github.com/mgaruccio/thermalwriter/issues/103), `docs/profiling.md`.
 
-## Current answer
+## What the typed path provides
 
-**No. Auto-grid is not used for all layouts.**
+- Four bounded module kinds: `metric`, `sparkline`, `text`, and `media`.
+- Versioned TOML with `deny_unknown_fields`; no coordinates, CSS, SVG embedding, or renderer language.
+- Deterministic `column`, `two-column`, and explicit curved `zoned-panorama` recipes.
+- Native square (`480x480`), portrait (`480x1280`), wide (`1280x480`), and explicit Thermalright curved (`2400x1080`) profiles.
+- Stable diagnostics with file/line/column, profile, module, property, reason, and fix fields.
+- One renderer path for GUI previews, the CLI preview example, and daemon frames.
 
-What exists today is a small 1-D primitive, used in **one** place:
+## GUI connection
 
-| Piece | Where | Status |
-|---|---|---|
-| `stack()` | `src/render/components/stack.rs` | Landed (`0c02f48`). Fixed item extent; leftover → equal inter-item gap (`space-between`). Cards do not stretch. |
-| `token_card` | `responsive_tokens()` in `src/render/svg.rs` | 172 on a 480 short axis (Grafana auto-grid “short” row is ~168). |
-| Caller | `layouts/svg/neon-dash-v2.svg` **portrait branch only** | Six striped cards via `stack(count=6, item=token_card, …)`. |
-| Square v2 | same file, `{% if is_square %}` | Still a hand-placed 480 artboard (`x=16`, `height=172`, chip row at `y=384`). |
-| Wide v2 | same file, `{% else %}` | Still a hand-placed 2-column + chip strip. |
-| Every other shipped layout | `layouts/svg/*.svg`, HTML, Blitz | Do **not** call `stack()`. Many user copies under `~/.config/thermalwriter/layouts/` are still fixed `480×480`. |
+The Config GUI's Layout Studio starts from the shipped `neon-composer` preset, lets an owner add/reorder/bind typed modules, previews the selected native profile, displays topology and diagnostics, and saves or activates the composition. Its capability metadata mirrors the Rust document instead of exposing arbitrary styles. Save uses a document fingerprint so an external edit is reported rather than overwritten.
 
-`seed_layout_dir` never overwrites existing user files, so a daemon upgrade does not install engine changes into an already-seeded layout.
+The shared Tauri boundary includes `load_layout_preset`, `load_layout_document`, `validate_layout_document`, `preview_layout_document`, `copy_layout_design_context`, `save_layout_document`, and `apply_layout_document`. See the authoring reference for the public fields and the paste-only hand-off artifacts.
 
-## Prior art we are following
+## Real CLI path
 
-Not a Grafana clone. Two ideas only:
+The preview example validates every requested target before writing output. The required flagship matrix is:
 
-1. **Grafana dashboard layout** — panels live in *tracks* (row height, column count, `gridPos` in grid units), then map onto the viewport. Auto grid can fit panels; named row heights include a short ~168px row.
-   - https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/create-dashboard/
-   - https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/view-dashboard-json-model/
-2. **CSS Box Alignment `space-between`** — leftover space goes *between* items; first/last sit on the content edges. Children stay fixed size (`flex: none`), not stretched.
-   - https://www.w3.org/TR/css-align-3/
+```bash
+cargo run --example preview_layout -- --matrix layouts/neon-composer.layout.toml
+```
 
-Grafana’s “fill screen” *grows* rows. We rejected that: leftover becomes **gap**, not taller cards.
+The command prints four native PNG paths under `target/preview` by default. Use `--profile` for one target, `--format json` for machine-readable diagnostics, and `--output-dir` for an iteration directory. Generate → validate → preview matrix → inspect images → iterate is the supported authoring loop.
 
-## What “standardized” means
+## Boundaries
 
-A layout author should declare **modules + a composition**, not pixel tables per resolution.
+The typed path is intentionally bounded. It does not add arbitrary renderer code, CSS/SVG embedding, a plugin ABI, undocumented fields, full legacy migration, or 3D calibration. Existing SVG/HTML sources remain separate legacy layouts and are left untouched; they are not the destination for new layout work.
 
-Allowed composition forks (rare):
-
-- **Column** if `height >= width` (square and portrait share this)
-- **Row / 2-column** if `width > height` (landscape / wide / ultrawide)
-
-Not allowed as the long-term pattern:
-
-- `y = 384` / `card_h = 172` literals
-- Center-padding a 480 artboard (`translate((width-height)/2) scale(height/480)`)
-- A third coordinate system for every new native size
-- A new layout language, CSS parser, or `foreignObject`→Taffy path for SVG
-
-Engine work still missing:
-
-- **`stack_fit`** — how many `token_card`s fit in a span at `gap_min` (omit/overflow policy).
-- **`hstack`** — same primitive on the other axis (wide 2-column).
-- **Column recipe shared by square + portrait** — extra cards appear when `stack_fit` > 2 instead of a separate portrait stylesheet.
-- **Chip/row helper** — the 80px RAM/VRAM/FPS strip as a second track size (`token_chip`), not magic `140×80`.
-- **Docs in the skill** — `SKILL.md` still tells authors to branch on every `is_*` flag; point them at `stack()` + tokens first.
-
-## Pickup sequence
-
-### 1. Standardize the engine (this doc’s job)
-
-1. Keep `stack()` / `token_card` as the only positioning API for new or migrated SVG layouts.
-2. Add `stack_fit` + overflow policy (start-align, never negative gap, never shrink cards).
-3. Add `hstack` (or `dir=` on `stack`) and migrate v2 **wide** off literal `col_w` / `y0`.
-4. Collapse v2 **square + portrait** onto one column recipe; portrait just shows more modules.
-5. Migrate `neon-dash.svg`, `arc-gauge.svg`, `cyber-grid.svg` the same way. Leave experimental `test-*` / Blitz HTML for a later pass.
-6. Decide an upgrade path for seeded `~/.config/thermalwriter/layouts/` (overwrite flag vs. documented copy). Until then, copy the repo file when testing.
-
-Definition of done for this phase: `preview_layout --matrix` plus `--size 480x480`, `480x1280`, `1280x480` shows filled canvases from **one** v2 source file; Criterion/layout tests lock `stack()` math.
-
-### 2. Then performance regression
-
-Do this **after** the engine API is stable so we are not rebasing benches onto a moving primitive.
-
-Use the existing two-layer harness in `docs/profiling.md` — do not invent a third profiler.
-
-1. **Save a Criterion baseline on current `master`** before further layout-engine work (`docs/profiling.md`, “Save a Criterion baseline before changing code”).
-2. Add or extend render benches for the **same layout at multiple canvases** (480×480, 480×1280, 1280×480) so a flow change cannot hide a portrait-only regression.
-3. After each engine/layout migration, `cargo bench` against that baseline. Whole-daemon `scripts/profile.sh neon-dash-v2` is smoke / flamegraph only — not the pass/fail gate.
-4. Known expensive reference: `arc-gauge` (see profiling notes). Include it once it uses `stack()`, not before.
-5. Reject the change if Criterion render/tick stages regress without a documented tradeoff.
-
-## Local hardware note (not the engine)
-
-The Trofeo (`0416:5302`, PM128, native 1280×480) is being driven **portrait** (`rotation = 90` → oriented 480×1280) with v2’s column stack. Card internals still need visual polish; that is separate from flow. Background remains shared `anime.png` (no per-display background yet).
+For the washed-out LCD visual discipline and the legacy-layout boundary, start at [`skills/designing-layouts/SKILL.md`](../skills/designing-layouts/SKILL.md).

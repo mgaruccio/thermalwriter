@@ -1,326 +1,88 @@
-> **Authoring destination (2026-08-14):** New work should target the typed `.layout.toml` composer in `src/layout_engine/`, not hand-placed SVG / `{% if is_* %}` branches or `stack()` as the long-term API. Visual craft below still applies (480-class washed-out LCD, CAM/iCUE contrast). Legacy SVG/HTML files are left untouched.
+> **Authoring destination (2026-08-14):** New work targets the typed `.layout.toml` composer in `src/layout_engine/`. Read [the `.layout.toml` authoring reference](./references/layout-toml.md) for the real schema, four module kinds, profile recipes, curved policies, diagnostics, CLI loop, and extension path. Keep the visual craft below: these are small, often washed-out LCDs. Existing SVG/HTML layouts remain untouched legacy sources.
 
 ---
 name: designing-layouts
-description: Use when creating, modifying, or reviewing thermalwriter LCD layouts. Also use when extending the rendering engine with new CSS properties, image support, or sensor providers.
+description: Use when creating, modifying, or reviewing Thermalwriter LCD layouts. New authoring uses bounded .layout.toml documents; legacy SVG/HTML maintenance is documented separately.
 ---
 
 # Designing Layouts for Thermalwriter
 
-## Overview
+## New layout work
 
-Create attractive layouts for Thermalright LCDs across portrait, square, landscape, wide, and ultrawide native geometries. The panels are small and often washed out inside a PC case, so use bold hierarchy, dark backgrounds, and high-contrast accents. Think NZXT CAM or Corsair iCUE, not a terminal dashboard.
+Use the typed document path for every new composition:
 
-**Attractive is more important than informational.** This is a consumer product, not a monitoring tool.
+1. Start from `layouts/neon-composer.layout.toml` or the Neon Composer preset in the Config GUI.
+2. Order a small set of `metric`, `sparkline`, `text`, and `media` modules; bind them to the documented catalog keys.
+3. Select the profile recipe for the actual native surface. Do not enter coordinates or renderer styles.
+4. Run the real matrix preview and open every generated PNG.
+5. Fix diagnostics, iterate, and repeat before saving or activating.
 
-## The Core Discipline: Render and Look
-
-The #1 failure mode is not looking at output. Every layout change MUST be rendered and visually inspected.
+The complete contract and exact commands live in [references/layout-toml.md](./references/layout-toml.md). The flagship check is:
 
 ```bash
-# Preview to PNG (fast iteration, no USB):
-cargo run --example preview_layout <name_or_path>
-# Output: /tmp/thermalwriter_<name>.png
-
-# Push to hardware (final review):
-systemctl --user stop thermalwriter
-cargo run --example render_layout <name_or_path> [seconds] [--mock]
-systemctl --user start thermalwriter
+cargo run --example preview_layout -- --matrix layouts/neon-composer.layout.toml
 ```
 
-Both accept: file path (`layouts/my.html`), short name (`neon-dash`), or built-in name (`system-stats`).
+The command validates all requested targets before rendering and prints exact native PNG paths. Use `--format json` when an agent needs stable diagnostic fields. A passing command still requires visual inspection.
 
-Use `--mock` to inject realistic gaming-load data (144 FPS, 67°C CPU, 71°C GPU, 285W) when testing layouts that depend on sensors not currently active.
+## The visual goal
 
-**Read the PNG after every render.** Unreviewed output is unknown output.
+**Attractive is more important than informational.** Thermalright panels are compact and can look washed out inside a case. Design for a consumer display such as CAM or iCUE, not a terminal wall: bold hierarchy, a dark tinted background, a few large values, and clear accent colors.
 
-## Critical Engine Constraint: Explicit Heights
+### LCD contrast
 
-The rendering engine (taffy) cannot measure text. Every element that contains text MUST have an explicit `height` or it collapses to 0px and overlaps with siblings.
+- Never use pure black as the only background. Prefer `#08080f`, `#0a0a14`, or the typed engine's default `#080c14`.
+- Use a subtly lighter panel (`#12121e`, `#1a1a2e`, or the typed default `#17202c`) to create depth.
+- Keep typed foreground colors at or above the engine's `#999999` per-channel readability floor. Labels must remain visible on hardware.
+- Use bright accents for hero values, quieter accents for units, and neutral gray for labels. Do not give every string the same brightness.
+- Prefer one hero value plus four to six supporting values. Cut a module before shrinking text until it is unreadable.
 
-```html
-<!-- BAD: span has no height, will overlap with siblings -->
-<span style="font-size: 24px; color: #e94560;">72°C</span>
+Suggested metric accents:
 
-<!-- GOOD: height slightly larger than font-size -->
-<span style="height: 30px; font-size: 24px; color: #e94560;">72°C</span>
-```
-
-Rule of thumb: `height ≈ font-size × 1.2`
-
-This is the single most common layout bug. If text overlaps, check for missing heights.
-
-## SVG Layouts (Primary Format)
-
-SVG is the primary layout format. Use the `SvgRenderer` pipeline: SVG template → Tera substitution → resvg → Pixmap.
-
-```xml
-{# canvas: responsive #}
-{# history: cpu_util=60s, gpu_temp=120s #}
-<svg xmlns="http://www.w3.org/2000/svg"
-     viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}">
-  <!-- Background pattern -->
-  {{ background(pattern="grid", color="#ffffff08", spacing=24, w=width, h=height) }}
-
-  <!-- Area graph: CPU utilization history -->
-  {{ graph(data=cpu_util_history, x=0, y=height-100, w=width, h=100,
-           style="area", fill="#e9456033", stroke="#e94560") }}
-
-  <!-- Current CPU temp (hero value) -->
-  <text x="{{ width / 2 }}" y="{{ height / 2 }}" text-anchor="middle" font-size="{{ token_hero }}"
-        fill="{{ theme_primary }}" font-family="monospace">
-    {{ cpu_temp | default(value="--") }}°C
-  </text>
-</svg>
-```
-
-1. Declare `{# canvas: responsive #}` and bind the root `viewBox`, `width`, and `height` to `{{ width }}` / `{{ height }}`.
-2. Branch on `is_portrait`, `is_square`, `is_landscape`, `is_wide`, and `is_ultrawide` when the composition must reflow; use `token_margin`, `token_gap`, and typography tokens derived from the short axis.
-3. `{# history: ... #}` frontmatter declares metrics to buffer (see [components.md](./references/components.md)).
-4. Text uses explicit coordinates; standard SVG transforms are available for undistorted contain-style subcompositions.
-5. Components are Tera function calls that emit SVG fragments.
-
-### Component Composability Rules
-
-These are binding contracts for how components interact:
-
-1. **Position-independent.** Every component takes `x, y, w, h` and renders within that bounding box. No assumptions about position on canvas.
-
-2. **Theme-aware defaults.** Components default to `theme_*` variables for colors, overridable with explicit hex. A layout using all defaults inherits the active theme automatically.
-
-3. **Opt-in history.** Only metrics declared in `{# history: ... #}` frontmatter get buffered. Components needing history for an undeclared metric render empty — graceful degradation.
-
-4. **Purely additive.** Components emit SVG elements only. They don't modify the canvas or other components. Compositing (opacity, layering) is your responsibility via standard SVG attributes.
-
-5. **Single background rule.** At most one background per layout (last `{{ background() }}` call wins). Global config `background_image` overrides per-layout background when set.
-
-6. **Document-order stacking.** Layering follows SVG document order: background → graphs/visualizations → panels → text. Control z-order by element placement in the template.
-
-7. **Graceful degradation.** Missing sensor data → `default(value="--")`. Missing history → empty graph. Missing theme → default palette. Missing background asset → transparent. No component causes a render failure.
-
-8. **Sensor polling independence.** Render tick rate and sensor poll rate are independent. Animation-driven tick rate increases do not increase sensor reads.
-
----
-
-## Canvas geometry
-
-- `{# canvas: responsive #}` opts into the negotiated device geometry and exposes
-  `width`, `height`, `aspect`, `shape`, `is_*`, and `token_*` values.
-- `{# canvas: WIDTHxHEIGHT #}` declares a fixed logical canvas that is uniformly
-  contained and centered into the device output.
-- No canvas declaration preserves legacy behavior: fixed 480×480, centered with
-  letterbox bars on non-square displays.
-- Background images are independently resized with centered cover to the native
-  device resolution.
-- Render every changed responsive layout at least once in each supported shape
-  class. Use `preview_layout --matrix` for the seeded evidence set.
-
-## Quick Start: Creating a Layout (HTML)
-
-For HTML layouts using the legacy TemplateRenderer. A layout is an HTML file using a CSS subset with Tera template variables for sensor data.
-
-```html
-<div style="display: flex; flex-direction: column; width: 480px; height: 480px;
-            background: #08080f; padding: 16px; gap: 12px;">
-
-  <!-- Card with label + hero value + secondary info -->
-  <div style="display: flex; flex-direction: column; height: 172px;
-              background: #12121e; padding: 12px; gap: 4px;">
-    <span style="height: 20px; font-size: 14px; color: #888888;">CPU</span>
-    <span style="height: 88px; font-size: 64px; color: #e94560;">
-      {{ cpu_temp | default(value="--") }}°C
-    </span>
-    <span style="height: 28px; font-size: 22px; color: #c4546e;">
-      {{ cpu_util | default(value="--") }}% LOAD
-    </span>
-  </div>
-
-</div>
-```
-
-Key patterns:
-1. Root div sets display dimensions, page background, outer padding
-2. Cards use darker background (`#12121e`) on darker page (`#08080f`) for depth
-3. Every text span has explicit `height`
-4. Sensor values use `{{ key | default(value="--") }}` for missing data
-5. Colors create hierarchy: bright accent for hero, dimmed accent for secondary, gray for labels
-
-## Design System
-
-### Typography Scale
-
-| Role | Font Size | Height | Purpose |
-|------|-----------|--------|---------|
-| Hero value | 64-96px | 88-120px | The number visible from across the room |
-| Secondary value | 20-36px | 28-44px | Supporting metrics |
-| Small value | 18-22px | 24-28px | Bottom bar / compact cards |
-| Label | 10-14px | 14-20px | Category identifiers (CPU, GPU, RAM) |
-
-Single font: JetBrains Mono (monospace). Numbers won't shift width when values change — no layout jitter.
-
-> **SVG font-family quirk:** the bundled font asset is loaded into `usvg` under
-> the family name `DejaVu Sans Mono`. SVG text that must resolve through the
-> embedded font should declare `font-family="DejaVu Sans Mono"` (or rely on the
-> renderer's monospace default) even though the asset filename references
-> JetBrains Mono. HTML layouts may continue to use the generic monospace stack.
-
-### Color System
-
-**Page backgrounds** — never pure black, use tinted near-blacks:
-- `#08080f` — blue-tinted black (recommended default)
-- `#0a0a14` — slightly lighter
-- `#0a0a0a` — near-black
-
-**Card backgrounds** — subtly lighter for depth:
-- `#12121e` — standard card
-- `#1a1a2e` — slightly lighter card
-- `#111118` — very subtle elevation
-
-**Color-tinted cards** for visual drama (strongest design tool):
-- `#1a0a10` — dark red tint (CPU panels)
-- `#0a1420` — dark blue tint (GPU panels)
-
-**Accent colors by metric type:**
-
-| Metric | Accent | Dimmed (for secondary text) |
-|--------|--------|-----------------------------|
-| CPU temp/load | `#e94560` | `#c4546e` |
-| GPU temp/load | `#53d8fb` | `#5aabb8` |
+| Metric | Accent | Dimmed companion |
+|---|---|---|
+| CPU temperature/load | `#e94560` | `#c4546e` |
+| GPU temperature/load | `#53d8fb` | `#5aabb8` |
 | RAM/VRAM | `#cc9eff` | `#bb86fc` |
 | FPS/frametime | `#20f5d8` | `#03dac6` |
-| Power (watts) | `#FFD080` | `#FFB74D` |
+| Power | `#FFD080` | `#FFB74D` |
 
-**Labels and muted text:** `#888888` minimum — anything dimmer becomes invisible on LCD hardware.
+### Composition
 
-For temperature ramps, utilization coding, alternative palettes, and Tera conditional examples, see [color-system.md](./references/color-system.md).
+- Leave breathing room around the hero card and use consistent gaps; dense grids become illegible at native size.
+- Keep labels short and values dominant. Units should support the value, not compete with it.
+- Use stable IDs and document order intentionally; the solver preserves order across profiles.
+- Check square, portrait, wide, and curved output. A composition that looks good on a square may need fewer modules on a wide two-column surface.
+- For a curved profile, keep ordinary information in the readable zones. Reserve bridge spanning for intentional media.
 
-### Spacing
+## Geometry mental model
 
-- **Outer padding**: 16-20px
-- **Gap between cards**: 10-12px
-- **Inner card padding**: 8-12px
-- **Gap between text elements**: 2-4px
+The typed solver owns placement. Authors choose a recipe, not a pixel table:
 
-### Layout Arithmetic
+- `column` uses fixed module extents on square and portrait surfaces; leftover space becomes gaps.
+- `two-column` uses two fixed-width tracks on wide surfaces and preserves document order.
+- `zoned-panorama` uses the explicit Thermalright curved topology: left-readable, protected center bridge, right-readable.
+- Cards do not stretch to fill leftover space, shrink below the typed minimum, overlap, or spill through a protected region.
 
-All dimensions must be explicit pixels. Verify math before rendering:
+See the authoring reference for the exact profile names, capacities, bridge policy, and module fields. Do not add undeclared style or coordinate keys.
 
-```
-Total height = root height (480)
-Content height = total - 2 × padding
-Available for rows = content height - (num_gaps × gap_size)
-Sum of row heights must equal available height
-```
+## Legacy layout boundary
 
-For layout pattern examples with complete HTML, see [layout-patterns.md](./references/layout-patterns.md).
+SVG/HTML layouts in the repository and user layout directory are legacy sources. They may need maintenance, but they are not the destination for new designs and are not silently converted by the typed engine. If an existing legacy file must be changed, preserve its own format and use its established preview path; do not copy legacy implementation patterns into a new `.layout.toml` document.
 
-## Supported CSS Properties
-
-| Property | Values | Notes |
-|----------|--------|-------|
-| `display` | `flex` | Default, only option |
-| `flex-direction` | `row`, `column`, `row-reverse`, `column-reverse` | |
-| `justify-content` | `center`, `space-between`, `space-around`, `flex-end` | |
-| `align-items` | `center`, `flex-start`, `flex-end`, `stretch` | |
-| `gap` | `Npx` | Between flex children |
-| `padding` | `Npx` | Uniform all sides only |
-| `margin` | `Npx` | Uniform all sides only |
-| `width`, `height` | `Npx` | Required for layout |
-| `font-size` | `Npx` | 10-120px tested range |
-| `color` | `#rrggbb` or `#rgb` | Text color |
-| `background` | `#rrggbb` or `#rgb` | Also `background-color` |
-| `text-align` | `left`, `center`, `right` | |
-| `border-radius` | `Npx` | Parsed but NOT rendered |
-
-**Not supported:** `flex-grow`, `flex-shrink`, `flex-wrap`, `%` units, `em`/`rem`, per-side padding/margin, gradients, borders, shadows, images, grid, positioning, opacity, transforms.
-
-## Available Sensor Keys
-
-### Aggregate (always available)
-
-| Key | Format | Source |
-|-----|--------|--------|
-| `cpu_temp` | Integer °C | hwmon (k10temp / coretemp alias) |
-| `cpu_util` | Float % | sysinfo (average across all cores) |
-| `cpu_power` | Integer W | RAPL powercap |
-| `gpu_temp` | Integer °C | nvidia-smi / amdgpu sysfs |
-| `gpu_util` | Integer % | nvidia-smi / amdgpu sysfs |
-| `gpu_power` | Integer W | nvidia-smi / amdgpu sysfs |
-| `ram_used` | Float GB (1 decimal) | sysinfo |
-| `ram_total` | Float GB (1 decimal) | sysinfo |
-| `vram_used` | Float GB (1 decimal) | nvidia-smi / amdgpu sysfs |
-| `vram_total` | Float GB (1 decimal) | nvidia-smi / amdgpu sysfs |
-| `fps` | Integer | MangoHud (requires active game) |
-| `frametime` | Float ms | MangoHud (requires active game) |
-
-### Per-core CPU (sysinfo)
-
-| Key pattern | Format | Description |
-|-------------|--------|-------------|
-| `cpu_c0_util` – `cpu_cN_util` | Float % | Per-core utilization (0-indexed) |
-| `cpu_c0_freq` – `cpu_cN_freq` | Integer MHz | Per-core frequency |
-
-### Per-core temperature (hwmon coretemp)
-
-| Key pattern | Format | Description |
-|-------------|--------|-------------|
-| `cpu_c0_temp` – `cpu_cN_temp` | Integer °C | Per-core temp from "Core N" hwmon label |
-
-### CCD temps (hwmon k10temp, AMD Zen3+)
-
-| Key | Format | Description |
-|-----|--------|-------------|
-| `cpu_ccd0_temp` | Integer °C | CCD0 temp (Tccd1 label, 0-indexed) |
-| `cpu_ccd1_temp` | Integer °C | CCD1 temp (Tccd2 label) |
-
-### Network (sysinfo, available after second poll)
-
-| Key | Format | Description |
-|-----|--------|-------------|
-| `net_rx` | Integer B/s | Download throughput (sum of non-loopback interfaces) |
-| `net_tx` | Integer B/s | Upload throughput |
-
-Always use `{{ key | default(value="--") }}` — sensors may be unavailable.
-
-## Dynamic Color Coding with Tera
-
-Tera `{% if %}` conditionals can change colors based on sensor values. Sensor values are strings — use `| int` for numeric comparison, and guard with existence check.
-
-For complete temperature/utilization color ramps and Tera implementation examples, see [color-system.md](./references/color-system.md).
-
-## Extending the Rendering Engine
-
-The engine is intentionally minimal. When a design needs something missing:
-
-1. **Identify the gap** — which CSS property or feature is needed?
-2. **Check parser.rs** — is it parsed but not rendered? (e.g., `border-radius`)
-3. **Implement in the right layer:**
-   - New CSS property → `parser.rs` (parse) + `layout.rs` (if layout-affecting) + `draw.rs` (render)
-   - New visual feature (images, shapes) → `draw.rs` using tiny-skia
-   - New sensor data → add provider in `src/sensor/`
-4. **Test with `preview_layout`** before pushing to hardware
-
-The rendering pipeline: Tera template substitution → HTML parsing → taffy flexbox layout → tiny-skia pixel rendering → JPEG encoding with rotation.
-
-## Common Mistakes
+## Common mistakes
 
 | Mistake | Fix |
-|---------|-----|
-| Text overlaps | Add explicit `height` to every text element |
-| Using < 50% of screen | Fill the space — use larger fonts, more padding, bigger cards |
-| Too many metrics (> 8) | Cut to 4-6 and make them bigger. Rotate between layouts instead |
-| Pure black background (#000) | Use tinted near-black (#08080f, #0a0a14) |
-| All text same brightness | Use bright accents for values, dimmed accents for secondary, gray for labels |
-| Labels too dim (< #888) | Minimum #888888 for visibility on hardware LCD |
-| Using `border-radius` | Parsed but not rendered — don't rely on it for design |
-| Missing `default(value="--")` | Sensor may be absent — always provide fallback |
-| HTML comments `<!-- -->` | Parser treats `!` as tag name, corrupts entire layout. No comments. |
-| Showing same metric twice | Each data point once. If GPU util is in a hero card, don't repeat in bottom bar |
-| Not rendering before claiming done | Run preview_layout and READ the PNG. Every time. |
+|---|---|
+| No visual review | Run the matrix preview and open every PNG before claiming the layout is ready. |
+| Low contrast | Use a tinted near-black background, a raised panel, and foreground channels at or above `#999999`. |
+| Too many metrics | Keep four to six meaningful values and make the hero treatment larger. |
+| Curved content in the bridge | Use local modules for readable zones; opt into bridge spanning only for capable media under the curved profile policy. |
+| Invented TOML fields | Check the authoring reference; unknown fields are rejected. |
+| Unavailable sensor surprise | Use a documented binding and accept the stable `--` fallback for a missing runtime value. |
+| Media path failure | Use a relative image below the approved media directory; avoid `..`, symlinks, and oversized files. |
+| Treating a passing render as proof | Inspect the actual native PNG, not only the command exit status. |
 
-## References
+## Reference
 
-- [components.md](./references/components.md) — Full component catalog: signatures, args, examples (graph, btop_bars, btop_net, btop_ram, background)
-- [color-system.md](./references/color-system.md) — Temperature ramps, utilization coding, full palette
-- [layout-patterns.md](./references/layout-patterns.md) — Concrete layout examples with complete HTML
-- [rendering-engine.md](./references/rendering-engine.md) — Full engine details, pipeline architecture, extension guide
+- [layout-toml.md](./references/layout-toml.md) — Current schema, module catalog, recipes, curved policy, diagnostics, commands, GUI boundary, and extension guide.
