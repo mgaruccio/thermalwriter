@@ -414,8 +414,18 @@ async fn main() -> Result<()> {
                 vars: layout_vars.clone(),
             }));
 
+            let is_layout_document = resolved_layout.ends_with(".layout.toml");
             let is_svg = resolved_layout.ends_with(".svg");
-            let boxed: Box<dyn FrameSource> = if is_svg {
+            let boxed: Box<dyn FrameSource> = if is_layout_document {
+                source_display.build_layout_source_with_bindings(
+                    &layout_dir.join(&resolved_layout),
+                    HashMap::new(),
+                    None,
+                    None,
+                    theme_palette.clone(),
+                    &declared_keys,
+                )?
+            } else if is_svg {
                 let mut renderer =
                     SvgRenderer::new(&template, source_display.width(), source_display.height())?;
                 if let Some(ref hist) = initial_sensor_history {
@@ -530,16 +540,19 @@ async fn main() -> Result<()> {
                     layout_needed_keys(&frontmatter, &layout_vars, &template, &known, &declared);
                 union_needed.extend(needed);
 
-                let source = dims.build_layout_source(
-                    // build from temp file path equivalent: use mode_handler via path
+                let source = dims.build_layout_source_with_bindings(
+                    // Build from the resolved layout path so document files are parsed
+                    // through the same path as reloads and reconnects.
                     &layout_dir.join(&resolved_layout),
                     layout_vars,
                     initial_background.clone(),
                     initial_sensor_history.clone(),
                     theme_palette.clone(),
+                    &declared,
                 );
                 let source = match source {
                     Ok(s) => s,
+                    Err(error) if resolved_layout.ends_with(".layout.toml") => return Err(error),
                     Err(_) => {
                         // Layout may only exist as builtin content — write through identity path.
                         // Fall back to constructing via temporary content already resolved:
@@ -760,12 +773,13 @@ async fn main() -> Result<()> {
                                 }
                             } else {
                                 let layout_path = layout_dir_clone.join(layout_name);
-                                match dims.build_layout_source(
+                                match dims.build_layout_source_with_bindings(
                                     &layout_path,
                                     layout_vars,
                                     current_background.clone(),
                                     reload_history.clone(),
                                     reload_theme.clone(),
+                                    declared_keys_listener.as_ref(),
                                 ) {
                                     Ok(source) => {
                                         if idx == 0 {
@@ -853,12 +867,13 @@ async fn main() -> Result<()> {
                                 mode_display
                             };
                             let generation = *generation_rx_listener.borrow();
-                            match mode_display.build_layout_source(
+                            match mode_display.build_layout_source_with_bindings(
                                 &layout_path,
                                 vars.clone(),
                                 current_background.clone(),
                                 reload_history.clone(),
                                 reload_theme.clone(),
+                                declared_keys_listener.as_ref(),
                             ) {
                                 Ok(new_source) => {
                                     let next_source_revision = source_revision.saturating_add(1);

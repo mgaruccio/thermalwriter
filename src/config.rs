@@ -41,9 +41,9 @@ pub fn parse_usb_id(s: &str) -> Result<(u16, u16), String> {
 fn validate_mode_layout(label: &str, mode: &str, default_layout: &str) -> Result<()> {
     match mode {
         "svg" => {
-            if !default_layout.ends_with(".svg") {
+            if !(default_layout.ends_with(".svg") || default_layout.ends_with(".layout.toml")) {
                 anyhow::bail!(
-                    "{label}.default_layout='{default_layout}' must end with .svg when {label}.mode is svg"
+                    "{label}.default_layout='{default_layout}' must end with .svg or .layout.toml when {label}.mode is svg"
                 );
             }
         }
@@ -848,6 +848,9 @@ mod tests {
         cfg.display.mode = "svg".into();
         cfg.display.default_layout = "svg/neon-dash-v2.svg".into();
         cfg.validate().expect("matching svg mode/layout");
+        cfg.display.default_layout = "neon-composer.layout.toml".into();
+        cfg.validate()
+            .expect("layout document uses the svg render mode");
 
         cfg.display.mode = "html".into();
         cfg.display.default_layout = "system-stats.html".into();

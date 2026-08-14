@@ -299,6 +299,10 @@ fn text_role_from_variant(variant: &str) -> TextRole {
 pub fn resolved_bindings(sensors: &SensorData) -> ResolvedBindings {
     let mut bindings: ResolvedBindings = sensors.clone().into();
     for (key, value) in sensors {
+        if let Some(alias) = layout_binding_alias(key) {
+            bindings.insert(alias, value.clone());
+        }
+
         let Some(values) = parse_history(value) else {
             continue;
         };
@@ -309,9 +313,38 @@ pub fn resolved_bindings(sensors: &SensorData) -> ResolvedBindings {
         if let Some(base) = key.strip_suffix("_history") {
             bindings.insert_history(format!("{base}.history"), values.iter());
             bindings.insert_history(base.to_owned(), values.iter());
+            if let Some(alias) = layout_binding_alias(base) {
+                bindings.insert_history(format!("{alias}.history"), values.iter());
+                bindings.insert_history(alias, values.iter());
+            }
         }
     }
     bindings
+}
+
+/// Map the daemon's legacy flat sensor names to the typed layout bindings.
+///
+/// The raw sensor boundary remains unchanged for SVG/HTML layouts; new layout
+/// documents get the namespaced aliases in addition to those raw keys.
+fn layout_binding_alias(key: &str) -> Option<&'static str> {
+    match key {
+        "cpu_temp" => Some("cpu.temperature"),
+        "cpu_util" => Some("cpu.utilization"),
+        "cpu_power" => Some("cpu.power"),
+        "cpu_fan" => Some("cpu.fan"),
+        "gpu_temp" => Some("gpu.temperature"),
+        "gpu_util" => Some("gpu.utilization"),
+        "gpu_power" => Some("gpu.power"),
+        "vram_used" => Some("gpu.memory.used"),
+        "vram_total" => Some("gpu.memory.total"),
+        "ram_used" => Some("memory.used"),
+        "ram_total" => Some("memory.total"),
+        "net_rx" => Some("network.receive"),
+        "net_tx" => Some("network.transmit"),
+        "fps" => Some("game.fps"),
+        "frametime" => Some("game.frametime"),
+        _ => None,
+    }
 }
 
 fn is_history_key(key: &str) -> bool {
