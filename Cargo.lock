@@ -6027,6 +6027,7 @@ dependencies = [
  "resvg",
  "rusb",
  "serde",
+ "serde_json",
  "serial_test",
  "sysinfo",
  "taffy 0.7.7",
