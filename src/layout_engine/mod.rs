@@ -4,6 +4,7 @@ pub mod diagnostic;
 pub mod document;
 pub mod media_cache;
 pub mod modules;
+pub mod persistence;
 pub mod renderer;
 pub mod scene;
 pub mod solver;
@@ -24,6 +25,10 @@ pub use modules::{
     BindingValue, HistoryBinding, MediaFit, MediaModule, MetricModule, MetricVariant,
     ModuleCapabilities, ModuleEmitter, ResolvedBindings, SparklineModule, SparklineStyle,
     SparklineVariant, TextModule, ThemeTokens, ValueRange,
+};
+pub use persistence::{
+    LEGACY_LAYOUT_CODE, PERSISTENCE_CONFLICT_CODE, PERSISTENCE_DIAGNOSTIC_CODE,
+    PERSISTENCE_PATH_CODE, SavedLayout, save_layout_document,
 };
 pub use renderer::{LayoutEngineRenderer, resolved_bindings};
 pub use scene::{
