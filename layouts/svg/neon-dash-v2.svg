@@ -20,30 +20,24 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
       <stop offset="100%" stop-color="#0e0e18" stop-opacity="{{ panel_opacity }}"/>
     </linearGradient>
   </defs>
+  {% if is_portrait or is_square %}
   {% if is_portrait %}
   <g transform="translate(0, {{ (height - width) / 2 }}) scale({{ width * 1.0 / 480 }})">
-  {% elif is_square %}
-  <g transform="scale({{ width * 1.0 / 480 }})">
   {% else %}
-  <g transform="translate({{ (width - height) / 2 }}, 0) scale({{ height * 1.0 / 480 }})">
+  <g transform="scale({{ width * 1.0 / 480 }})">
   {% endif %}
 
-  <!-- CPU Panel background -->
   <rect x="16" y="16" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
 
-  <!-- CPU temp sparkline (behind panel text) -->
   {% set cpu_spark_fill = theme_primary ~ "22" %}
   {% set cpu_spark_stroke = theme_primary ~ "66" %}
   {{ graph(data=cpu_temp_history, x=16, y=100, w=448, h=88,
            style="area", fill=cpu_spark_fill, stroke=cpu_spark_stroke, stroke_width=1) }}
 
-  <!-- CPU accent bar -->
   <rect x="16" y="16" width="4" height="172" rx="2" fill="{{ theme_primary }}"/>
 
-  <!-- CPU label -->
   <text x="36" y="46" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="{{ theme_text_dim }}">{{ cpu_label }}</text>
 
-  <!-- CPU temp hero (threshold colored) -->
   {% if cpu_temp and cpu_temp | int >= 80 %}
     <text x="36" y="120" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_critical }}" font-weight="bold">{{ cpu_temp }}°C</text>
   {% elif cpu_temp and cpu_temp | int >= 60 %}
@@ -52,28 +46,21 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
     <text x="36" y="120" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_primary }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
   {% endif %}
 
-  <!-- CPU load -->
   <text x="36" y="168" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_primary }}" opacity="0.7">{{ cpu_util | default(value="--") }}% LOAD</text>
 
-  <!-- CPU power (right side) -->
   <text x="444" y="110" font-family="DejaVu Sans Mono, monospace" font-size="52" fill="{{ theme_primary }}" text-anchor="end" opacity="0.7">{{ cpu_power | default(value="--") }}W</text>
 
-  <!-- GPU Panel background -->
   <rect x="16" y="200" width="448" height="172" rx="8" fill="url(#panelGrad)"/>
 
-  <!-- GPU temp sparkline (behind panel text) -->
   {% set gpu_spark_fill = theme_secondary ~ "22" %}
   {% set gpu_spark_stroke = theme_secondary ~ "66" %}
   {{ graph(data=gpu_temp_history, x=16, y=284, w=448, h=88,
            style="area", fill=gpu_spark_fill, stroke=gpu_spark_stroke, stroke_width=1) }}
 
-  <!-- GPU accent bar -->
   <rect x="16" y="200" width="4" height="172" rx="2" fill="{{ theme_secondary }}"/>
 
-  <!-- GPU label -->
   <text x="36" y="230" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}14{% endif %}" fill="{{ theme_text_dim }}">{{ gpu_label }}</text>
 
-  <!-- GPU temp hero (threshold colored) -->
   {% if gpu_temp and gpu_temp | int >= 80 %}
     <text x="36" y="304" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_critical }}" font-weight="bold">{{ gpu_temp }}°C</text>
   {% elif gpu_temp and gpu_temp | int >= 60 %}
@@ -82,15 +69,10 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
     <text x="36" y="304" font-family="DejaVu Sans Mono, monospace" font-size="64" fill="{{ theme_secondary }}" font-weight="bold">{{ gpu_temp | default(value="--") }}°C</text>
   {% endif %}
 
-  <!-- GPU load -->
   <text x="36" y="352" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_secondary }}" opacity="0.7">{{ gpu_util | default(value="--") }}% LOAD</text>
 
-  <!-- GPU power (right side) -->
   <text x="444" y="294" font-family="DejaVu Sans Mono, monospace" font-size="52" fill="{{ theme_secondary }}" text-anchor="end" opacity="0.7">{{ gpu_power | default(value="--") }}W</text>
 
-  <!-- Bottom Stats Row -->
-
-  <!-- RAM card with area chart -->
   <rect x="16" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   {% set ram_total_safe = ram_total | default(value=64.0) %}
   {% set ram_fill = theme_accent ~ "44" %}
@@ -98,12 +80,10 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
   <text x="86" y="420" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_accent }}" text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
   <text x="86" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}16{% endif %}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ ram_label }}</text>
 
-  <!-- VRAM card -->
   <rect x="170" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   <text x="240" y="420" font-family="DejaVu Sans Mono, monospace" font-size="22" fill="{{ theme_accent }}" text-anchor="middle">{{ vram_used | default(value="--") }}G</text>
   <text x="240" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}16{% endif %}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ vram_label }}</text>
 
-  <!-- FPS card -->
   <rect x="324" y="384" width="140" height="80" rx="6" fill="url(#panelGrad)"/>
   <text x="394" y="420" font-family="DejaVu Sans Mono, monospace" font-size="26" fill="{{ theme_accent }}" text-anchor="middle">{{ fps | default(value="--") }}</text>
   <text x="394" y="452" font-family="DejaVu Sans Mono, monospace" font-size="{% if use_compact_typography %}20{% else %}16{% endif %}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ fps_label }}</text>
@@ -111,10 +91,66 @@ panel_opacity: number(0,1,0.05) = "0.5" "Panel background opacity (0 = transpare
   </g>
   {% if is_portrait and height - width > 40 %}
   <text x="{{ width / 2 }}" y="{{ token_margin + token_label }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_accent }}">NEON DASH</text>
-  {% elif width - height > 300 %}
-  <text x="{{ (width - height) / 4 }}" y="{{ height / 2 - token_gap }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_primary }}">{{ cpu_temp | default(value="--") }}°</text>
-  <text x="{{ (width - height) / 4 }}" y="{{ height / 2 + token_medium }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">CPU</text>
-  <text x="{{ width - (width - height) / 4 }}" y="{{ height / 2 - token_gap }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_secondary }}">{{ gpu_temp | default(value="--") }}°</text>
-  <text x="{{ width - (width - height) / 4 }}" y="{{ height / 2 + token_medium }}" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="#888888">GPU</text>
+  {% endif %}
+  {% else %}
+  {% set m = token_margin %}
+  {% set g = token_gap %}
+  {% set bottom_h = 88 %}
+  {% set col_w = (width - m * 2 - g) / 2 %}
+  {% set col_h = height - m * 2 - g - bottom_h %}
+  {% set cpu_x = m %}
+  {% set gpu_x = m + col_w + g %}
+  {% set y0 = m %}
+  {% set by = y0 + col_h + g %}
+  {% set card_w = (width - m * 2 - g * 2) / 3 %}
+  {% set cpu_spark_fill = theme_primary ~ "22" %}
+  {% set cpu_spark_stroke = theme_primary ~ "66" %}
+  {% set gpu_spark_fill = theme_secondary ~ "22" %}
+  {% set gpu_spark_stroke = theme_secondary ~ "66" %}
+  {% set ram_total_safe = ram_total | default(value=64.0) %}
+  {% set ram_fill = theme_accent ~ "44" %}
+
+  <rect x="{{ cpu_x }}" y="{{ y0 }}" width="{{ col_w }}" height="{{ col_h }}" rx="8" fill="url(#panelGrad)"/>
+  {{ graph(data=cpu_temp_history, x=cpu_x, y=y0 + col_h - 110, w=col_w, h=110,
+           style="area", fill=cpu_spark_fill, stroke=cpu_spark_stroke, stroke_width=1) }}
+  <rect x="{{ cpu_x }}" y="{{ y0 }}" width="4" height="{{ col_h }}" rx="2" fill="{{ theme_primary }}"/>
+  <text x="{{ cpu_x + 20 }}" y="{{ y0 + 36 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ cpu_label }}</text>
+  {% if cpu_temp and cpu_temp | int >= 80 %}
+    <text x="{{ cpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_critical }}" font-weight="bold">{{ cpu_temp }}°C</text>
+  {% elif cpu_temp and cpu_temp | int >= 60 %}
+    <text x="{{ cpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_warning }}" font-weight="bold">{{ cpu_temp }}°C</text>
+  {% else %}
+    <text x="{{ cpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_primary }}" font-weight="bold">{{ cpu_temp | default(value="--") }}°C</text>
+  {% endif %}
+  <text x="{{ cpu_x + 20 }}" y="{{ y0 + 36 + token_hero + token_medium + 8 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_primary }}" opacity="0.7">{{ cpu_util | default(value="--") }}% LOAD</text>
+  <text x="{{ cpu_x + col_w - 16 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero - 12 }}" fill="{{ theme_primary }}" text-anchor="end" opacity="0.7">{{ cpu_power | default(value="--") }}W</text>
+
+  <rect x="{{ gpu_x }}" y="{{ y0 }}" width="{{ col_w }}" height="{{ col_h }}" rx="8" fill="url(#panelGrad)"/>
+  {{ graph(data=gpu_temp_history, x=gpu_x, y=y0 + col_h - 110, w=col_w, h=110,
+           style="area", fill=gpu_spark_fill, stroke=gpu_spark_stroke, stroke_width=1) }}
+  <rect x="{{ gpu_x }}" y="{{ y0 }}" width="4" height="{{ col_h }}" rx="2" fill="{{ theme_secondary }}"/>
+  <text x="{{ gpu_x + 20 }}" y="{{ y0 + 36 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_label }}" fill="{{ theme_text_dim }}">{{ gpu_label }}</text>
+  {% if gpu_temp and gpu_temp | int >= 80 %}
+    <text x="{{ gpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_critical }}" font-weight="bold">{{ gpu_temp }}°C</text>
+  {% elif gpu_temp and gpu_temp | int >= 60 %}
+    <text x="{{ gpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_warning }}" font-weight="bold">{{ gpu_temp }}°C</text>
+  {% else %}
+    <text x="{{ gpu_x + 20 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero }}" fill="{{ theme_secondary }}" font-weight="bold">{{ gpu_temp | default(value="--") }}°C</text>
+  {% endif %}
+  <text x="{{ gpu_x + 20 }}" y="{{ y0 + 36 + token_hero + token_medium + 8 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_secondary }}" opacity="0.7">{{ gpu_util | default(value="--") }}% LOAD</text>
+  <text x="{{ gpu_x + col_w - 16 }}" y="{{ y0 + 36 + token_hero }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_hero - 12 }}" fill="{{ theme_secondary }}" text-anchor="end" opacity="0.7">{{ gpu_power | default(value="--") }}W</text>
+
+  <rect x="{{ m }}" y="{{ by }}" width="{{ card_w }}" height="{{ bottom_h }}" rx="6" fill="url(#panelGrad)"/>
+  {{ btop_ram(data=ram_used_history, total=ram_total_safe, x=m, y=by + 28, w=card_w, h=bottom_h - 28, fill=ram_fill) }}
+  <text x="{{ m + card_w / 2 }}" y="{{ by + 32 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_accent }}" text-anchor="middle">{{ ram_used | default(value="--") }}G</text>
+  <text x="{{ m + card_w / 2 }}" y="{{ by + bottom_h - 14 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_small }}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ ram_label }}</text>
+
+  <rect x="{{ m + card_w + g }}" y="{{ by }}" width="{{ card_w }}" height="{{ bottom_h }}" rx="6" fill="url(#panelGrad)"/>
+  <text x="{{ m + card_w + g + card_w / 2 }}" y="{{ by + 32 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium }}" fill="{{ theme_accent }}" text-anchor="middle">{{ vram_used | default(value="--") }}G</text>
+  <text x="{{ m + card_w + g + card_w / 2 }}" y="{{ by + bottom_h - 14 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_small }}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ vram_label }}</text>
+
+  <rect x="{{ m + (card_w + g) * 2 }}" y="{{ by }}" width="{{ card_w }}" height="{{ bottom_h }}" rx="6" fill="url(#panelGrad)"/>
+  <text x="{{ m + (card_w + g) * 2 + card_w / 2 }}" y="{{ by + 32 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_medium + 2 }}" fill="{{ theme_accent }}" text-anchor="middle">{{ fps | default(value="--") }}</text>
+  <text x="{{ m + (card_w + g) * 2 + card_w / 2 }}" y="{{ by + bottom_h - 14 }}" font-family="DejaVu Sans Mono, monospace" font-size="{{ token_small }}" fill="{{ theme_text_dim }}" text-anchor="middle">{{ fps_label }}</text>
   {% endif %}
 </svg>
