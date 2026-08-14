@@ -24,11 +24,14 @@ rm -f "$SYSTEMD_USER_DIR/thermalwriter.service"
 rm -f "$SYSTEMD_USER_DIR/thermalwriter-tray.service"
 systemctl --user daemon-reload
 
-echo "==> Removing autostart entry..."
+echo "==> Removing autostart and launcher entries..."
 rm -f "$HOME/.config/autostart/thermalwriter-tray.desktop"
+rm -f "$HOME/.local/share/applications/thermalwriter-config.desktop"
+rm -f "$HOME/.local/share/icons/hicolor/"{32x32,64x64,128x128}"/apps/thermalwriter-config.png"
 
 echo "==> Removing installed binaries..."
 rm -f "$CARGO_BIN/thermalwriter"
+rm -f "$CARGO_BIN/thermalwriter-gui"
 rm -f "$CARGO_BIN/thermalwriter-tray"
 
 if [[ -f "$UDEV_RULE" ]]; then

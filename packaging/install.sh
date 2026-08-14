@@ -194,6 +194,32 @@ EOF
     fi
 fi
 
+INSTALLED_GUI_BIN="$CARGO_BIN/thermalwriter-gui"
+if [[ -x "$INSTALLED_GUI_BIN" ]]; then
+    APPDIR="$HOME/.local/share/applications"
+    ICON_BASE="$HOME/.local/share/icons/hicolor"
+    mkdir -p "$APPDIR"
+    for size in 32 64 128; do
+        mkdir -p "$ICON_BASE/${size}x${size}/apps"
+        if [[ -f "$PROJECT_DIR/gui/src-tauri/icons/${size}x${size}.png" ]]; then
+            install -m0644 "$PROJECT_DIR/gui/src-tauri/icons/${size}x${size}.png" \
+                "$ICON_BASE/${size}x${size}/apps/thermalwriter-config.png"
+        fi
+    done
+    if [[ -f "$PROJECT_DIR/packaging/thermalwriter-gui.desktop" ]]; then
+        sed "s|^Exec=.*|Exec=$INSTALLED_GUI_BIN|" \
+            "$PROJECT_DIR/packaging/thermalwriter-gui.desktop" \
+            > "$APPDIR/thermalwriter-config.desktop"
+        chmod 0644 "$APPDIR/thermalwriter-config.desktop"
+        echo "    Config GUI launcher: $APPDIR/thermalwriter-config.desktop"
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$APPDIR" >/dev/null 2>&1 || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "$ICON_BASE" >/dev/null 2>&1 || true
+    fi
+fi
 echo
 echo "Done. Status:"
 systemctl --user --no-pager --lines=0 status thermalwriter.service || true
@@ -202,6 +228,7 @@ if [[ "$INSTALL_TRAY" == "1" ]]; then
 fi
 echo
 echo "Useful follow-ups:"
+echo "  thermalwriter-gui          # Config GUI (Compose, preview, apply)"
 echo "  thermalwriter ctl status"
 echo "  journalctl --user -u thermalwriter -f"
 if [[ "$INSTALL_TRAY" == "1" ]]; then

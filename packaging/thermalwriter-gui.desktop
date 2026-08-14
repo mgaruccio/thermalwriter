@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Thermalwriter Config
+Comment=Configure Thermalright LCD cooler layouts
+Exec=thermalwriter-gui
+Icon=thermalwriter-config
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+StartupNotify=true
+StartupWMClass=thermalwriter-gui
+Keywords=thermalright;lcd;cooler;layout;
