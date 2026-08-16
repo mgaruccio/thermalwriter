@@ -434,6 +434,28 @@ async fn main() -> Result<()> {
                 renderer.set_theme(theme_palette);
                 renderer.set_layout_vars(layout_vars);
                 let _ = renderer.set_background(initial_background.clone());
+                #[cfg(feature = "video")]
+                if let Some(video_cfg) = &config.background.video {
+                    match thermalwriter::render::video::VideoFit::parse(&video_cfg.fit).and_then(
+                        |fit| renderer.set_video_background(&video_cfg.path, video_cfg.fps, fit),
+                    ) {
+                        Ok(()) => log::info!(
+                            "video background started: {} @ {} fps ({})",
+                            video_cfg.path,
+                            video_cfg.fps,
+                            video_cfg.fit
+                        ),
+                        Err(e) => {
+                            log::warn!("video background '{}' not started: {}", video_cfg.path, e)
+                        }
+                    }
+                }
+                #[cfg(not(feature = "video"))]
+                if config.background.video.is_some() {
+                    log::warn!(
+                        "background.video is configured but this build was compiled without the `video` feature; ignoring it (rebuild with --features video)"
+                    );
+                }
                 Box::new(renderer)
             } else {
                 let mut renderer = TemplateRenderer::new(

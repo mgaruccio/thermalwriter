@@ -92,10 +92,37 @@ Custom palette colors available for layout files.
 
 ### `[background]`
 
-Configure background images.
+Configure the background layer under the layout: a static image and/or a
+looping video. The video is composited beneath the layout on every frame, so
+stats and graphs render on top of it (layout transparency is preserved).
 
 - **`image`** (String)
-  - Description: Filename of the background image (no path). The file must live under `~/.config/thermalwriter/backgrounds/`. If omitted (or `None`), no background is applied.
+  - Description: Filename of the background image (no path). The file must live under `~/.config/thermalwriter/backgrounds/`. If omitted (or `None`), no image background is applied.
+
+- **`video`** (table, optional) — looping video background
+  - Requires the `video` build feature (`cargo build --features video`). Built
+    without it, this table is ignored with a startup warning. Requires an
+    `ffmpeg` binary on `PATH` at runtime (no build-time dependency).
+  - **`path`** (String, required): Path to a local video file. Common codecs
+    work (H.264, HEVC, VP9, AV1 — whatever the system `ffmpeg` supports).
+  - **`fps`** (Integer, default `15`, range 1–60): Decode/output frame rate
+    cap. Playback is looped by default and always silent.
+  - **`fit`** (String, default `"cover"`): `"cover"` scales to fill the canvas
+    and crops the overflow (matches the image background); `"contain"` scales
+    to fit and letterboxes the remainder in black.
+  - Example:
+  ```toml
+  [background.video]
+  path = "~/Videos/ambient.mp4"
+  fps = 15
+  fit = "cover"
+  ```
+  - While a video background is active the source is time-varying: raise
+    `[display].tick_rate` (default 2) toward the video fps for smooth
+    playback. A video takes precedence over `image` while active.
+  - Preview without hardware: `cargo run --features video --example
+    preview_composite -- --video /path/to/clip.mp4 --video-fps 15
+    --overlay layouts/minimal.html --frames 8 --output target/video-preview`
 
 ---
 
