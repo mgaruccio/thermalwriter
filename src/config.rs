@@ -200,13 +200,41 @@ impl ThemeConfig {
     }
 }
 
-/// Background image configuration. The image file lives under
+/// Background configuration: an optional static image and/or an optional
+/// looping video. The image file lives under
 /// `~/.config/thermalwriter/backgrounds/`. Empty/None = no background.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct BackgroundConfig {
-    /// Filename (no path) of the active background. None = no background.
+    /// Filename (no path) of the active background image. None = no image.
     pub image: Option<String>,
+    /// Optional looping video background. Requires the `video` build
+    /// feature to take effect; ignored (with a warning) otherwise.
+    #[serde(default)]
+    pub video: Option<VideoBackgroundConfig>,
+}
+
+/// Looping video background configuration (feature `video`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VideoBackgroundConfig {
+    /// Path to a local video file (absolute, or relative to the daemon cwd).
+    pub path: String,
+    /// Decode/output frame rate cap (1–60).
+    pub fps: u32,
+    /// Fit mode: `"cover"` (default, matches the image background) or
+    /// `"contain"` (letterboxed).
+    pub fit: String,
+}
+
+impl Default for VideoBackgroundConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            fps: 15,
+            fit: "cover".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -286,6 +314,24 @@ impl Config {
         }
         // Validate theme.source the same way resolve_palette does.
         let _ = self.theme.resolve_palette()?;
+        if let Some(video) = &self.background.video {
+            if video.path.trim().is_empty() {
+                anyhow::bail!("background.video.path must not be empty");
+            }
+            if video.fps == 0 || video.fps > 60 {
+                anyhow::bail!("background.video.fps={} out of range [1, 60]", video.fps);
+            }
+            if !matches!(
+                video.fit.trim().to_ascii_lowercase().as_str(),
+                "cover" | "contain"
+            ) {
+                anyhow::bail!(
+                    "background.video.fit='{}' must be 'cover' or 'contain'",
+                    video.fit
+                );
+            }
+        }
+
         Ok(())
     }
 

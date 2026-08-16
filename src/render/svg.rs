@@ -232,6 +232,11 @@ pub struct SvgRenderer<'a> {
     background: Option<Arc<Pixmap>>,
     /// True if the layout declares animation_fps — content changes every frame.
     time_varying: bool,
+    /// Optional looping video background (feature `video`). When active it
+    /// drives the canvas every tick and takes precedence over the static
+    /// image background in compositing.
+    #[cfg(feature = "video")]
+    video_background: Option<super::video::VideoBackground>,
 }
 
 fn logical_canvas_dimensions(
@@ -281,6 +286,8 @@ impl<'a> SvgRenderer<'a> {
             background_source: None,
             background: None,
             time_varying: frontmatter.animation_fps.is_some(),
+            #[cfg(feature = "video")]
+            video_background: None,
         })
     }
 
@@ -325,6 +332,55 @@ impl<'a> SvgRenderer<'a> {
                 self.background = Some(Arc::new(pixmap));
                 Ok(())
             }
+        }
+    }
+
+    /// Start (or replace) a looping, muted video background.
+    ///
+    /// The video is decoded by an external `ffmpeg` process at up to `fps`
+    /// frames per second, fitted to this renderer's canvas, and composited
+    /// under the layout on every render. While active, it takes precedence
+    /// over the static image background and makes the source time-varying.
+    #[cfg(feature = "video")]
+    pub fn set_video_background(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        fps: u32,
+        fit: super::video::VideoFit,
+    ) -> anyhow::Result<()> {
+        self.video_background = Some(super::video::VideoBackground::start(
+            path,
+            fps,
+            fit,
+            self.width,
+            self.height,
+        )?);
+        Ok(())
+    }
+
+    /// Stop and remove the video background, if any.
+    #[cfg(feature = "video")]
+    pub fn clear_video_background(&mut self) {
+        self.video_background = None;
+    }
+
+    /// Number of frames decoded by the active video background, if any.
+    #[cfg(feature = "video")]
+    pub fn video_frame_count(&self) -> Option<u64> {
+        self.video_background
+            .as_ref()
+            .map(|video| video.frame_count())
+    }
+
+    /// True when a live video background is driving the canvas.
+    fn has_live_video(&self) -> bool {
+        #[cfg(feature = "video")]
+        {
+            self.video_background.is_some()
+        }
+        #[cfg(not(feature = "video"))]
+        {
+            false
         }
     }
     fn resolved_theme_background_value(&self) -> &str {
@@ -562,9 +618,21 @@ impl SvgRenderer<'static> {
         let svg_string = self.render_template(&context)?;
         let tree = parse_svg(&svg_string, &self.options)?;
         let layout_pixmap = rasterize(&tree, self.width, self.height)?;
+        // A live video frame (when configured and warmed up) takes
+        // precedence over the static background; both sit under the
+        // layout layer so stats keep rendering on top.
+        #[cfg(feature = "video")]
+        let video_frame = self
+            .video_background
+            .as_ref()
+            .and_then(|video| video.latest_frame())
+            .map(|frame| super::video::rgb_to_pixmap(&frame))
+            .transpose()?;
+        #[cfg(not(feature = "video"))]
+        let video_frame: Option<Pixmap> = None;
         composite(
             &layout_pixmap,
-            self.background.as_deref(),
+            video_frame.as_ref().or(self.background.as_deref()),
             self.width,
             self.height,
             self.fallback_background_color(),
@@ -581,7 +649,7 @@ impl FrameSource for SvgRenderer<'static> {
         "svg"
     }
     fn is_time_varying(&self) -> bool {
-        self.time_varying
+        self.time_varying || self.has_live_video()
     }
 
     fn set_template(&mut self, template: &str) {
@@ -610,8 +678,9 @@ impl FrameSource for SvgRenderer<'static> {
     }
 
     fn content_fingerprint(&self, sensors: &SensorData) -> Option<u64> {
-        // Animated layouts change every frame — always dirty.
-        if self.time_varying {
+        // Animated layouts (and live video backgrounds) change every
+        // frame — always dirty.
+        if self.time_varying || self.has_live_video() {
             return None;
         }
         use std::hash::{Hash, Hasher};
