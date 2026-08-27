@@ -416,6 +416,7 @@ mod tests {
         let oversized = directory.path().join("oversized.png");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&oversized)
             .expect("sparse fixture");

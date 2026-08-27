@@ -1,5 +1,10 @@
 //! Shared layout document types for the daemon and configuration GUI.
 
+#![allow(clippy::result_large_err)]
+// `LayoutDiagnostic` is an intentionally rich, self-contained diagnostic (~240 B),
+// carried by value across the layout pipeline. Boxing it would cascade through the
+// entire error-propagation chain, so the perf lint is allowed here with intent.
+
 pub mod bindings;
 pub mod diagnostic;
 pub mod document;

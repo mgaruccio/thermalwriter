@@ -178,6 +178,7 @@ pub fn send_ly_with_io(io: &mut dyn LyIo, pid: u16, frame: &EncodedFrame) -> Res
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_ly_frame(info: &DeviceInfo, frame: &EncodedFrame) -> Result<()> {
     let (wire_width, wire_height) = info.wire_dimensions()?;
     if frame.width != wire_width || frame.height != wire_height {
@@ -256,11 +257,13 @@ impl LyLcd {
         })
     }
 
+    #[allow(dead_code)]
     fn mark_disconnected(&mut self) {
         self.handle = None;
         self.info = None;
     }
 
+    #[allow(dead_code)]
     fn mark_disconnected_if_fatal(&mut self, err: &anyhow::Error) {
         let is_fatal = super::bulk_usb::is_fatal_usb_transfer(err);
         if is_fatal {

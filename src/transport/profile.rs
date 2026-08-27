@@ -141,6 +141,7 @@ impl DeviceInfo {
         oriented_dimensions(self.width(), self.height(), baseline)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn authorized(
         vid: u16,
         pid: u16,

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use thermalwriter::layout_engine::{
-    solve, validate, LayoutDocument, LayoutEngineRenderer, ResvgSceneBackend, SurfaceProfileId,
-    rectangular_surface_profile, resolve_surface_profile,
-    BRIDGE_VIOLATION_CODE, RECIPE_OVERFLOW_CODE,
+    BRIDGE_VIOLATION_CODE, LayoutDocument, LayoutEngineRenderer, RECIPE_OVERFLOW_CODE,
+    ResvgSceneBackend, SurfaceProfileId, rectangular_surface_profile, resolve_surface_profile,
+    solve, validate,
 };
 use thermalwriter::render::{FrameSource, RawFrame, SensorData};
 use thermalwriter::service::mode_handler::build_layout_document_source;
@@ -19,12 +19,26 @@ struct Fixture {
 
 fn fixtures() -> [Fixture; 4] {
     [
-        Fixture { name: "square", surface: *rectangular_surface_profile(480, 480).unwrap() },
-        Fixture { name: "portrait", surface: *rectangular_surface_profile(480, 1280).unwrap() },
-        Fixture { name: "wide", surface: *rectangular_surface_profile(1280, 480).unwrap() },
+        Fixture {
+            name: "square",
+            surface: *rectangular_surface_profile(480, 480).unwrap(),
+        },
+        Fixture {
+            name: "portrait",
+            surface: *rectangular_surface_profile(480, 1280).unwrap(),
+        },
+        Fixture {
+            name: "wide",
+            surface: *rectangular_surface_profile(1280, 480).unwrap(),
+        },
         Fixture {
             name: "curved",
-            surface: *resolve_surface_profile(2400, 1080, SurfaceProfileId::ThermalrightCurved2400x1080).unwrap(),
+            surface: *resolve_surface_profile(
+                2400,
+                1080,
+                SurfaceProfileId::ThermalrightCurved2400x1080,
+            )
+            .unwrap(),
         },
     ]
 }
@@ -36,12 +50,21 @@ fn fixed_data() -> SensorData {
     ])
 }
 
-fn render_preview(doc: LayoutDocument, surface: thermalwriter::layout_engine::DisplaySurfaceProfile, data: &SensorData) -> anyhow::Result<RawFrame> {
-    let mut renderer = LayoutEngineRenderer::with_media_root(doc, surface, ResvgSceneBackend, Path::new("."));
+fn render_preview(
+    doc: LayoutDocument,
+    surface: thermalwriter::layout_engine::DisplaySurfaceProfile,
+    data: &SensorData,
+) -> anyhow::Result<RawFrame> {
+    let mut renderer =
+        LayoutEngineRenderer::with_media_root(doc, surface, ResvgSceneBackend, Path::new("."));
     renderer.render(data)
 }
 
-fn render_daemon(doc: LayoutDocument, surface: thermalwriter::layout_engine::DisplaySurfaceProfile, data: &SensorData) -> anyhow::Result<RawFrame> {
+fn render_daemon(
+    doc: LayoutDocument,
+    surface: thermalwriter::layout_engine::DisplaySurfaceProfile,
+    data: &SensorData,
+) -> anyhow::Result<RawFrame> {
     let mut source = build_layout_document_source(
         doc,
         Path::new("."),
@@ -62,8 +85,15 @@ fn flagship_preview_and_daemon_match_for_every_target_profile() {
             .unwrap_or_else(|error| panic!("preview failed for {}: {error:#}", fixture.name));
         let daemon = render_daemon(doc.clone(), fixture.surface, &data)
             .unwrap_or_else(|error| panic!("daemon failed for {}: {error:#}", fixture.name));
-        assert_eq!(preview.data, daemon.data, "pixel mismatch for {}", fixture.name);
-        assert_eq!((preview.width, preview.height), fixture.surface.dimensions());
+        assert_eq!(
+            preview.data, daemon.data,
+            "pixel mismatch for {}",
+            fixture.name
+        );
+        assert_eq!(
+            (preview.width, preview.height),
+            fixture.surface.dimensions()
+        );
     }
 }
 
@@ -94,11 +124,17 @@ fn fixture_variants_render_or_report_stable_diagnostics() {
     assert_eq!(sparse_frame.data, sparse_daemon.data);
 
     let dense = document(
-        &format!("{METRIC}{}", METRIC.replace("id = \"metric\"", "id = \"metric-b\"")),
+        &format!(
+            "{METRIC}{}",
+            METRIC.replace("id = \"metric\"", "id = \"metric-b\"")
+        ),
         profiles,
     );
     assert!(validate(&dense, &square).is_ok());
-    assert!(render_preview(dense, square, &data).is_ok(), "dense fixture should fit its profile");
+    assert!(
+        render_preview(dense, square, &data).is_ok(),
+        "dense fixture should fit its profile"
+    );
 
     let long_label = document(
         r#"[[modules]]
@@ -109,11 +145,17 @@ variant = "body"
 "#,
         profiles,
     );
-    let long_data = HashMap::from([("host.name".into(), "A very long deterministic label for layout regression".into())]);
+    let long_data = HashMap::from([(
+        "host.name".into(),
+        "A very long deterministic label for layout regression".into(),
+    )]);
     assert!(render_preview(long_label, square, &long_data).is_ok());
 
     let missing_sensor = document(METRIC, profiles);
-    assert!(render_preview(missing_sensor, square, &HashMap::new()).is_ok(), "missing bindings use stable unavailable state");
+    assert!(
+        render_preview(missing_sensor, square, &HashMap::new()).is_ok(),
+        "missing bindings use stable unavailable state"
+    );
 }
 
 #[test]
@@ -123,7 +165,11 @@ fn curved_metrics_stay_in_readable_zones_and_bridge_policy_is_bounded() {
     let solved = solve(&doc, &curved).unwrap();
     assert!(solved.modules.iter().all(|module| module.zone.is_some()));
     for module in &solved.modules {
-        let zone = curved.readable_zones.iter().find(|zone| Some(zone.name) == module.zone.as_deref()).unwrap();
+        let zone = curved
+            .readable_zones
+            .iter()
+            .find(|zone| Some(zone.name) == module.zone.as_deref())
+            .unwrap();
         assert!(zone.bounds.contains(module.bounds.x, module.bounds.y));
         assert!(module.bounds.x + module.bounds.width <= zone.bounds.right());
         assert!(module.bounds.y + module.bounds.height <= zone.bounds.bottom());
@@ -139,7 +185,11 @@ variant = "hero"
         "[profiles.thermalright-curved-2400x1080]\nrecipe = \"zoned-panorama\"\nbridge = \"unsafe\"\n",
     );
     let diagnostics = validate(&unsafe_bridge, &curved).unwrap_err();
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == BRIDGE_VIOLATION_CODE));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == BRIDGE_VIOLATION_CODE)
+    );
 }
 
 #[test]
@@ -148,6 +198,9 @@ fn overflow_fixture_is_rejected_without_baseline_auto_acceptance() {
     let modules = (0..8).map(|index| format!("[[modules]]\nid = \"metric-{index}\"\nkind = \"metric\"\nbinding = \"cpu.temperature\"\nvariant = \"hero\"\n")).collect::<String>();
     let overflow = document(&modules, profiles);
     let diagnostics = validate(&overflow, &fixtures()[0].surface).unwrap_err();
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == RECIPE_OVERFLOW_CODE));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == RECIPE_OVERFLOW_CODE)
+    );
 }
-

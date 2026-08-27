@@ -421,7 +421,7 @@ fn document_targets(options: &PreviewOptions) -> CliResult<Vec<DocumentTarget>> 
                     .copied()
                     .ok_or_else(|| {
                         CliError::Diagnostics(vec![unsupported_profile_diagnostic(
-                            *profile,
+                            profile,
                             Some((*width, *height)),
                             "the matrix target is not registered",
                             "Use the bounded preview profile matrix.",

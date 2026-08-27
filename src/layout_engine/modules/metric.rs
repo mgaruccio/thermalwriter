@@ -16,17 +16,13 @@ use crate::layout_engine::solver::SolvedModule;
 /// choices; an owner cannot inject renderer-specific style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum MetricVariant {
+    #[default]
     Default,
     Hero,
     Compact,
     Status,
-}
-
-impl Default for MetricVariant {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl From<&str> for MetricVariant {
@@ -111,7 +107,7 @@ impl MetricModule {
         }
     }
 
-    fn resolve_value<'a>(&self, data: &'a ResolvedBindings) -> (String, Option<f64>, bool) {
+    fn resolve_value(&self, data: &ResolvedBindings) -> (String, Option<f64>, bool) {
         let Some(binding) = data.get(&self.binding) else {
             return ("--".to_owned(), None, true);
         };

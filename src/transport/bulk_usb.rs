@@ -225,6 +225,7 @@ pub fn send_frame_with_io(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub struct BulkUsb {
     handle: Option<DeviceHandle<GlobalContext>>,
     vid: u16,

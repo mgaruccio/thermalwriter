@@ -8,20 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Stable identifier for a display-surface topology.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SurfaceProfileId {
     /// A single rectangular readable surface.
     #[serde(rename = "rectangular")]
+    #[default]
     Rectangular,
     /// Thermalright's provisional 2400x1080 curved panorama topology.
     #[serde(rename = "thermalright-curved-2400x1080")]
     ThermalrightCurved2400x1080,
-}
-
-impl Default for SurfaceProfileId {
-    fn default() -> Self {
-        Self::Rectangular
-    }
 }
 
 impl SurfaceProfileId {

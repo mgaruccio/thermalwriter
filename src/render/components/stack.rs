@@ -33,9 +33,7 @@ impl Function for StackFunction {
         }
 
         let leftover = span - item * count as f64;
-        let gap = if count == 1 {
-            0.0
-        } else if leftover <= 0.0 {
+        let gap = if count == 1 || leftover <= 0.0 {
             0.0
         } else {
             (leftover / (count - 1) as f64).max(gap_min.max(0.0))
@@ -62,9 +60,9 @@ fn value_as_u32(value: &Value) -> Option<u32> {
     if let Some(n) = value.as_i64() {
         return u32::try_from(n).ok();
     }
-    value.as_f64().and_then(|n| {
-        (n.is_finite() && n >= 0.0 && n <= f64::from(u32::MAX)).then_some(n as u32)
-    })
+    value
+        .as_f64()
+        .and_then(|n| (n.is_finite() && n >= 0.0 && n <= f64::from(u32::MAX)).then_some(n as u32))
 }
 
 fn json_number(n: f64) -> Value {
@@ -87,7 +85,9 @@ mod tests {
     fn leftover_becomes_equal_gaps_space_between() {
         // 3×10 in 50 → leftover 20 → gap 10 → 0, 20, 40 (last ends at 50).
         assert_eq!(
-            render("{% set ys = stack(count=3, item=10, origin=0, span=50) %}{{ ys[0] }} {{ ys[1] }} {{ ys[2] }}"),
+            render(
+                "{% set ys = stack(count=3, item=10, origin=0, span=50) %}{{ ys[0] }} {{ ys[1] }} {{ ys[2] }}"
+            ),
             "0 20 40"
         );
     }
@@ -95,13 +95,18 @@ mod tests {
     #[test]
     fn overflow_start_aligns_with_zero_gap() {
         assert_eq!(
-            render("{% set ys = stack(count=3, item=10, origin=5, span=20) %}{{ ys[0] }} {{ ys[1] }} {{ ys[2] }}"),
+            render(
+                "{% set ys = stack(count=3, item=10, origin=5, span=20) %}{{ ys[0] }} {{ ys[1] }} {{ ys[2] }}"
+            ),
             "5 15 25"
         );
     }
 
     #[test]
     fn empty_count_is_empty_array() {
-        assert_eq!(render("{% set ys = stack(count=0, item=10, span=50) %}{{ ys | length }}"), "0");
+        assert_eq!(
+            render("{% set ys = stack(count=0, item=10, span=50) %}{{ ys | length }}"),
+            "0"
+        );
     }
 }

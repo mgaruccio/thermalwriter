@@ -471,8 +471,10 @@ mod tests {
 
     #[test]
     fn invalid_theme_reports_style_diagnostic() {
-        let mut theme = ThemeTokens::default();
-        theme.label = Color::rgb(0x98, 0x99, 0x99);
+        let theme = ThemeTokens {
+            label: Color::rgb(0x98, 0x99, 0x99),
+            ..Default::default()
+        };
         let error = theme.validate().expect_err("below-floor label must fail");
         assert_eq!(error.code, MODULE_DIAGNOSTIC_CODE);
         assert!(error.reason.contains("label"));
