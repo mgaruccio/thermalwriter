@@ -14,9 +14,11 @@ use anyhow::{Result, anyhow};
 use super::diagnostic::LayoutDiagnostic;
 use super::document::{LayoutDocument, ModuleDocument};
 use super::media_cache::MediaCache;
+#[cfg(test)]
+use super::modules::BindingValue;
 use super::modules::{
-    BindingValue, MediaModule, MetricModule, MetricVariant, ModuleEmitter, ResolvedBindings,
-    SparklineModule, SparklineVariant, TextModule, ThemeTokens,
+    MediaModule, MetricModule, MetricVariant, ModuleEmitter, ResolvedBindings, SparklineModule,
+    SparklineVariant, TextModule, ThemeTokens,
 };
 use super::scene::{Scene, SceneNode, TextAlignment, TextRole};
 use super::solver::{SolvedModule, solve};

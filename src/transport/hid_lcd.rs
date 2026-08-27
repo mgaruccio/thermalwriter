@@ -372,7 +372,7 @@ impl HidLcd {
             device.address = address;
             device.ep_in = 0x83;
             device.ep_out = 0x02;
-            return Ok(device);
+            Ok(device)
         }
         #[cfg(not(feature = "daemon"))]
         {

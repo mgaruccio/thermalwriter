@@ -132,6 +132,7 @@ pub fn build_layout_source(
 }
 
 /// Build a source from a path with the daemon's declared sensor catalog.
+#[allow(clippy::too_many_arguments)]
 pub fn build_layout_source_with_bindings(
     layout_path: &Path,
     vars: HashMap<String, String>,

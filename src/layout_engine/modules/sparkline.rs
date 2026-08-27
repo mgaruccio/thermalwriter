@@ -67,8 +67,10 @@ impl From<String> for HistoryBinding {
 /// callers cannot inject renderer-specific CSS or path syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum SparklineVariant {
     /// The default accent line.
+    #[default]
     Default,
     /// An explicit line-only presentation.
     Line,
@@ -78,12 +80,6 @@ pub enum SparklineVariant {
     Neon,
     /// A lower-emphasis line using the theme's unit color.
     Muted,
-}
-
-impl Default for SparklineVariant {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl From<&str> for SparklineVariant {

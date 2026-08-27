@@ -307,6 +307,7 @@ fn bulk_endpoints(pair: Option<DerivedBulkPair>) -> Option<(u8, u8, u8)> {
 }
 
 /// Outcome of routing a known USB LCD through bulk-endpoint discovery.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UsbBulkDiscoveryOutcome {
     /// Bulk IN+OUT pair suitable for `DevicePath::Usb`.
@@ -315,6 +316,7 @@ enum UsbBulkDiscoveryOutcome {
     Unsupported,
 }
 
+#[allow(dead_code)]
 fn usb_bulk_discovery_outcome(
     protocol: WireProtocol,
     fingerprint: &UsbFingerprint,
@@ -476,6 +478,7 @@ fn scan_scsi(_out: &mut Vec<DiscoveredDevice>) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct UsbAncestor {
     vid: u16,
@@ -484,6 +487,7 @@ struct UsbAncestor {
     address: Option<u8>,
 }
 
+#[allow(dead_code)]
 fn belongs_to_usb_ancestor(device: &DiscoveredDevice, ancestor: UsbAncestor) -> bool {
     let (Some(expected_bus), Some(expected_address)) = (ancestor.bus, ancestor.address) else {
         return false;
@@ -499,6 +503,7 @@ fn belongs_to_usb_ancestor(device: &DiscoveredDevice, ancestor: UsbAncestor) -> 
         } => *usb_bus == Some(expected_bus) && *usb_address == Some(expected_address),
     }
 }
+#[allow(dead_code)]
 fn resolve_usb_ancestor(sysfs_sg: &Path) -> Option<UsbAncestor> {
     // Walk device symlink parents looking for idVendor/idProduct.
     let device_link = sysfs_sg.join("device");

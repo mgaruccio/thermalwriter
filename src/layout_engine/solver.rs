@@ -353,7 +353,7 @@ fn module_id(module: &ModuleDocument) -> &str {
 /// `token_margin` convention without introducing per-resolution pixel tables.
 pub(crate) fn content_inset_for_surface(surface: &DisplaySurfaceProfile) -> u32 {
     let short = surface.width.min(surface.height);
-    ((short + 29) / 30).max(CONTENT_INSET_BASE / 2)
+    short.div_ceil(30).max(CONTENT_INSET_BASE / 2)
 }
 
 /// Responsive fixed flow extent derived from the short axis.

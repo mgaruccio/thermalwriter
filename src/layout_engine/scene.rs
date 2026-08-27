@@ -64,8 +64,10 @@ impl Color {
 /// handling, while the scene keeps the role bounded and renderer-neutral.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TextRole {
     Title,
+    #[default]
     Body,
     Label,
     Caption,
@@ -74,26 +76,16 @@ pub enum TextRole {
     Status,
 }
 
-impl Default for TextRole {
-    fn default() -> Self {
-        Self::Body
-    }
-}
-
 /// Logical text alignment.  `Start` and `End` avoid baking a writing direction
 /// into the scene; the current LCD layouts use the horizontal direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TextAlignment {
+    #[default]
     Start,
     Center,
     End,
-}
-
-impl Default for TextAlignment {
-    fn default() -> Self {
-        Self::Start
-    }
 }
 
 /// A filled axis-aligned rectangle.
@@ -217,15 +209,11 @@ impl ImageNode {
 /// How an image fills its bounded scene rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ImageFit {
+    #[default]
     Contain,
     Cover,
-}
-
-impl Default for ImageFit {
-    fn default() -> Self {
-        Self::Contain
-    }
 }
 
 /// A clipping instruction for following backend operations.

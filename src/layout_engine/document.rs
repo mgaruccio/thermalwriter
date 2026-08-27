@@ -1,6 +1,10 @@
 //! Versioned, bounded layout documents shared by the daemon and GUI.
 
-use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -87,7 +91,7 @@ fn default_media_opacity() -> f32 {
     1.0
 }
 
-fn is_empty_path(value: &PathBuf) -> bool {
+fn is_empty_path(value: &Path) -> bool {
     value.as_os_str().is_empty()
 }
 
@@ -273,13 +277,13 @@ bridge = "media-only"
         ] {
             let document = LayoutDocument::from_toml(&module_document(kind)).expect("module TOML");
             assert_eq!(document.modules.len(), 1);
-            let matches_expected = match (&document.modules[0], expected) {
+            let matches_expected = matches!(
+                (&document.modules[0], expected),
                 (ModuleDocument::Metric(_), "metric")
-                | (ModuleDocument::Sparkline(_), "sparkline")
-                | (ModuleDocument::Text(_), "text")
-                | (ModuleDocument::Media(_), "media") => true,
-                _ => false,
-            };
+                    | (ModuleDocument::Sparkline(_), "sparkline")
+                    | (ModuleDocument::Text(_), "text")
+                    | (ModuleDocument::Media(_), "media")
+            );
             assert!(matches_expected);
             let round_tripped =
                 LayoutDocument::from_toml(&document.to_toml().expect("serialize module TOML"))

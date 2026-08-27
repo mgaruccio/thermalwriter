@@ -83,7 +83,18 @@ pub fn pad_to_hid_chunks(payload: &[u8]) -> Vec<u8> {
 
 fn draw_target_marker(width: u32, height: u32, run_id: &str, vid_pid: &str) -> RawFrame {
     let mut data = vec![0x22_u8; usize::try_from(width * height * 3).unwrap_or(0)];
-    fill_rect(&mut data, width, height, 0, 0, width, height / 8, 0xFF, 0xFF, 0xFF);
+    fill_rect(
+        &mut data,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height / 8,
+        0xFF,
+        0xFF,
+        0xFF,
+    );
     let label = format!("{run_id} {vid_pid}");
     draw_label_stripes(&mut data, width, height, &label, height / 4);
     fill_rect(
@@ -108,7 +119,9 @@ fn draw_target_marker(width: u32, height: u32, run_id: &str, vid_pid: &str) -> R
 fn draw_orientation_card(width: u32, height: u32) -> RawFrame {
     let mut data = vec![0x11_u8; usize::try_from(width * height * 3).unwrap_or(0)];
     let marker = (width.min(height) / 6).max(8);
-    fill_rect(&mut data, width, height, 0, 0, width, marker, 0xFF, 0xFF, 0xFF);
+    fill_rect(
+        &mut data, width, height, 0, 0, width, marker, 0xFF, 0xFF, 0xFF,
+    );
     let corners = [
         (0, 0, 0xFF, 0x00, 0x00),
         (width.saturating_sub(marker), 0, 0x00, 0xFF, 0x00),
@@ -209,15 +222,7 @@ fn draw_label_stripes(data: &mut [u8], width: u32, height: u32, label: &str, y: 
     }
 }
 
-fn draw_char_block(
-    data: &mut [u8],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    h: u32,
-    ch: char,
-) {
+fn draw_char_block(data: &mut [u8], width: u32, height: u32, x: u32, y: u32, h: u32, ch: char) {
     let pattern = char_pattern(ch);
     let scale = h.max(4);
     for (row, bits) in pattern.iter().enumerate() {

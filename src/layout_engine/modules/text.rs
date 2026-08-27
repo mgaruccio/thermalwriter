@@ -7,9 +7,11 @@ use super::{
     emission_diagnostic, inset_rect, validate_bounds,
 };
 use crate::layout_engine::LayoutDiagnostic;
+#[cfg(test)]
+use crate::layout_engine::scene::Rect;
 use crate::layout_engine::scene::{
-    MAX_TEXT_CONTENT, MIN_OPACITY, MIN_TEXT_SIZE, Rect, RectNode, SceneNode, TextAlignment,
-    TextNode, TextRole,
+    MAX_TEXT_CONTENT, MIN_OPACITY, MIN_TEXT_SIZE, RectNode, SceneNode, TextAlignment, TextNode,
+    TextRole,
 };
 use crate::layout_engine::solver::SolvedModule;
 

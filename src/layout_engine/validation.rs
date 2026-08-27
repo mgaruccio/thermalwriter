@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use super::diagnostic::{DiagnosticSeverity, LayoutDiagnostic};
 use super::document::LayoutDocument;
 use super::solver::{
-    card_extent_for_surface, content_inset_for_surface, fixed_module_width, ordered_panorama_zones,
-    BridgePolicy, RecipeKind, Rect, CARD_MIN_EXTENT,
+    BridgePolicy, CARD_MIN_EXTENT, RecipeKind, Rect, card_extent_for_surface,
+    content_inset_for_surface, fixed_module_width, ordered_panorama_zones,
 };
 use super::surface::DisplaySurfaceProfile;
 
@@ -266,7 +266,10 @@ pub(crate) fn panorama_canvas_bounds(
             return Err(surface_diagnostic(
                 surface,
                 "A readable panorama zone enters the protected bridge.",
-                format!("Readable zone `{}` overlaps the protected bridge interior.", zone.name),
+                format!(
+                    "Readable zone `{}` overlaps the protected bridge interior.",
+                    zone.name
+                ),
                 "Move the zone to the bridge edge; touching the edge is allowed, but interior overlap is not.",
             ));
         }
@@ -612,7 +615,7 @@ mod tests {
 
     use super::*;
     use crate::layout_engine::document::{
-        LayoutDocument, MetricDocument, ModuleDocument, ProfileRecipeDocument, CURRENT_VERSION,
+        CURRENT_VERSION, LayoutDocument, MetricDocument, ModuleDocument, ProfileRecipeDocument,
     };
     use crate::layout_engine::surface::rectangular_surface_profile;
 

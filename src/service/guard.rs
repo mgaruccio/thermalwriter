@@ -72,12 +72,8 @@ impl OwnershipTarget {
     }
 
     pub(crate) fn usb_devnode(&self) -> Option<PathBuf> {
-        self.usb.map(|usb| {
-            PathBuf::from(format!(
-                "/dev/bus/usb/{:03}/{:03}",
-                usb.bus, usb.address
-            ))
-        })
+        self.usb
+            .map(|usb| PathBuf::from(format!("/dev/bus/usb/{:03}/{:03}", usb.bus, usb.address)))
     }
 
     pub(crate) fn hidraw_devnode(&self) -> Option<&Path> {
@@ -297,10 +293,7 @@ impl<C: ServiceControl, O: DeviceOwnership> Drop for ServiceGuard<C, O> {
             return;
         }
         if let Err(err) = self.restore() {
-            error!(
-                "ServiceGuard drop failed to restore {}: {err:#}",
-                self.unit
-            );
+            error!("ServiceGuard drop failed to restore {}: {err:#}", self.unit);
         }
     }
 }
@@ -386,8 +379,13 @@ mod tests {
             ..Default::default()
         };
         let ownership = FakeOwnership::default();
-        let mut guard = ServiceGuard::acquire(control, ownership, &sample_target(), "thermalwriter.service")
-            .expect("acquire when inactive");
+        let mut guard = ServiceGuard::acquire(
+            control,
+            ownership,
+            &sample_target(),
+            "thermalwriter.service",
+        )
+        .expect("acquire when inactive");
         assert!(!guard.was_active());
         guard.restore().expect("restore noop");
         assert!(guard.restored());
@@ -404,8 +402,13 @@ mod tests {
             ..Default::default()
         };
         let ownership = FakeOwnership::default();
-        let mut guard = ServiceGuard::acquire(control, ownership, &sample_target(), "thermalwriter.service")
-            .expect("acquire when active");
+        let mut guard = ServiceGuard::acquire(
+            control,
+            ownership,
+            &sample_target(),
+            "thermalwriter.service",
+        )
+        .expect("acquire when active");
         assert!(guard.was_active());
         guard.restore().expect("restore starts unit");
         let recorded = calls.borrow();
@@ -438,7 +441,10 @@ mod tests {
             active: true,
             ..Default::default()
         };
-        let ownership = FakeOwnership { owned: true, ..Default::default() };
+        let ownership = FakeOwnership {
+            owned: true,
+            ..Default::default()
+        };
         let err = match ServiceGuard::acquire(
             control,
             ownership,
@@ -448,10 +454,7 @@ mod tests {
             Ok(_) => panic!("retained ownership must abort acquire"),
             Err(err) => err,
         };
-        assert!(
-            err.to_string().contains("concurrently owned"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("concurrently owned"), "{err}");
     }
 
     #[test]
@@ -480,9 +483,16 @@ mod tests {
             ..Default::default()
         };
         let ownership = FakeOwnership::default();
-        let mut guard = ServiceGuard::acquire(control, ownership, &sample_target(), "thermalwriter.service")
-            .expect("acquire");
-        let err = guard.restore().expect_err("restore must surface start failure");
+        let mut guard = ServiceGuard::acquire(
+            control,
+            ownership,
+            &sample_target(),
+            "thermalwriter.service",
+        )
+        .expect("acquire");
+        let err = guard
+            .restore()
+            .expect_err("restore must surface start failure");
         assert!(format!("{err:#}").contains("start failed"), "{err:#}");
         assert!(guard.restored());
         assert!(guard.restore_error().is_some());
@@ -497,8 +507,13 @@ mod tests {
             ..Default::default()
         };
         let ownership = FakeOwnership::default();
-        let guard = ServiceGuard::acquire(control, ownership, &sample_target(), "thermalwriter.service")
-            .expect("acquire");
+        let guard = ServiceGuard::acquire(
+            control,
+            ownership,
+            &sample_target(),
+            "thermalwriter.service",
+        )
+        .expect("acquire");
         drop(guard);
         let recorded = calls.borrow();
         assert_eq!(recorded.as_slice(), &["is_active", "stop", "start"]);
@@ -526,8 +541,13 @@ mod tests {
             ..Default::default()
         };
         let ownership = FakeOwnership::default();
-        let guard = ServiceGuard::acquire(control, ownership, &sample_target(), "thermalwriter.service")
-            .expect("acquire");
+        let guard = ServiceGuard::acquire(
+            control,
+            ownership,
+            &sample_target(),
+            "thermalwriter.service",
+        )
+        .expect("acquire");
         drop(guard);
         let recorded = calls.borrow();
         assert!(
