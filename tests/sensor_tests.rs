@@ -1,10 +1,15 @@
 use serial_test::serial;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use thermalwriter::config::LlmSensorConfig;
 use thermalwriter::sensor::SensorProvider;
 use thermalwriter::sensor::amdgpu::AmdGpuProvider;
 use thermalwriter::sensor::hwmon::HwmonProvider;
+use thermalwriter::sensor::llm::LlmProvider;
 use thermalwriter::sensor::mangohud::MangoHudProvider;
 use thermalwriter::sensor::nvidia::NvidiaProvider;
 use thermalwriter::sensor::rapl::RaplProvider;
@@ -1334,4 +1339,117 @@ fn hwmon_quarantines_slow_chip_after_first_poll() {
         "post-quarantine poll should be fast, took {:?}",
         elapsed
     );
+}
+
+#[test]
+fn llm_closed_port_fails_open() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let config = LlmSensorConfig {
+        url: format!("http://127.0.0.1:{port}"),
+        timeout_ms: 100,
+        ..Default::default()
+    };
+    let mut provider = LlmProvider::from_config(&config);
+    let start = Instant::now();
+    let readings = provider.poll().unwrap();
+    let elapsed = start.elapsed();
+    assert!(readings.is_empty(), "closed endpoint should be fail-open");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "poll took {elapsed:?}"
+    );
+}
+
+#[test]
+fn llm_timeout_fails_open() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+    });
+
+    let config = LlmSensorConfig {
+        url: format!("http://127.0.0.1:{port}"),
+        timeout_ms: 60,
+        ..Default::default()
+    };
+    let mut provider = LlmProvider::from_config(&config);
+    let start = Instant::now();
+    let readings = provider.poll().unwrap();
+    let elapsed = start.elapsed();
+    assert!(readings.is_empty(), "silent endpoint should be fail-open");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "poll took {elapsed:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn llm_http_fixture_emits_expected_readings() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let (status, body) = if request.starts_with("GET /metrics ") {
+                (
+                    "200 OK",
+                    "# HELP sglang:num_running_reqs running\nsglang:num_running_reqs 4\n# HELP sglang:num_queue_reqs waiting\nsglang:num_queue_reqs 2\nsglang:token_usage 0.28\nsglang:gen_throughput 86.5\n",
+                )
+            } else if request.starts_with("GET /v1/models ") {
+                ("200 OK", r#"{"data":[{"id":"org/Llama-3"}]}"#)
+            } else {
+                ("404 Not Found", "")
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let config = LlmSensorConfig {
+        url: format!("http://127.0.0.1:{port}"),
+        timeout_ms: 250,
+        ..Default::default()
+    };
+    let mut provider = LlmProvider::from_config(&config);
+    let readings = provider.poll().unwrap();
+    server.join().unwrap();
+
+    let value = |key: &str| {
+        readings
+            .iter()
+            .find(|reading| reading.key == key)
+            .map(|reading| reading.value.as_str())
+    };
+    assert_eq!(value("llm_model"), Some("Llama-3"));
+    assert_eq!(value("llm_engine"), Some("sglang"));
+    assert_eq!(value("llm_tok_s"), Some("87"));
+    assert_eq!(value("llm_running"), Some("4"));
+    assert_eq!(value("llm_waiting"), Some("2"));
+    assert_eq!(value("llm_kv_cache"), Some("28"));
+}
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&request).into_owned()
 }

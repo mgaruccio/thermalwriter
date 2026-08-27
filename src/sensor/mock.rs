@@ -24,6 +24,12 @@ pub fn mock_sensors() -> SensorData {
         ("frametime".into(), "6.9".into()),
         ("net_rx".into(), "125".into()),
         ("net_tx".into(), "42".into()),
+        ("llm_model".into(), "Llama-3.1-8B-Instruct".into()),
+        ("llm_engine".into(), "vllm".into()),
+        ("llm_tok_s".into(), "128".into()),
+        ("llm_running".into(), "3".into()),
+        ("llm_waiting".into(), "1".into()),
+        ("llm_kv_cache".into(), "64".into()),
     ])
 }
 

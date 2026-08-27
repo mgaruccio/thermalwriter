@@ -142,11 +142,38 @@ impl ResolvedDisplayOutput {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
+pub struct LlmSensorConfig {
+    /// Base URL for the inference server. Empty string enables localhost auto-probing.
+    pub url: String,
+    /// Inference engine: `auto`, `vllm`, or `sglang`.
+    pub engine: String,
+    /// Optional Bearer token for the metrics and model endpoints.
+    pub api_key: String,
+    /// HTTP read/write timeout in milliseconds (50–2000).
+    pub timeout_ms: u64,
+}
+
+impl Default for LlmSensorConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            engine: "auto".to_string(),
+            api_key: String::new(),
+            timeout_ms: 250,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SensorsConfig {
     /// How often to poll sensors in milliseconds.
     pub poll_interval_ms: u64,
     /// Override MangoHud log directory. Empty string = auto-detect.
     pub mangohud_log_dir: String,
+    /// vLLM/SGLang status endpoint configuration.
+    #[serde(default)]
+    pub llm: LlmSensorConfig,
 }
 
 impl Default for SensorsConfig {
@@ -154,6 +181,7 @@ impl Default for SensorsConfig {
         Self {
             poll_interval_ms: 2000,
             mangohud_log_dir: String::new(),
+            llm: LlmSensorConfig::default(),
         }
     }
 }
@@ -272,6 +300,19 @@ impl Config {
                 "sensors.poll_interval_ms={} out of range [100, 60000]",
                 self.sensors.poll_interval_ms
             );
+        }
+        let llm_engine = self.sensors.llm.engine.as_str();
+        if !matches!(llm_engine, "auto" | "vllm" | "sglang") {
+            anyhow::bail!("sensors.llm.engine='{llm_engine}' must be one of auto, vllm, sglang");
+        }
+        if !(50..=2000).contains(&self.sensors.llm.timeout_ms) {
+            anyhow::bail!(
+                "sensors.llm.timeout_ms={} out of range [50, 2000]",
+                self.sensors.llm.timeout_ms
+            );
+        }
+        if !self.sensors.llm.url.is_empty() && !self.sensors.llm.url.starts_with("http://") {
+            anyhow::bail!("sensors.llm.url must start with http:// (HTTPS is not supported)");
         }
         if self.xvfb.tick_rate == 0 || self.xvfb.tick_rate > 60 {
             anyhow::bail!(
@@ -811,6 +852,57 @@ mod tests {
         std::fs::write(&layout_path, user_content).unwrap();
         builtin_layouts::seed_layout_dir(tmp.path()).unwrap();
         assert_eq!(std::fs::read_to_string(layout_path).unwrap(), user_content);
+    }
+
+    #[test]
+    fn llm_sensor_config_defaults_when_omitted() {
+        let cfg: Config = toml::from_str("[sensors]\npoll_interval_ms = 2000\n").unwrap();
+        assert!(cfg.sensors.llm.url.is_empty());
+        assert_eq!(cfg.sensors.llm.engine, "auto");
+        assert!(cfg.sensors.llm.api_key.is_empty());
+        assert_eq!(cfg.sensors.llm.timeout_ms, 250);
+    }
+
+    #[test]
+    fn llm_sensor_config_round_trips() {
+        let input = r#"
+[sensors]
+poll_interval_ms = 1000
+
+[sensors.llm]
+url = "http://127.0.0.1:8000/api"
+engine = "sglang"
+api_key = "test-token"
+timeout_ms = 800
+"#;
+        let cfg: Config = toml::from_str(input).unwrap();
+        cfg.validate().unwrap();
+        let encoded = toml::to_string(&cfg).unwrap();
+        let round_trip: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(round_trip.sensors.llm.url, "http://127.0.0.1:8000/api");
+        assert_eq!(round_trip.sensors.llm.engine, "sglang");
+        assert_eq!(round_trip.sensors.llm.api_key, "test-token");
+        assert_eq!(round_trip.sensors.llm.timeout_ms, 800);
+    }
+
+    #[test]
+    fn llm_sensor_config_rejects_invalid_values() {
+        let mut cfg = Config::default();
+        cfg.sensors.llm.engine = "other".into();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("sensors.llm.engine"), "{err}");
+
+        cfg.sensors.llm.engine = "auto".into();
+        cfg.sensors.llm.url = "https://127.0.0.1:8000".into();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("http://") && err.contains("HTTPS"), "{err}");
+
+        cfg.sensors.llm.url.clear();
+        cfg.sensors.llm.timeout_ms = 49;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("sensors.llm.timeout_ms"), "{err}");
+        cfg.sensors.llm.timeout_ms = 2001;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

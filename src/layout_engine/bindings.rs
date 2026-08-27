@@ -21,6 +21,12 @@ const SENSOR_ALIASES: &[(&str, &str, &str)] = &[
     ("net_tx", "network.transmit", "Network Transmit"),
     ("fps", "game.fps", "FPS"),
     ("frametime", "game.frametime", "Frame Time"),
+    ("llm_model", "llm.model", "LLM Model"),
+    ("llm_engine", "llm.engine", "LLM Engine"),
+    ("llm_tok_s", "llm.throughput", "LLM Tokens/s"),
+    ("llm_running", "llm.running", "LLM Running"),
+    ("llm_waiting", "llm.waiting", "LLM Waiting"),
+    ("llm_kv_cache", "llm.kv_cache", "LLM KV Cache"),
 ];
 
 /// Map a daemon/SVG sensor key onto the typed layout binding, if any.
@@ -116,5 +122,21 @@ mod tests {
             &declared
         ));
         assert!(!layout_binding_is_known("unknown.temperature", &declared));
+    }
+
+    #[test]
+    fn llm_keys_round_trip_to_typed_bindings() {
+        for (legacy, typed, label) in [
+            ("llm_model", "llm.model", "LLM Model"),
+            ("llm_engine", "llm.engine", "LLM Engine"),
+            ("llm_tok_s", "llm.throughput", "LLM Tokens/s"),
+            ("llm_running", "llm.running", "LLM Running"),
+            ("llm_waiting", "llm.waiting", "LLM Waiting"),
+            ("llm_kv_cache", "llm.kv_cache", "LLM KV Cache"),
+        ] {
+            assert_eq!(layout_binding_alias(legacy), Some(typed));
+            assert_eq!(sensor_key_for_layout_binding(typed), Some(legacy));
+            assert_eq!(layout_binding_label(typed), Some(label));
+        }
     }
 }

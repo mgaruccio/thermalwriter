@@ -4,6 +4,7 @@
 pub mod amdgpu;
 pub mod history;
 pub mod hwmon;
+pub mod llm;
 pub mod mangohud;
 #[doc(hidden)]
 pub mod mock;
@@ -327,6 +328,17 @@ impl SensorHub {
 
     /// Build the default desktop sensor stack (same order as the daemon).
     pub fn with_default_providers(mangohud_log_dir: &str) -> Self {
+        Self::with_default_providers_config(
+            mangohud_log_dir,
+            &crate::config::LlmSensorConfig::default(),
+        )
+    }
+
+    /// Build the default provider stack with daemon sensor configuration.
+    pub fn with_default_providers_config(
+        mangohud_log_dir: &str,
+        llm_config: &crate::config::LlmSensorConfig,
+    ) -> Self {
         let mut hub = Self::new();
         hub.add_provider(Box::new(hwmon::HwmonProvider::new()));
         hub.add_provider(Box::new(sysinfo_provider::SysinfoProvider::new()));
@@ -337,6 +349,7 @@ impl SensorHub {
             mangohud_log_dir,
         )));
         hub.add_provider(Box::new(rapl::RaplProvider::new()));
+        hub.add_provider(Box::new(llm::LlmProvider::from_config(llm_config)));
         hub
     }
 }

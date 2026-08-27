@@ -290,7 +290,10 @@ async fn main() -> Result<()> {
     };
 
     // Setup sensor hub with all providers
-    let mut sensor_hub = SensorHub::with_default_providers(&config.sensors.mangohud_log_dir);
+    let mut sensor_hub = SensorHub::with_default_providers_config(
+        &config.sensors.mangohud_log_dir,
+        &config.sensors.llm,
+    );
 
     // Prime providers so they discover devices, then publish the live catalog
     // for D-Bus list_sensors (includes per-key poll cost after the first poll).

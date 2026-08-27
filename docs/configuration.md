@@ -50,6 +50,22 @@ Settings related to polling frequency and custom log path detection.
   - Description: Directory containing MangoHud log files.
   - Default: `""` (empty string, auto-detects)
 
+- **`llm`** (Table)
+  - Description: vLLM/SGLang inference-server status endpoint.
+  - Default: all fields use the values below.
+  - Example:
+    ```toml
+    [sensors.llm]
+    url = ""                 # auto-probe 127.0.0.1:8000 then :30000
+    engine = "auto"          # auto | vllm | sglang
+    api_key = ""              # optional Bearer token
+    timeout_ms = 250          # 50..=2000
+    ```
+  - `url` accepts only `http://` URLs; an empty value enables localhost auto-probing.
+  - `api_key` may be omitted when `VLLM_API_KEY` or `SGLANG_API_KEY` is set in the environment.
+  - `engine` selects the metrics vocabulary, or `"auto"` detects it from the metrics response.
+  - `timeout_ms` controls the blocking HTTP read/write timeout.
+
 ---
 
 ### `[xvfb]`
