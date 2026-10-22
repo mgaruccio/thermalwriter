@@ -75,6 +75,147 @@ tick_rate = 2
 }
 
 #[test]
+fn config_parses_video_background() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[display]
+tick_rate = 15
+
+[background]
+image = "skyline.png"
+
+[background.video]
+path = "/tmp/clip.mp4"
+fps = 30
+fit = "contain"
+"#
+    )
+    .unwrap();
+
+    let cfg = Config::load(f.path()).unwrap();
+    let video = cfg
+        .background
+        .video
+        .as_ref()
+        .expect("background.video should be Some");
+    assert_eq!(video.path, "/tmp/clip.mp4");
+    assert_eq!(video.fps, 30);
+    assert_eq!(video.fit, "contain");
+}
+
+#[test]
+fn config_video_background_defaults_fps_and_fit() {
+    // Configs with a bare path must load with the documented defaults
+    // (15 fps, cover).
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[background.video]
+path = "/tmp/clip.mp4"
+"#
+    )
+    .unwrap();
+
+    let cfg = Config::load(f.path()).unwrap();
+    let video = cfg
+        .background
+        .video
+        .expect("background.video should be Some");
+    assert_eq!(video.fps, 15, "default fps should be 15");
+    assert_eq!(video.fit, "cover", "default fit should be cover");
+}
+
+#[test]
+fn config_video_background_none_when_absent() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[background]
+image = "skyline.png"
+"#
+    )
+    .unwrap();
+
+    let cfg = Config::load(f.path()).unwrap();
+    assert_eq!(cfg.background.image.as_deref(), Some("skyline.png"));
+    assert!(
+        cfg.background.video.is_none(),
+        "background.video should be None when absent"
+    );
+}
+
+#[test]
+fn config_video_background_rejects_invalid_values() {
+    for (fps, fit, label) in [
+        (0, "cover", "fps=0"),
+        (61, "cover", "fps=61"),
+        (15, "stretch", "fit=stretch"),
+    ] {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            format!("[background.video]\npath = \"/tmp/clip.mp4\"\nfps = {fps}\nfit = \"{fit}\"\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            Config::load(f.path()).is_err(),
+            "{label} should be rejected"
+        );
+    }
+
+    // Empty path is rejected even with otherwise-valid values.
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[background.video]
+path = "   "
+fps = 15
+fit = "cover"
+"#
+    )
+    .unwrap();
+    assert!(
+        Config::load(f.path()).is_err(),
+        "empty path should be rejected"
+    );
+}
+
+#[test]
+fn config_video_background_accepts_valid_values() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[background.video]
+path = "/tmp/clip.mp4"
+fps = 60
+fit = "contain"
+"#
+    )
+    .unwrap();
+
+    assert!(Config::load(f.path()).is_ok());
+    // Boundary fps=1 is also valid.
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+[background.video]
+path = "/tmp/clip.mp4"
+fps = 1
+fit = "cover"
+"#
+    )
+    .unwrap();
+    assert!(Config::load(f.path()).is_ok());
+}
+
+#[test]
 fn config_loads_from_valid_toml() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(

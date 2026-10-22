@@ -1,11 +1,23 @@
 //! Preview the daemon's PNG/SVG compositing path without USB hardware.
 //!
+//! Static image background:
 //! ```sh
 //! cargo run --example preview_composite -- \
 //!   --background assets/backgrounds/dark-gradient.png \
 //!   --overlay examples/fixtures/calibration.svg \
 //!   --output target/composite-preview.png \
 //!   --inspect 240,240
+//! ```
+//!
+//! Looping video background (requires `--features video` and an `ffmpeg`
+//! binary; `--output` is a directory of `frame-NNN.png`):
+//! ```sh
+//! cargo run --features video --example preview_composite -- \
+//!   --video /path/to/clip.mp4 \
+//!   --video-fps 15 \
+//!   --overlay examples/fixtures/calibration.svg \
+//!   --frames 10 \
+//!   --output target/video-preview
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -31,14 +43,28 @@ const TRANSPARENT_OVERLAY: &str =
 )]
 struct Options {
     /// Background PNG (or another image format accepted by the daemon).
-    #[arg(long)]
-    background: PathBuf,
+    #[arg(long, conflicts_with = "video")]
+    background: Option<PathBuf>,
     /// Optional transparent SVG/layout rendered over the background.
     #[arg(long)]
     overlay: Option<PathBuf>,
-    /// Rotated 480x480 PNG output path.
+    /// Output path: a single PNG for `--background`, or a directory of
+    /// `frame-NNN.png` for `--video`.
     #[arg(long)]
     output: PathBuf,
+    /// Local video file used as a looping animated background. Requires the
+    /// `video` build feature and an `ffmpeg` binary.
+    #[arg(long, conflicts_with = "background")]
+    video: Option<PathBuf>,
+    /// Decode/output frame rate cap for the video (1–60).
+    #[arg(long, default_value_t = 15)]
+    video_fps: u32,
+    /// Video fit: "cover" (default) or "contain".
+    #[arg(long, default_value = "cover")]
+    video_fit: String,
+    /// Number of frames to render for `--video`.
+    #[arg(long, default_value_t = 8)]
+    frames: u32,
     /// Inspect a pixel in the rotated output, written as X,Y.
     #[arg(long, value_parser = parse_pixel)]
     inspect: Option<(u32, u32)>,
@@ -140,11 +166,78 @@ fn save_rotated(frame: &RawFrame, output: &Path, rotation: u16) -> Result<(u32, 
     Ok((width, height))
 }
 
+#[cfg(feature = "video")]
+fn run_video_preview(renderer: &mut SvgRenderer<'static>, options: &Options) -> Result<()> {
+    let output_dir = &options.output;
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "failed to create video preview dir {}",
+            output_dir.display()
+        )
+    })?;
+
+    // Warm up: wait for the first decoded frame before capturing so the
+    // saved frames show the video, not the fallback fill.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while renderer.video_frame_count().unwrap_or(0) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if renderer.video_frame_count().unwrap_or(0) == 0 {
+        bail!("video produced no frames within 10s; check the file and ffmpeg");
+    }
+
+    let interval = std::time::Duration::from_millis(1000u64 / u64::from(options.video_fps.max(1)));
+    let mut last_pixmap = None;
+    for i in 1..=options.frames {
+        std::thread::sleep(interval);
+        let pixmap = renderer.render_pixmap(&SensorData::new())?;
+        last_pixmap = Some(pixmap.clone());
+        let out = output_dir.join(format!("frame-{i:03}.png"));
+        RawFrame::from_pixmap(&pixmap).save_png(
+            out.to_str()
+                .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8"))?,
+        )?;
+        println!(
+            "wrote {} (video frame {i}/{})",
+            out.display(),
+            options.frames
+        );
+    }
+    if let (Some(pixel), Some(pixmap)) = (options.inspect, last_pixmap.as_ref()) {
+        inspect_pixel(pixmap, pixel, options.rotation);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let options = Options::parse();
-    let background = Arc::new(BackgroundImage::from_file(&options.background)?);
+    if options.video.is_none() && options.background.is_none() {
+        bail!("provide one of --background or --video");
+    }
     let template = read_template(options.overlay.as_deref())?;
     let mut renderer = SvgRenderer::new(&template, WIDTH, HEIGHT)?;
+
+    if let Some(video_path) = &options.video {
+        #[cfg(feature = "video")]
+        {
+            let fit = thermalwriter::render::video::VideoFit::parse(&options.video_fit)?;
+            renderer.set_video_background(video_path, options.video_fps, fit)?;
+            run_video_preview(&mut renderer, &options)?;
+            return Ok(());
+        }
+        #[cfg(not(feature = "video"))]
+        {
+            bail!(
+                "--video ({}) requires building with the `video` feature \\
+                 (e.g. `cargo run --features video --example preview_composite -- ...`)",
+                video_path.display()
+            );
+        }
+    }
+
+    let background = Arc::new(BackgroundImage::from_file(
+        options.background.as_ref().expect("validated above"),
+    )?);
     renderer.set_background(Some(background))?;
     let pixmap = renderer.render_pixmap(&SensorData::new())?;
     if pixmap.width() != WIDTH || pixmap.height() != HEIGHT {

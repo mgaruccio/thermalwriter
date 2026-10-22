@@ -15,6 +15,9 @@ pub mod xvfb;
 #[cfg(feature = "blitz")]
 pub mod blitz;
 
+#[cfg(feature = "video")]
+pub mod video;
+
 use crate::render::background::BackgroundImage;
 use anyhow::Result;
 use std::collections::HashMap;

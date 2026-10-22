@@ -114,6 +114,10 @@ blitz = ["dep:blitz-html", "dep:blitz-dom", "dep:blitz-paint", "dep:blitz-traits
 # Swaps in dhat's heap-profiling global allocator. Not part of `default` —
 # only enabled for dedicated profiling builds (see docs/profiling.md).
 dhat-heap = ["dep:dhat"]
+# Optional looping video backgrounds, decoded by an external `ffmpeg` CLI
+# (no build-time dependencies). The default install is unaffected; enable
+# with `--features video` (see docs/configuration.md).
+video = []
 
 [profile.profiling]
 inherits = "release"

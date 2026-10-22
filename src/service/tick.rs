@@ -65,19 +65,59 @@ pub fn encode_jpeg(frame: &RawFrame, quality: u8, rotation: u16) -> Result<Vec<u
 
 struct PendingConnection {
     generation: u64,
-    outputs: Vec<OpenedDisplay>,
+    outputs: Vec<Option<OpenedDisplay>>,
     requested_at: Instant,
 }
 
 struct ActiveConnection {
     generation: u64,
-    outputs: Vec<OpenedDisplay>,
+    outputs: Vec<Option<OpenedDisplay>>,
 }
 
-fn close_outputs(outputs: &mut [OpenedDisplay]) {
-    for output in outputs.iter_mut() {
-        output.transport.close();
+fn close_outputs(outputs: &mut [Option<OpenedDisplay>]) {
+    for slot in outputs.iter_mut() {
+        if let Some(output) = slot.as_mut() {
+            output.transport.close();
+        }
     }
+}
+
+fn opened_count(outputs: &[Option<OpenedDisplay>]) -> u32 {
+    outputs.iter().filter(|slot| slot.is_some()).count() as u32
+}
+
+fn status_slot(outputs: &[Option<OpenedDisplay>]) -> Option<&OpenedDisplay> {
+    outputs
+        .first()
+        .and_then(|slot| slot.as_ref())
+        .or_else(|| outputs.iter().find_map(|slot| slot.as_ref()))
+}
+
+/// Close one independent output and leave every other slot's transport alone.
+fn isolate_fatal_output(slots: &mut [Option<OpenedDisplay>], idx: usize) -> u32 {
+    if let Some(slot) = slots.get_mut(idx) {
+        if let Some(mut output) = slot.take() {
+            output.transport.close();
+        }
+    }
+    opened_count(slots)
+}
+
+fn slot_canvases(
+    outputs: &[Option<OpenedDisplay>],
+    rotations: &[u16],
+    shared_rotation: u16,
+) -> Vec<(u32, u32)> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(idx, slot)| {
+            let rotation = rotations.get(idx).copied().unwrap_or(shared_rotation);
+            slot.as_ref()
+                .and_then(|output| output.info.oriented_dimensions(rotation).ok())
+                .unwrap_or((480, 480))
+        })
+        .collect()
 }
 
 fn try_connect(connector: &TransportConnector) -> Result<ConnectedOutputs> {
@@ -91,7 +131,8 @@ fn try_connect(connector: &TransportConnector) -> Result<ConnectedOutputs> {
 /// 2. Matching `SourceBuildResult::Ok` → apply background → `ActiveConnection`
 ///    then publish negotiated resolution + `connected=true` together
 /// 3. Stale generation results are ignored; failed pending drops and retries after 2s
-/// 4. Fatal send publishes `(0,0),false`, drops the generation, reconnects
+/// 4. Mirror fatal send publishes `(0,0),false` and reconnects the group.
+///    Independent fatal send closes only that output; survivors keep sending.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tick_loop(
     mut initial_outputs: Option<Vec<OpenedDisplay>>,
@@ -153,6 +194,7 @@ pub async fn run_tick_loop(
     let mut cached_background: Option<Arc<BackgroundImage>> = background_rx.borrow().clone();
     let mut last_poll = Instant::now() - sensor_poll_interval;
     let mut next_reconnect_at: Option<Instant> = None;
+    let mut join_rebuild_needed = false;
     // Dirty-frame skip per source. LCD holds last frame (no keepalive required).
     let mut last_frame_fingerprints: Vec<Option<u64>> = vec![None; frame_sources.len()];
 
@@ -173,7 +215,7 @@ pub async fn run_tick_loop(
             }
             active = Some(ActiveConnection {
                 generation,
-                outputs,
+                outputs: outputs.into_iter().map(Some).collect(),
             });
         }
         _ => {
@@ -353,55 +395,113 @@ pub async fn run_tick_loop(
                 .map(|t| Instant::now() >= t)
                 .unwrap_or(true);
             if due {
-                match tokio::task::block_in_place(|| try_connect(&connector)) {
-                    Ok(connected) => {
-                        generation = generation.saturating_add(1);
-                        let primary = connected.primary().clone();
-                        let count = connected.display_count();
-                        info!(
-                            "Device negotiated (pending gen {generation}, {count} display(s)): {}x{} PM={} SUB={} FBL={} {} {}",
-                            primary.width(),
-                            primary.height(),
-                            primary.pm,
-                            primary.sub,
-                            primary.fbl,
-                            primary.protocol,
-                            primary.encoding()
-                        );
-                        let canvases = if independent {
-                            let mut list = Vec::with_capacity(connected.outputs.len());
-                            for (idx, output) in connected.outputs.iter().enumerate() {
-                                let rot = rotations.get(idx).copied().unwrap_or(shared_rotation);
-                                list.push(output.info.oriented_dimensions(rot)?);
-                            }
-                            list
-                        } else {
-                            vec![primary.oriented_dimensions(shared_rotation)?]
-                        };
-                        let req = SourceBuildRequest {
-                            generation,
-                            canvases,
-                        };
-                        if source_build_tx.try_send(req).is_err() {
-                            warn!(
-                                "Failed to request source rebuild for generation {generation}; retrying"
+                if independent {
+                    match tokio::task::block_in_place(|| connector.connect_available()) {
+                        Ok(available) => {
+                            let Some(primary) = available.status_output() else {
+                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                                continue;
+                            };
+                            generation = generation.saturating_add(1);
+                            let count = available.opened_count();
+                            let primary = primary.info.clone();
+                            info!(
+                                "Independent connect (pending gen {generation}, {count}/{} display(s)): {}x{} PM={} SUB={} FBL={} {} {}",
+                                available.slots.len(),
+                                primary.width(),
+                                primary.height(),
+                                primary.pm,
+                                primary.sub,
+                                primary.fbl,
+                                primary.protocol,
+                                primary.encoding()
                             );
-                            for mut output in connected.outputs {
-                                output.transport.close();
-                            }
-                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
-                        } else {
-                            pending = Some(PendingConnection {
+                            let canvases =
+                                slot_canvases(&available.slots, &rotations, shared_rotation);
+                            let req = SourceBuildRequest {
                                 generation,
-                                outputs: connected.outputs,
-                                requested_at: Instant::now(),
-                            });
-                            next_reconnect_at = None;
+                                canvases,
+                            };
+                            if source_build_tx.try_send(req).is_err() {
+                                warn!(
+                                    "Failed to request source rebuild for generation {generation}; retrying"
+                                );
+                                let mut slots = available.slots;
+                                close_outputs(&mut slots);
+                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                            } else {
+                                let missing = available.slots.iter().any(|slot| slot.is_none());
+                                pending = Some(PendingConnection {
+                                    generation,
+                                    outputs: available.slots,
+                                    requested_at: Instant::now(),
+                                });
+                                next_reconnect_at = if missing {
+                                    Some(Instant::now() + Duration::from_secs(2))
+                                } else {
+                                    None
+                                };
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Reconnect attempt failed: {e:#}");
+                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                         }
                     }
-                    Err(e) => {
-                        debug!("Reconnect attempt failed: {e:#}");
-                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                } else {
+                    match tokio::task::block_in_place(|| try_connect(&connector)) {
+                        Ok(connected) => {
+                            generation = generation.saturating_add(1);
+                            let primary = connected.primary().clone();
+                            let count = connected.display_count();
+                            info!(
+                                "Device negotiated (pending gen {generation}, {count} display(s)): {}x{} PM={} SUB={} FBL={} {} {}",
+                                primary.width(),
+                                primary.height(),
+                                primary.pm,
+                                primary.sub,
+                                primary.fbl,
+                                primary.protocol,
+                                primary.encoding()
+                            );
+                            let canvases =
+                                vec![match primary.oriented_dimensions(shared_rotation) {
+                                    Ok(dimensions) => dimensions,
+                                    Err(error) => {
+                                        warn!("Oriented dimensions failed: {error:#}");
+                                        for mut output in connected.outputs {
+                                            output.transport.close();
+                                        }
+                                        next_reconnect_at =
+                                            Some(Instant::now() + Duration::from_secs(2));
+                                        continue;
+                                    }
+                                }];
+                            let req = SourceBuildRequest {
+                                generation,
+                                canvases,
+                            };
+                            if source_build_tx.try_send(req).is_err() {
+                                warn!(
+                                    "Failed to request source rebuild for generation {generation}; retrying"
+                                );
+                                for mut output in connected.outputs {
+                                    output.transport.close();
+                                }
+                                next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                            } else {
+                                pending = Some(PendingConnection {
+                                    generation,
+                                    outputs: connected.outputs.into_iter().map(Some).collect(),
+                                    requested_at: Instant::now(),
+                                });
+                                next_reconnect_at = None;
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Reconnect attempt failed: {e:#}");
+                            next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        }
                     }
                 }
             }
@@ -463,16 +563,22 @@ pub async fn run_tick_loop(
                             ),
                         ));
                     }
-                    for (idx, output) in conn.outputs.iter_mut().enumerate() {
-                        let source = &mut frame_sources[idx];
-                        let rotation = rotations[idx];
-                        let fingerprint = if sensors_refreshed
-                            || source.is_time_varying()
-                            || last_frame_fingerprints[idx].is_none()
-                        {
-                            source.content_fingerprint(sensors)
-                        } else {
-                            last_frame_fingerprints[idx]
+                    let mut failed_slots = Vec::new();
+                    for idx in 0..conn.outputs.len() {
+                        if conn.outputs[idx].is_none() {
+                            continue;
+                        }
+                        let rotation = rotations.get(idx).copied().unwrap_or(shared_rotation);
+                        let fingerprint = {
+                            let source = &frame_sources[idx];
+                            if sensors_refreshed
+                                || source.is_time_varying()
+                                || last_frame_fingerprints[idx].is_none()
+                            {
+                                source.content_fingerprint(sensors)
+                            } else {
+                                last_frame_fingerprints[idx]
+                            }
                         };
                         let skip = matches!(
                             (fingerprint, last_frame_fingerprints[idx]),
@@ -481,26 +587,73 @@ pub async fn run_tick_loop(
                         if skip {
                             continue;
                         }
-                        let frame = match source.render(sensors) {
+                        let frame = match frame_sources[idx].render(sensors) {
                             Ok(frame) => frame,
                             Err(error) => return Err((false, error)),
                         };
-                        let encoded =
+                        let encoded = {
+                            let Some(output) = conn.outputs[idx].as_ref() else {
+                                continue;
+                            };
                             match encode_frame(&frame, &output.info, rotation, jpeg_quality) {
                                 Ok(encoded) => encoded,
-                                Err(error) => return Err((false, error)),
-                            };
-                        if let Err(error) = output.transport.send_frame(&encoded) {
-                            if !output.transport.is_connected() {
-                                fatal_disconnect = true;
+                                Err(error) => {
+                                    warn!("Encode failed for independent output {idx}: {error:#}");
+                                    continue;
+                                }
                             }
-                            send_error = Some(error);
-                            break;
+                        };
+                        let send_result = {
+                            let Some(output) = conn.outputs[idx].as_mut() else {
+                                continue;
+                            };
+                            output.transport.send_frame(&encoded)
+                        };
+                        if let Err(error) = send_result {
+                            let fatal = conn.outputs[idx]
+                                .as_ref()
+                                .is_some_and(|output| !output.transport.is_connected());
+                            if fatal {
+                                let identity = conn.outputs[idx]
+                                    .as_ref()
+                                    .map(|output| {
+                                        format!("{:04x}:{:04x}", output.info.vid, output.info.pid)
+                                    })
+                                    .unwrap_or_else(|| format!("slot {idx}"));
+                                warn!(
+                                    "Independent display {identity} disconnected ({error:#}); keeping other displays open"
+                                );
+                                failed_slots.push(idx);
+                            } else {
+                                warn!("Send failed for independent output {idx}: {error:#}");
+                            }
+                            continue;
                         }
                         last_frame_fingerprints[idx] = fingerprint;
                         if idx == 0 {
-                            dump_frame = Some((frame, rotation, source.is_streaming()));
+                            dump_frame = Some((frame, rotation, frame_sources[idx].is_streaming()));
                         }
+                    }
+                    for idx in failed_slots {
+                        let remaining = isolate_fatal_output(&mut conn.outputs, idx);
+                        if idx < last_frame_fingerprints.len() {
+                            last_frame_fingerprints[idx] = None;
+                        }
+                        if remaining == 0 {
+                            return Err((
+                                true,
+                                anyhow::anyhow!("all independent displays disconnected"),
+                            ));
+                        }
+                        let _ = display_count_tx.send(remaining);
+                        let _ = connected_tx.send(true);
+                        if let Some(output) = status_slot(&conn.outputs) {
+                            let _ = display_tx.send(RuntimeDisplayDimensions::new(
+                                output.info.width(),
+                                output.info.height(),
+                            ));
+                        }
+                        next_reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                     }
                 } else {
                     let source = &mut frame_sources[0];
@@ -522,7 +675,7 @@ pub async fn run_tick_loop(
                             Ok(frame) => frame,
                             Err(error) => return Err((false, error)),
                         };
-                        for output in &mut conn.outputs {
+                        for output in conn.outputs.iter_mut().flatten() {
                             let (target_w, target_h) =
                                 match output.info.oriented_dimensions(rotation) {
                                     Ok(dimensions) => dimensions,
@@ -600,6 +753,84 @@ pub async fn run_tick_loop(
                     } else {
                         warn!("Render/encode/send failed: {error:#}");
                     }
+                }
+            }
+        }
+
+        // Retry only empty independent slots. Scanning an absent target does
+        // not open it, and this runs after the healthy displays have already
+        // been sent this tick.
+        if independent && pending.is_none() {
+            if join_rebuild_needed {
+                if let Some(conn) = active.as_ref() {
+                    let canvases = slot_canvases(&conn.outputs, &rotations, shared_rotation);
+                    let req = SourceBuildRequest {
+                        generation: conn.generation,
+                        canvases,
+                    };
+                    if source_build_tx.try_send(req).is_ok() {
+                        join_rebuild_needed = false;
+                    } else {
+                        warn!("Failed to request source rebuild for a joined display; retrying");
+                    }
+                }
+            }
+            let missing = active
+                .as_ref()
+                .is_some_and(|conn| conn.outputs.iter().any(|slot| slot.is_none()));
+            let due = next_reconnect_at
+                .map(|at| Instant::now() >= at)
+                .unwrap_or(false);
+            if missing && due {
+                if let Some(targets) = connector.targets.clone() {
+                    let mut filled = false;
+                    if let Some(conn) = active.as_mut() {
+                        for (idx, &(vid, pid)) in targets.iter().enumerate() {
+                            if conn.outputs.get(idx).is_some_and(|slot| slot.is_some()) {
+                                continue;
+                            }
+                            match tokio::task::block_in_place(|| connector.open_target(vid, pid)) {
+                                Ok(opened) => {
+                                    info!(
+                                        "Independent display {vid:04x}:{pid:04x} joined without resetting other displays"
+                                    );
+                                    if idx >= conn.outputs.len() {
+                                        conn.outputs.resize_with(idx + 1, || None);
+                                    }
+                                    conn.outputs[idx] = Some(opened);
+                                    if idx < last_frame_fingerprints.len() {
+                                        last_frame_fingerprints[idx] = None;
+                                    }
+                                    filled = true;
+                                }
+                                Err(error) => {
+                                    debug!(
+                                        "Independent target {vid:04x}:{pid:04x} still absent: {error:#}"
+                                    );
+                                }
+                            }
+                        }
+                        if filled {
+                            let remaining = opened_count(&conn.outputs);
+                            let _ = display_count_tx.send(remaining);
+                            let _ = connected_tx.send(true);
+                            if let Some(output) = status_slot(&conn.outputs) {
+                                let _ = display_tx.send(RuntimeDisplayDimensions::new(
+                                    output.info.width(),
+                                    output.info.height(),
+                                ));
+                            }
+                            join_rebuild_needed = true;
+                        }
+                    }
+                    let still_missing = active
+                        .as_ref()
+                        .is_some_and(|conn| conn.outputs.iter().any(|slot| slot.is_none()));
+                    next_reconnect_at = if still_missing || join_rebuild_needed {
+                        Some(Instant::now() + Duration::from_secs(2))
+                    } else {
+                        None
+                    };
                 }
             }
         }
@@ -733,32 +964,35 @@ fn handle_source_result(
             last_frame_fingerprints.resize(frame_sources.len(), None);
             if pending_match {
                 let connection = pending.take().expect("pending_match");
-                let primary = connection
-                    .outputs
-                    .first()
-                    .map(|output| &output.info)
-                    .expect("pending connection must have outputs");
+                let primary = status_slot(&connection.outputs)
+                    .expect("pending connection must have an open output");
+                let count = opened_count(&connection.outputs);
                 info!(
                     "ActiveConnection generation {}: {} display(s), primary {}x{} {} {}",
                     connection.generation,
-                    connection.outputs.len(),
-                    primary.width(),
-                    primary.height(),
-                    primary.protocol,
-                    primary.encoding()
+                    count,
+                    primary.info.width(),
+                    primary.info.height(),
+                    primary.info.protocol,
+                    primary.info.encoding()
                 );
                 let _ = display_tx.send(RuntimeDisplayDimensions::new(
-                    primary.width(),
-                    primary.height(),
+                    primary.info.width(),
+                    primary.info.height(),
                 ));
-                let _ = display_count_tx.send(connection.outputs.len() as u32);
+                let _ = display_count_tx.send(count);
                 let _ = connected_tx.send(true);
                 let _ = generation_tx.send(connection.generation);
+                let missing = connection.outputs.iter().any(|slot| slot.is_none());
                 *active = Some(ActiveConnection {
                     generation: connection.generation,
                     outputs: connection.outputs,
                 });
-                *next_reconnect_at = None;
+                *next_reconnect_at = if missing {
+                    Some(Instant::now() + Duration::from_secs(2))
+                } else {
+                    None
+                };
             } else {
                 info!(
                     "Frame source swapped for active generation {generation}, revision {source_revision}"
@@ -834,5 +1068,64 @@ mod tests {
         let via_bytes_rot =
             encode_jpeg_bytes(&rotated, w, h, quality).expect("bytes rotate encode");
         assert_eq!(via_tick_rot, via_bytes_rot);
+    }
+
+    #[test]
+    fn fatal_secondary_closes_only_that_output() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::transport::discovery::OpenedDisplay;
+        use crate::transport::profile::device_info_from_fixture;
+        use crate::transport::{EncodedFrame, Transport};
+
+        struct CloseProbe {
+            closed: Arc<AtomicBool>,
+        }
+
+        impl Transport for CloseProbe {
+            fn handshake(&mut self) -> anyhow::Result<crate::transport::DeviceInfo> {
+                unreachable!("handshake is not used")
+            }
+
+            fn send_frame(&mut self, _frame: &EncodedFrame) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn close(&mut self) {
+                self.closed.store(true, Ordering::SeqCst);
+            }
+
+            fn is_connected(&self) -> bool {
+                !self.closed.load(Ordering::SeqCst)
+            }
+        }
+
+        let primary_closed = Arc::new(AtomicBool::new(false));
+        let secondary_closed = Arc::new(AtomicBool::new(false));
+        let info = device_info_from_fixture("bulk-87ad-70db-pm4-sub5-fbl72").expect("fixture");
+        let mut slots = vec![
+            Some(OpenedDisplay {
+                transport: Box::new(CloseProbe {
+                    closed: Arc::clone(&primary_closed),
+                }),
+                info: info.clone(),
+            }),
+            Some(OpenedDisplay {
+                transport: Box::new(CloseProbe {
+                    closed: Arc::clone(&secondary_closed),
+                }),
+                info,
+            }),
+        ];
+
+        let remaining = super::isolate_fatal_output(&mut slots, 1);
+
+        assert_eq!(remaining, 1);
+        assert!(slots[0].is_some());
+        assert!(slots[1].is_none());
+        assert!(!primary_closed.load(Ordering::SeqCst));
+        assert!(secondary_closed.load(Ordering::SeqCst));
+        assert!(slots[0].as_ref().unwrap().transport.is_connected());
     }
 }

@@ -117,7 +117,7 @@ thermalwriter implements protocol support for the USB IDs below. Evidence is gro
 - User-session systemd daemon with D-Bus control commands.
 - Responsive SVG and legacy HTML layout renderers targeting negotiated native resolutions from portrait through ultrawide.
 - Sensor providers for hwmon, sysinfo, AMDGPU, NVIDIA, MangoHud, and Intel RAPL.
-- Global background image support for PNG/JPEG assets.
+- Global background image support for PNG/JPEG assets, plus an optional looping video background composited behind the layout (opt-in `video` feature; uses the system `ffmpeg`, no added build dependencies).
 - Xvfb capture mode for streaming any X11 application onto the LCD, with built-in presets for conky, cava, and btop (session-only; never persisted as a boot default).
 - Optional Tauri/Svelte configuration GUI under `gui/`, including a Stream tab with a live preview and one-click overlay color suggestions derived from the selected background's dominant colors.
 - No hardware required for layout previews and most tests.
@@ -272,6 +272,17 @@ cargo run --example preview_composite -- \
   --rotation 180
 ```
 
+Video backgrounds use the same preview path (`--video` instead of `--background`; `--output` is a directory of frames). Requires the `video` build feature and an `ffmpeg` binary — see [`docs/configuration.md`](docs/configuration.md):
+
+```sh
+cargo run --features video --example preview_composite -- \
+  --video /path/to/clip.mp4 \
+  --video-fps 15 \
+  --overlay examples/fixtures/calibration.svg \
+  --frames 10 \
+  --output target/video-preview
+```
+
 Render to hardware for a short mock-data run:
 
 ```sh
@@ -349,11 +360,16 @@ sharing the same `VID:PID` cannot be targeted individually unless you use
 `THERMALWRITER_TRANSPORT=null` and optionally select a negotiated fixture with
 `THERMALWRITER_PROFILE=<fixture-id>`.
 
-Mirror/`[[displays]]` membership is evaluated when the group connects. Plugging
-in an additional screen while another is already active currently requires a
-daemon restart. A fatal write/disconnect resets the whole group; the daemon
-then reconnects the displays still present, so the surviving screen may pause
-briefly.
+Mirror membership is evaluated when the group connects. Plugging in an
+additional mirrored screen while another is already active currently requires a
+daemon restart. A fatal write/disconnect in mirror mode resets the whole group;
+the daemon then reconnects the displays still present, so the surviving screen
+may pause briefly.
+
+Independent `[[displays]]` outputs stay isolated. A missing or disconnected
+panel does not close the others, and the survivors keep receiving frames. The
+daemon retries only the absent target and opens it when it reappears, without
+restarting the healthy USB session.
 
 List native resolutions and render the visual evidence matrix:
 
