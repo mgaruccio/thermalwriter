@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - Layout engine: typed `.layout.toml` is the new owner authoring path (shared Rust solver/renderer for GUI, `preview_layout`, and daemon). Legacy SVG/Tera and HTML files stay untouched and are not imported by Layout Studio.
 
 ### Fixed
+- Independent `[[displays]]`: an absent or disconnected cooler no longer drops the remaining displays to the boot logo. Open outputs keep their USB session and keep receiving frames; missing targets are retried on their own.
 - Dual-display discovery: bulk `validate-device` opens the explicitly selected unit when a peer HID cooler remains attached.
 - Validator operator UX: stage banners, hold-while-prompt visual cards, durable stdin reader (fixes post-reconnect hang before report write), soak progress logging.
 

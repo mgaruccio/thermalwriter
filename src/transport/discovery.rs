@@ -7,7 +7,7 @@
 //! Scan for Thermalright full-pixel LCDs and connect the selected device.
 
 use anyhow::{Context, Result, bail};
-use log::info;
+use log::{info, warn};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -668,6 +668,56 @@ pub fn select_target_devices(
     Ok(selected)
 }
 
+/// Select one device per independent target, skipping targets that are absent.
+///
+/// The result is aligned with `targets`. `None` means that `VID:PID` is not
+/// present. Duplicate targets still error. A missing target does not fail the
+/// others: callers open only the `Some` slots and leave the rest disconnected.
+pub fn select_available_targets(
+    devices: &[DiscoveredDevice],
+    targets: &[(u16, u16)],
+) -> Result<Vec<Option<DiscoveredDevice>>> {
+    if targets.is_empty() {
+        bail!("select_available_targets requires at least one VID:PID target");
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    for &(vid, pid) in targets {
+        if !seen_targets.insert((vid, pid)) {
+            bail!(
+                "duplicate independent target {:04x}:{:04x}; use distinct VID:PIDs or display.device=\"all\" to mirror duplicates",
+                vid,
+                pid
+            );
+        }
+    }
+
+    let mut pool = devices.to_vec();
+    sort_discovered(&mut pool);
+    let mut selected = Vec::with_capacity(targets.len());
+    let mut used = vec![false; pool.len()];
+
+    for &(vid, pid) in targets {
+        let mut found = None;
+        for (idx, candidate) in pool.iter().enumerate() {
+            if used[idx] {
+                continue;
+            }
+            if candidate.vid == vid && candidate.pid == pid {
+                found = Some(idx);
+                break;
+            }
+        }
+        match found {
+            Some(idx) => {
+                used[idx] = true;
+                selected.push(Some(pool[idx].clone()));
+            }
+            None => selected.push(None),
+        }
+    }
+    Ok(selected)
+}
+
 /// Select every device matching `selector` in deterministic order.
 ///
 /// For `all`, returns all supported displays (including duplicate VID:PID units).
@@ -790,6 +840,27 @@ impl ConnectedOutputs {
     }
 }
 
+/// Independent targets aligned with config order. Missing panels are `None`
+/// and must not be treated as a failure of the open slots.
+pub struct AvailableOutputs {
+    pub slots: Vec<Option<OpenedDisplay>>,
+}
+
+impl AvailableOutputs {
+    pub fn opened_count(&self) -> u32 {
+        self.slots.iter().filter(|slot| slot.is_some()).count() as u32
+    }
+
+    /// Prefer the configured primary (slot 0) when it is open; otherwise the
+    /// first open slot. `None` only when every slot is disconnected.
+    pub fn status_output(&self) -> Option<&OpenedDisplay> {
+        self.slots
+            .first()
+            .and_then(|slot| slot.as_ref())
+            .or_else(|| self.slots.iter().find_map(|slot| slot.as_ref()))
+    }
+}
+
 fn open_all_discovered(devices: &[DiscoveredDevice]) -> Result<Vec<OpenedDisplay>> {
     let mut opened = Vec::with_capacity(devices.len());
     for device in devices {
@@ -807,6 +878,32 @@ fn open_all_discovered(devices: &[DiscoveredDevice]) -> Result<Vec<OpenedDisplay
         }
     }
     Ok(opened)
+}
+
+/// Open each present target independently. A failure closes only that attempt
+/// and leaves already-opened siblings untouched.
+fn open_available_slots(selected: &[Option<DiscoveredDevice>]) -> Vec<Option<OpenedDisplay>> {
+    let mut slots = Vec::with_capacity(selected.len());
+    for device in selected {
+        let Some(device) = device else {
+            slots.push(None);
+            continue;
+        };
+        match open_discovered(device) {
+            Ok((transport, info)) => {
+                info!("Selected device {}", device.identity());
+                slots.push(Some(OpenedDisplay { transport, info }));
+            }
+            Err(error) => {
+                warn!(
+                    "Independent target {:04x}:{:04x} failed to open ({error:#}); keeping other displays open",
+                    device.vid, device.pid
+                );
+                slots.push(None);
+            }
+        }
+    }
+    slots
 }
 
 fn null_connected_outputs(info: DeviceInfo) -> Result<ConnectedOutputs> {
@@ -970,6 +1067,56 @@ impl TransportConnector {
         open_all_discovered(&selected)
             .map(|outputs| ConnectedOutputs { outputs })
             .map_err(HardwareConnectError::Failed)
+    }
+
+    /// Open whatever independent targets are present.
+    ///
+    /// Absent targets become `None` slots. This does not close or reopen a
+    /// target that the caller already holds; callers must only use it when no
+    /// slot is open yet. Returns an error only when every target is absent or
+    /// failed to open, so a present primary still connects.
+    pub fn connect_available(&self) -> Result<AvailableOutputs> {
+        let targets = self
+            .targets
+            .as_deref()
+            .context("connect_available requires independent targets")?;
+        if targets.is_empty() {
+            bail!("connect_available requires at least one VID:PID");
+        }
+        let force_null = matches!(
+            transport_from_env(std::env::var("THERMALWRITER_TRANSPORT").ok().as_deref()),
+            TransportKind::Null
+        );
+        if force_null {
+            bail!("independent partial connect is not supported with null transport");
+        }
+        let devices = scan_devices()?;
+        let selected = select_available_targets(&devices, targets)?;
+        let slots = open_available_slots(&selected);
+        let opened = slots.iter().filter(|slot| slot.is_some()).count();
+        if opened == 0 {
+            bail!(
+                "no independent LCD targets are available (0/{} configured)",
+                targets.len()
+            );
+        }
+        if opened < targets.len() {
+            info!(
+                "Independent connect opened {opened}/{} display(s); absent targets stay disconnected without resetting open displays",
+                targets.len()
+            );
+        }
+        Ok(AvailableOutputs { slots })
+    }
+
+    /// Open one configured target. Errors without opening anything when that
+    /// VID:PID is not in the current scan, so a retry cannot block on an
+    /// unplugged device.
+    pub fn open_target(&self, vid: u16, pid: u16) -> Result<OpenedDisplay> {
+        let devices = scan_devices()?;
+        let selected = select_target_devices(&devices, &[(vid, pid)])?;
+        let (transport, info) = open_discovered(&selected[0])?;
+        Ok(OpenedDisplay { transport, info })
     }
 }
 
@@ -1531,6 +1678,24 @@ mod tests {
         let a = sample_device(2);
         let err = select_target_devices(&[a], &[(0x0416, 0x5302)]).unwrap_err();
         assert!(err.to_string().contains("0416:5302"), "{err}");
+    }
+
+    #[test]
+    fn select_available_targets_keeps_present_primary_when_secondary_is_absent() {
+        let primary = sample_device(2);
+        let selected =
+            select_available_targets(&[primary.clone()], &[(0x87ad, 0x70db), (0x0416, 0x5302)])
+                .expect("partial selection");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].as_ref().map(|d| d.pid), Some(0x70db));
+        assert!(selected[1].is_none());
+    }
+
+    #[test]
+    fn select_available_targets_all_absent_is_all_none() {
+        let selected =
+            select_available_targets(&[], &[(0x87ad, 0x70db), (0x0416, 0x5302)]).expect("empty");
+        assert!(selected.iter().all(|slot| slot.is_none()));
     }
 
     #[test]

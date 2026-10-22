@@ -189,6 +189,7 @@ Rules:
   describe the primary only; `display_count` reports how many outputs are
   active.
 - Each output renders at its own oriented size (no cross-output letterbox).
-- Shared sensors/theme/background; fatal disconnect still resets the whole
-  group then reconnects.
+- Shared sensors/theme/background. A fatal disconnect closes only the failed
+  output. Surviving displays keep their USB session and continue to receive
+  frames. Absent targets are retried without reopening healthy displays.
 

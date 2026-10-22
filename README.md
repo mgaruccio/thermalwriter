@@ -360,11 +360,16 @@ sharing the same `VID:PID` cannot be targeted individually unless you use
 `THERMALWRITER_TRANSPORT=null` and optionally select a negotiated fixture with
 `THERMALWRITER_PROFILE=<fixture-id>`.
 
-Mirror/`[[displays]]` membership is evaluated when the group connects. Plugging
-in an additional screen while another is already active currently requires a
-daemon restart. A fatal write/disconnect resets the whole group; the daemon
-then reconnects the displays still present, so the surviving screen may pause
-briefly.
+Mirror membership is evaluated when the group connects. Plugging in an
+additional mirrored screen while another is already active currently requires a
+daemon restart. A fatal write/disconnect in mirror mode resets the whole group;
+the daemon then reconnects the displays still present, so the surviving screen
+may pause briefly.
+
+Independent `[[displays]]` outputs stay isolated. A missing or disconnected
+panel does not close the others, and the survivors keep receiving frames. The
+daemon retries only the absent target and opens it when it reappears, without
+restarting the healthy USB session.
 
 List native resolutions and render the visual evidence matrix:
 
